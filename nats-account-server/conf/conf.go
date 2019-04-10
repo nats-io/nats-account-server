@@ -13,10 +13,10 @@ type TLSConf struct {
 
 // HTTPConfig is used to specify the host/port/tls for an HTTP server
 type HTTPConfig struct {
-	HTTPHost  string
-	HTTPPort  int
-	HTTPSPort int
-	TLS       TLSConf
+	HTTP         HostPort
+	TLS          TLSConf
+	ReadTimeout  int //Seconds
+	WriteTimeout int //Seconds
 }
 
 // NATSConfig configuration for a NATS connection
@@ -35,6 +35,8 @@ type NATSConfig struct {
 // AccountServerConfig is the root structure for an account server configuration file.
 type AccountServerConfig struct {
 	Logging logging.Config
+	NATS    NATSConfig
+	HTTP    HTTPConfig
 }
 
 // DefaultServerConfig generates a default configuration with

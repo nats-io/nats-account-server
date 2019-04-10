@@ -2,12 +2,16 @@ package core
 
 import (
 	"fmt"
+	"log"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/nats-io/account-server/nats-account-server/conf"
 	"github.com/nats-io/account-server/nats-account-server/logging"
+	nats "github.com/nats-io/go-nats"
 )
 
 var version = "0.0-dev"
@@ -21,6 +25,13 @@ type AccountServer struct {
 
 	logger logging.Logger
 	config conf.AccountServerConfig
+
+	nats *nats.Conn
+
+	listener net.Listener
+	http     *http.Server
+	protocol string
+	port     int
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -38,6 +49,12 @@ func NewAccountServer() *AccountServer {
 // Logger hosts a shared logger
 func (server *AccountServer) Logger() logging.Logger {
 	return server.logger
+}
+
+func (server *AccountServer) checkRunning() bool {
+	server.runningLock.Lock()
+	defer server.runningLock.Unlock()
+	return server.running
 }
 
 // LoadConfigFile initialize the server's configuration from a file
@@ -88,26 +105,13 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
-	/*
-		if err := server.connectToNATS(); err != nil {
-			return err
-		}
+	if err := server.connectToNATS(); err != nil {
+		return err
+	}
 
-		if err := server.connectToSTAN(); err != nil {
-			return err
-		}
-
-		if err := server.initializeConnectors(); err != nil {
-			return err
-		}
-
-		if err := server.startConnectors(); err != nil {
-			return err
-		}
-
-		if err := server.startMonitoring(); err != nil {
-			return err
-		}*/
+	if err := server.startHTTP(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -124,4 +128,18 @@ func (server *AccountServer) Stop() {
 	server.logger.Noticef("stopping account server")
 
 	server.running = false
+
+	if server.nats != nil {
+		server.nats.Close()
+		server.logger.Noticef("disconnected from NATS")
+	}
+
+	server.stopHTTP()
+}
+
+// FatalError stops the server, prints the messages and exits
+func (server *AccountServer) FatalError(format string, args ...interface{}) {
+	server.Stop()
+	log.Fatalf(format, args...)
+	os.Exit(-1)
 }
