@@ -42,8 +42,8 @@ func (server *AccountServer) startHTTP() error {
 
 	httpServer := &http.Server{
 		Handler:      xrs.Handler(router),
-		ReadTimeout:  time.Duration(conf.ReadTimeout) * time.Second,
-		WriteTimeout: time.Duration(conf.WriteTimeout) * time.Second,
+		ReadTimeout:  time.Duration(conf.ReadTimeout) * time.Millisecond,
+		WriteTimeout: time.Duration(conf.WriteTimeout) * time.Millisecond,
 	}
 
 	server.http = httpServer
@@ -116,6 +116,7 @@ func (server *AccountServer) createHTTPListener() error {
 
 	server.protocol = "https"
 	server.port = listen.Addr().(*net.TCPAddr).Port
+	server.hostPort = listen.Addr().(*net.TCPAddr).String()
 	server.listener = listen
 	return nil
 }

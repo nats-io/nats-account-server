@@ -6,10 +6,11 @@ import (
 
 // AccountServerConfig is the root structure for an account server configuration file.
 type AccountServerConfig struct {
-	Logging logging.Config
-	NATS    NATSConfig
-	HTTP    HTTPConfig
-	Store   StoreConfig
+	Logging  logging.Config
+	NATS     NATSConfig
+	HTTP     HTTPConfig
+	Store    StoreConfig
+	Operator OperatorConfig
 }
 
 // TLSConf holds the configuration for a TLS connection/server
@@ -23,8 +24,8 @@ type TLSConf struct {
 type HTTPConfig struct {
 	HTTP         HostPort
 	TLS          TLSConf
-	ReadTimeout  int //Seconds
-	WriteTimeout int //Seconds
+	ReadTimeout  int //milliseconds
+	WriteTimeout int //milliseconds
 }
 
 // NATSConfig configuration for a NATS connection
@@ -51,6 +52,14 @@ type StoreConfig struct {
 	ReadOnly bool   // flag to indicate read-only status
 }
 
+// OperatorConfig is used to provide an operator JWT or set of keys for
+// checking if a JWT can be updated, trusted keys has precendent
+// over the JWT path
+type OperatorConfig struct {
+	JWTPath     string   // path to the operator JWT
+	TrustedKeys []string // list of trusted keys
+}
+
 // DefaultServerConfig generates a default configuration with
 // logging set to colors, time, debug and trace
 func DefaultServerConfig() AccountServerConfig {
@@ -62,8 +71,13 @@ func DefaultServerConfig() AccountServerConfig {
 			Trace:  false,
 		},
 		HTTP: HTTPConfig{
-			ReadTimeout:  5,
-			WriteTimeout: 5,
+			ReadTimeout:  5000,
+			WriteTimeout: 5000,
+		},
+		NATS: NATSConfig{
+			ConnectTimeout: 5000,
+			ReconnectWait:  1000,
+			MaxReconnects:  0,
 		},
 		Store: StoreConfig{}, // in memory store
 	}

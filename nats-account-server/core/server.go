@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/nats-io/account-server/nats-account-server/logging"
 	"github.com/nats-io/account-server/nats-account-server/store"
 	nats "github.com/nats-io/go-nats"
+	"github.com/nats-io/jwt"
 )
 
 var version = "0.0-dev"
@@ -33,8 +35,10 @@ type AccountServer struct {
 	http     *http.Server
 	protocol string
 	port     int
+	hostPort string
 
-	jwtStore store.JWTStore
+	jwtStore    store.JWTStore
+	trustedKeys []string
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -108,6 +112,12 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
+	err := server.initializeTrustedKeys()
+
+	if err != nil {
+		return err
+	}
+
 	store, err := server.createStore()
 
 	if err != nil {
@@ -152,6 +162,40 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 
 	server.logger.Noticef("creating an in-memory store")
 	return store.NewMemJWTStore(), nil
+}
+
+func (server *AccountServer) initializeTrustedKeys() error {
+	config := server.config.Operator
+
+	if len(config.TrustedKeys) > 0 {
+		server.trustedKeys = config.TrustedKeys
+		return nil
+	}
+
+	opPath := config.JWTPath
+
+	if opPath == "" {
+		return nil
+	}
+
+	data, err := ioutil.ReadFile(opPath)
+	if err != nil {
+		return err
+	}
+
+	operatorJWT, err := jwt.DecodeOperatorClaims(string(data))
+	if err != nil {
+		return err
+	}
+
+	keys := []string{}
+
+	keys = append(keys, operatorJWT.Subject)
+	keys = append(keys, operatorJWT.SigningKeys...)
+
+	server.trustedKeys = keys
+
+	return nil
 }
 
 // Stop the account server

@@ -34,7 +34,7 @@ func (server *AccountServer) JWTHelp(w http.ResponseWriter, r *http.Request, par
 }
 
 // UpdateAccountJWT is the target of the post request that updates an account JWT
-// Sends a nats notificaiton
+// Sends a nats notification
 func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
 	theJWT, err := ioutil.ReadAll(r.Body)
@@ -51,18 +51,29 @@ func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if claim.Issuer != claim.Subject {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer/Subject pair in request", claim.Subject, err, w)
-		return
-	}
+	issuer := claim.Issuer
 
-	if !nkeys.IsValidPublicAccountKey(claim.Issuer) {
+	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
 		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer in request", claim.Issuer, err, w)
 		return
 	}
 
 	if !nkeys.IsValidPublicAccountKey(claim.Subject) {
 		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Subject in request", claim.Subject, err, w)
+		return
+	}
+
+	ok := false
+
+	for _, k := range server.trustedKeys {
+		if k == issuer {
+			ok = true
+			break
+		}
+	}
+
+	if !ok {
+		server.sendErrorResponse(http.StatusBadRequest, "untrusted issuer in request", claim.Subject, err, w)
 		return
 	}
 
@@ -208,19 +219,19 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	}
 	header := jwt.Header{}
 	if err := json.Unmarshal(headerString, &header); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error unmarshalling account claim header", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error unmarshaling account claim header", pubKey, err, w)
 		return
 	}
 
 	headerJSON, err := json.MarshalIndent(header, "", "    ")
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshalling account claim header", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim header", pubKey, err, w)
 		return
 	}
 
 	claimJSON, err := json.MarshalIndent(claim, "", "    ")
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshalling account claim", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim", pubKey, err, w)
 		return
 	}
 
@@ -256,7 +267,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	})
 
 	if subErr != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshalling account tokens", pubKey, subErr, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account tokens", pubKey, subErr, w)
 		return
 	}
 
@@ -307,7 +318,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	})
 
 	if subErr != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshalling account tokens", pubKey, subErr, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account tokens", pubKey, subErr, w)
 		return
 	}
 
