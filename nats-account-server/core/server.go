@@ -108,6 +108,14 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
+	store, err := server.createStore()
+
+	if err != nil {
+		return err
+	}
+
+	server.jwtStore = store
+
 	if err := server.connectToNATS(); err != nil {
 		return err
 	}
@@ -117,6 +125,33 @@ func (server *AccountServer) Start() error {
 	}
 
 	return nil
+}
+
+func (server *AccountServer) createStore() (store.JWTStore, error) {
+	config := server.config.Store
+
+	if config.NSC != "" {
+		server.logger.Noticef("creating a read-only store for the NSC folder at %s", config.NSC)
+		return store.NewNSCJWTStore(config.NSC)
+	}
+
+	if config.Dir != "" {
+		if config.ReadOnly {
+			server.logger.Noticef("creating a read-only store at %s", config.Dir)
+			return store.NewImmutableDirJWTStore(config.Dir)
+		}
+
+		server.logger.Noticef("creating a store at %s", config.Dir)
+		return store.NewDirJWTStore(config.Dir, true)
+	}
+
+	if config.ReadOnly {
+		server.logger.Noticef("creating a read-only, empty, in-memory store")
+		return store.NewImmutableMemJWTStore(map[string]string{}), nil
+	}
+
+	server.logger.Noticef("creating an in-memory store")
+	return store.NewMemJWTStore(), nil
 }
 
 // Stop the account server
