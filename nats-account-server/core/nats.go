@@ -1,10 +1,16 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	nats "github.com/nats-io/go-nats"
+	"github.com/nats-io/jwt"
+)
+
+const (
+	accountNotificationFormat = "$SYS.ACCOUNT.%s.CLAIMS.UPDATE"
 )
 
 func (server *AccountServer) natsError(nc *nats.Conn, sub *nats.Subscription, err error) {
@@ -36,16 +42,19 @@ func (server *AccountServer) natsDiscoveredServers(nc *nats.Conn) {
 
 // assumes the lock is held by the caller
 func (server *AccountServer) connectToNATS() error {
-	server.runningLock.Lock()
-	defer server.runningLock.Unlock()
-
 	if !server.running {
 		return nil // already stopped
 	}
 
+	config := server.config.NATS
+
+	if len(config.Servers) == 0 {
+		server.logger.Noticef("NATS is not configured, server will not fire notifications on update")
+		return nil
+	}
+
 	server.logger.Noticef("connecting to NATS for notifications")
 
-	config := server.config.NATS
 	options := []nats.Option{nats.MaxReconnects(config.MaxReconnects),
 		nats.ReconnectWait(time.Duration(config.ReconnectWait) * time.Millisecond),
 		nats.Timeout(time.Duration(config.ConnectTimeout) * time.Millisecond),
@@ -74,4 +83,15 @@ func (server *AccountServer) connectToNATS() error {
 
 	server.nats = nc
 	return nil
+}
+
+func (server *AccountServer) sendAccountNotification(claim *jwt.AccountClaims, theJWT []byte) error {
+	pubKey := claim.Subject
+
+	if server.nats == nil {
+		server.logger.Noticef("skipping notification for %s, no NATS configured", ShortKey(pubKey))
+	}
+
+	subject := fmt.Sprintf(accountNotificationFormat, pubKey)
+	return server.nats.Publish(subject, theJWT)
 }

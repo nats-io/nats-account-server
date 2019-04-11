@@ -147,16 +147,15 @@ func (server *AccountServer) makeTLSConfig(tlsConf conf.TLSConf) (*tls.Config, e
 func (server *AccountServer) buildRouter() (*httprouter.Router, error) {
 	r := httprouter.New()
 
-	/*
-		jh := NewJWTHandler(ctx)
-		r.POST("/jwt/v1/accounts/:pubkey", jh.UpdateAccountJWT)
-		r.GET("/jwt/v1/accounts/:pubkey", jh.GetAccountJWT)
-		r.GET("/jwt/v1/accounts/", jh.GetAccountJWT) // Server test point
-		r.GET("/jwt/v1/accounts", jh.GetAccountJWT)  // Server test point
+	r.GET("/jwt/v1/help", server.JWTHelp)
 
-		r.GET("/jwt/v1/help", jh.JWTHelp)
-		r.GET("/jwt/v1/synadia", jh.SynadiaJWT)
-	*/
+	if !server.jwtStore.IsReadOnly() {
+		r.POST("/jwt/v1/accounts/:pubkey", server.UpdateAccountJWT)
+	}
+
+	r.GET("/jwt/v1/accounts/:pubkey", server.GetAccountJWT)
+	r.GET("/jwt/v1/accounts/", server.GetAccountJWT) // Server test point
+	r.GET("/jwt/v1/accounts", server.GetAccountJWT)  // Server test point
 
 	return r, nil
 }

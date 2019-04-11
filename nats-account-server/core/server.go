@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/account-server/nats-account-server/conf"
 	"github.com/nats-io/account-server/nats-account-server/logging"
+	"github.com/nats-io/account-server/nats-account-server/store"
 	nats "github.com/nats-io/go-nats"
 )
 
@@ -18,8 +19,8 @@ var version = "0.0-dev"
 
 // AccountServer is the core structure for the server.
 type AccountServer struct {
-	runningLock sync.Mutex
-	running     bool
+	sync.Mutex
+	running bool
 
 	startTime time.Time
 
@@ -32,6 +33,8 @@ type AccountServer struct {
 	http     *http.Server
 	protocol string
 	port     int
+
+	jwtStore store.JWTStore
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -52,8 +55,8 @@ func (server *AccountServer) Logger() logging.Logger {
 }
 
 func (server *AccountServer) checkRunning() bool {
-	server.runningLock.Lock()
-	defer server.runningLock.Unlock()
+	server.Lock()
+	defer server.Unlock()
 	return server.running
 }
 
@@ -91,8 +94,8 @@ func (server *AccountServer) LoadConfig(config conf.AccountServerConfig) error {
 
 // Start the server, will lock the server, assumes the config is loaded
 func (server *AccountServer) Start() error {
-	server.runningLock.Lock()
-	defer server.runningLock.Unlock()
+	server.Lock()
+	defer server.Unlock()
 
 	if server.logger != nil {
 		server.logger.Close()
@@ -118,8 +121,8 @@ func (server *AccountServer) Start() error {
 
 // Stop the account server
 func (server *AccountServer) Stop() {
-	server.runningLock.Lock()
-	defer server.runningLock.Unlock()
+	server.Lock()
+	defer server.Unlock()
 
 	if !server.running {
 		return // already stopped

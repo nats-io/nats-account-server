@@ -4,6 +4,13 @@ import (
 	"github.com/nats-io/account-server/nats-account-server/logging"
 )
 
+// AccountServerConfig is the root structure for an account server configuration file.
+type AccountServerConfig struct {
+	Logging logging.Config
+	NATS    NATSConfig
+	HTTP    HTTPConfig
+}
+
 // TLSConf holds the configuration for a TLS connection/server
 type TLSConf struct {
 	Key  string
@@ -30,13 +37,6 @@ type NATSConfig struct {
 	TLS      TLSConf
 	Username string
 	Password string
-}
-
-// AccountServerConfig is the root structure for an account server configuration file.
-type AccountServerConfig struct {
-	Logging logging.Config
-	NATS    NATSConfig
-	HTTP    HTTPConfig
 }
 
 // DefaultServerConfig generates a default configuration with
