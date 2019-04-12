@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/julienschmidt/httprouter"
@@ -100,6 +101,10 @@ func (server *AccountServer) createHTTPListener() error {
 		}
 		server.protocol = "http"
 		server.port = listen.Addr().(*net.TCPAddr).Port
+		server.hostPort = hp
+		if hp == "" || strings.HasPrefix(hp, ":") {
+			server.hostPort = fmt.Sprintf("127.0.0.1:%d", server.port)
+		}
 		server.listener = listen
 		return nil
 	}
@@ -116,7 +121,10 @@ func (server *AccountServer) createHTTPListener() error {
 
 	server.protocol = "https"
 	server.port = listen.Addr().(*net.TCPAddr).Port
-	server.hostPort = listen.Addr().(*net.TCPAddr).String()
+	server.hostPort = hp
+	if hp == "" || strings.HasPrefix(hp, ":") {
+		server.hostPort = fmt.Sprintf("127.0.0.1:%d", server.port)
+	}
 	server.listener = listen
 	return nil
 }
