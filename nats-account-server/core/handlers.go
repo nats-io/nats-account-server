@@ -1,3 +1,19 @@
+/*
+ * Copyright 2012-2019 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 package core
 
 import (
@@ -119,12 +135,15 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	shortCode := ShortKey(pubKey)
 
 	if pubKey == "" {
+		server.logger.Tracef("server sent resolver check")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	server.logger.Tracef("request for JWT for - %s", ShortKey(pubKey))
 
 	check := strings.ToLower(r.URL.Query().Get("check")) == "true"
 	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
@@ -133,8 +152,13 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	theJWT, err := server.jwtStore.Load(pubKey)
 
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
-		return
+		if server.systemAccountClaims != nil && pubKey == server.systemAccountClaims.Subject && server.systemAccountJWT != "" {
+			theJWT = server.systemAccountJWT
+			server.logger.Tracef("returning system JWT from configuration")
+		} else {
+			server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
+			return
+		}
 	}
 
 	if text {

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2012-2019 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 package core
 
 import (
@@ -29,7 +45,8 @@ type AccountServer struct {
 	logger logging.Logger
 	config conf.AccountServerConfig
 
-	nats *nats.Conn
+	nats      *nats.Conn
+	natsTimer *time.Timer
 
 	listener net.Listener
 	http     *http.Server
@@ -37,8 +54,10 @@ type AccountServer struct {
 	port     int
 	hostPort string
 
-	jwtStore    store.JWTStore
-	trustedKeys []string
+	jwtStore            store.JWTStore
+	trustedKeys         []string
+	systemAccountClaims *jwt.AccountClaims
+	systemAccountJWT    string
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -112,9 +131,11 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
-	err := server.initializeTrustedKeys()
+	if err := server.initializeTrustedKeys(); err != nil {
+		return err
+	}
 
-	if err != nil {
+	if err := server.initializeSystemAccount(); err != nil {
 		return err
 	}
 
@@ -165,14 +186,7 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 }
 
 func (server *AccountServer) initializeTrustedKeys() error {
-	config := server.config.Operator
-
-	if len(config.TrustedKeys) > 0 {
-		server.trustedKeys = config.TrustedKeys
-		return nil
-	}
-
-	opPath := config.JWTPath
+	opPath := server.config.OperatorJWTPath
 
 	if opPath == "" {
 		return nil
@@ -198,6 +212,29 @@ func (server *AccountServer) initializeTrustedKeys() error {
 	return nil
 }
 
+func (server *AccountServer) initializeSystemAccount() error {
+	jwtPath := server.config.SystemAccountJWTPath
+
+	if jwtPath == "" {
+		return nil
+	}
+
+	data, err := ioutil.ReadFile(jwtPath)
+	if err != nil {
+		return err
+	}
+
+	systemAccount, err := jwt.DecodeAccountClaims(string(data))
+	if err != nil {
+		return err
+	}
+
+	server.systemAccountClaims = systemAccount
+	server.systemAccountJWT = string(data)
+
+	return nil
+}
+
 // Stop the account server
 func (server *AccountServer) Stop() {
 	server.Lock()
@@ -210,6 +247,10 @@ func (server *AccountServer) Stop() {
 	server.logger.Noticef("stopping account server")
 
 	server.running = false
+
+	if server.natsTimer != nil {
+		server.natsTimer.Stop()
+	}
 
 	if server.nats != nil {
 		server.nats.Close()

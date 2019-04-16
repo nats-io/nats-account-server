@@ -1,3 +1,19 @@
+/*
+ * Copyright 2012-2019 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 package core
 
 import (
@@ -73,12 +89,24 @@ func (server *AccountServer) connectToNATS() error {
 		options = append(options, nats.ClientCert(config.TLS.Cert, config.TLS.Key))
 	}
 
+	if config.UserCredentials != "" {
+		options = append(options, nats.UserCredentials(config.UserCredentials))
+	}
+
 	nc, err := nats.Connect(strings.Join(config.Servers, ","),
 		options...,
 	)
 
 	if err != nil {
-		return err
+		reconnectWait := config.ReconnectWait
+		server.logger.Errorf("failed to connect to NATS, %v", err)
+		server.logger.Errorf("will try to connect again in %d milliseconds", reconnectWait)
+		server.natsTimer = time.NewTimer(time.Duration(reconnectWait) * time.Millisecond)
+		go func() {
+			<-server.natsTimer.C
+			server.connectToNATS()
+		}()
+		return nil // we will retry, don't stop server running
 	}
 
 	server.nats = nc
@@ -90,6 +118,7 @@ func (server *AccountServer) sendAccountNotification(claim *jwt.AccountClaims, t
 
 	if server.nats == nil {
 		server.logger.Noticef("skipping notification for %s, no NATS configured", ShortKey(pubKey))
+		return nil
 	}
 
 	subject := fmt.Sprintf(accountNotificationFormat, pubKey)
