@@ -242,7 +242,7 @@ func SetupTestServer(config conf.AccountServerConfig, useTLS bool, enableNats bo
 	}
 
 	server := NewAccountServer()
-	server.LoadConfig(config)
+	server.InitializeFromConfig(config)
 	err = server.Start()
 
 	if err != nil {

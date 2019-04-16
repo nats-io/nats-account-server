@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -83,9 +84,46 @@ func (server *AccountServer) checkRunning() bool {
 	return server.running
 }
 
-// LoadConfigFile initialize the server's configuration from a file
-func (server *AccountServer) LoadConfigFile(configFile string) error {
-	config := conf.DefaultServerConfig()
+// InitializeFromFlags is called from main to configure the server, the server
+// will decide what needs to happen based on the flags. On reload the same flags are
+// passed
+func (server *AccountServer) InitializeFromFlags(flags Flags) error {
+	server.config = conf.DefaultServerConfig()
+
+	if flags.NSCFolder != "" {
+		server.config.Store = conf.StoreConfig{
+			NSC: flags.NSCFolder,
+		}
+
+		operatorName := filepath.Base(flags.NSCFolder)
+		operatorPath := filepath.Join(flags.NSCFolder, fmt.Sprintf("%s.jwt", operatorName))
+
+		server.config.OperatorJWTPath = operatorPath
+	} else if flags.Directory != "" {
+		server.config.Store = conf.StoreConfig{
+			Dir:      flags.Directory,
+			ReadOnly: false,
+		}
+	}
+
+	if flags.NATSURL != "" {
+		server.config.NATS.Servers = []string{flags.NATSURL}
+	}
+
+	if flags.Creds != "" {
+		server.config.NATS.UserCredentials = flags.Creds
+	}
+
+	if flags.ConfigFile != "" {
+		return server.ApplyConfigFile(flags.ConfigFile)
+	}
+
+	return nil
+}
+
+// ApplyConfigFile applies the config file to the server's config
+func (server *AccountServer) ApplyConfigFile(configFile string) error {
+	config := server.config
 
 	if configFile == "" {
 		configFile = os.Getenv("NATS_ACCOUNT_SERVER_CONFIG")
@@ -104,13 +142,12 @@ func (server *AccountServer) LoadConfigFile(configFile string) error {
 		return err
 	}
 
-	server.config = config
 	return nil
 }
 
-// LoadConfig initialize the server's configuration to an existing config object, useful for tests
-// Does not initialize the config at all, use DefaultServerConfig() to create a default config
-func (server *AccountServer) LoadConfig(config conf.AccountServerConfig) error {
+// InitializeFromConfig initialize the server's configuration to an existing config object, useful for tests
+// Does not change the config at all, use DefaultServerConfig() to create a default config
+func (server *AccountServer) InitializeFromConfig(config conf.AccountServerConfig) error {
 	server.config = config
 	return nil
 }
@@ -192,6 +229,8 @@ func (server *AccountServer) initializeTrustedKeys() error {
 		return nil
 	}
 
+	server.logger.Noticef("loading operator from %s", opPath)
+
 	data, err := ioutil.ReadFile(opPath)
 	if err != nil {
 		return err
@@ -218,6 +257,8 @@ func (server *AccountServer) initializeSystemAccount() error {
 	if jwtPath == "" {
 		return nil
 	}
+
+	server.logger.Noticef("loading system account from %s", jwtPath)
 
 	data, err := ioutil.ReadFile(jwtPath)
 	if err != nil {

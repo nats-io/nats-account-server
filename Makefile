@@ -23,6 +23,9 @@ update:
 compile:
 	go build ./...
 
+install: build
+	go install ./...
+
 cover: test
 	go tool cover -html=./coverage.out
 

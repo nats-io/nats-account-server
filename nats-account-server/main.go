@@ -28,13 +28,16 @@ import (
 	"github.com/nats-io/account-server/nats-account-server/core"
 )
 
-var configFile string
-
 func main() {
 	var server *core.AccountServer
 	var err error
 
-	flag.StringVar(&configFile, "c", "", "configuration filepath")
+	flags := core.Flags{}
+	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, takes precedence over all other flags, can be set with $NATS_ACCOUNT_SERVER_CONFIG")
+	flag.StringVar(&flags.NSCFolder, "nsc", "", "the nsc folder to host accounts from, mutually exclusive from dir, and makes the server read-only")
+	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
+	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
+	flag.StringVar(&flags.Creds, "creds", "", "the creds file for connecting to NATS")
 	flag.Parse()
 
 	go func() {
@@ -59,7 +62,7 @@ func main() {
 				}
 				server.Stop()
 				server := core.NewAccountServer()
-				server.LoadConfigFile(configFile)
+				server.InitializeFromFlags(flags)
 				err = server.Start()
 
 				if err != nil {
@@ -76,7 +79,7 @@ func main() {
 	}()
 
 	server = core.NewAccountServer()
-	server.LoadConfigFile(configFile)
+	server.InitializeFromFlags(flags)
 	err = server.Start()
 
 	if err != nil {
