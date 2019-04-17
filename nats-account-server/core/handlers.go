@@ -146,6 +146,7 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	server.logger.Tracef("request for JWT for - %s", ShortKey(pubKey))
 
 	check := strings.ToLower(r.URL.Query().Get("check")) == "true"
+	notify := strings.ToLower(r.URL.Query().Get("notify")) == "true"
 	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
 	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
 
@@ -198,6 +199,14 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	if match := r.Header.Get("If-None-Match"); match != "" {
 		if strings.Contains(match, e) {
 			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	if notify {
+		server.logger.Tracef("trying to send notification for - %s", shortCode)
+		if err := server.sendAccountNotification(decoded, []byte(theJWT)); err != nil {
+			server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
 			return
 		}
 	}

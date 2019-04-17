@@ -49,7 +49,7 @@ Three optional query parameters are supported:
 
 ## POST /jwt/v1/accounts/<pubkey> (optional)
 
-Update, or store, an account JWT. The JWT Issuer and Subject should match the pubkey.
+Update, or store, an account JWT. The JWT Subject should match the pubkey.
 
 The JWT must be signed by the operator specified in the server's configuration.
 

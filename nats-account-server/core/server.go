@@ -90,6 +90,10 @@ func (server *AccountServer) checkRunning() bool {
 func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 	server.config = conf.DefaultServerConfig()
 
+	if flags.ConfigFile != "" {
+		return server.ApplyConfigFile(flags.ConfigFile)
+	}
+
 	if flags.NSCFolder != "" {
 		server.config.Store = conf.StoreConfig{
 			NSC: flags.NSCFolder,
@@ -114,8 +118,12 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 		server.config.NATS.UserCredentials = flags.Creds
 	}
 
-	if flags.ConfigFile != "" {
-		return server.ApplyConfigFile(flags.ConfigFile)
+	if flags.Debug || flags.DebugAndVerbose {
+		server.config.Logging.Debug = true
+	}
+
+	if flags.Verbose || flags.DebugAndVerbose {
+		server.config.Logging.Trace = true
 	}
 
 	return nil
