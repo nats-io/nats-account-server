@@ -1,6 +1,13 @@
+![NATS](logos/large-logo.png)
+
 # nats-account-server
 
-A simple HTTP/NATS server to host account JWTs for nats-server 2.0 account authentication.
+[![License][License-Image]][License-Url]
+[![ReportCard][ReportCard-Image]][ReportCard-Url]
+[![Build][Build-Status-Image]][Build-Status-Url]
+[![Coverage][Coverage-Image]][Coverage-Url]
+
+A simple HTTP server to host account JWTs for [nats-server 2.0](https://nats.io) account authentication.
 
 NATS 2.0 introduced the concept of accounts to provide secure multi-tenancy through separate subject spaces.
 These accounts are configured with JWTs that encapsulate the account settings. User JWTs are used to authenticate.
@@ -302,6 +309,15 @@ The server does depend on the nats-server repo as well as nsc, and as a result c
 
 * [NATS](https://nats.io/documentation/)
 * [NATS server](https://github.com/nats-io/gnatsd)
+
+[License-Url]: https://www.apache.org/licenses/LICENSE-2.0
+[License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
+[Build-Status-Url]: https://travis-ci.org/nats-io/account-server
+[Build-Status-Image]: https://travis-ci.org/nats-io/account-server.svg?branch=master
+[Coverage-Url]: https://coveralls.io/r/nats-io/account-server?branch=master
+[Coverage-image]: https://coveralls.io/repos/github/nats-io/account-server/badge.svg?branch=master
+[ReportCard-Url]: https://goreportcard.com/report/nats-io/account-server
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/nats-io/account-server
 
 <a name="license"></a>
 
