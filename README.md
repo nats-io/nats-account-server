@@ -24,6 +24,8 @@ account JWTs. The server in this repository is intended as a simple to use solut
 This server is also intended as an example for developers that want to implement their own version of the server for resolving
 JWTs.
 
+The nats-account-server does not have or need access to any private keys. Public keys are used to identify the operator and accounts.
+
 <a name="http"></a>
 
 ## HTTP API
