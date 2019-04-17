@@ -104,13 +104,22 @@ func (server *AccountServer) connectToNATS() error {
 		server.natsTimer = time.NewTimer(time.Duration(reconnectWait) * time.Millisecond)
 		go func() {
 			<-server.natsTimer.C
+			server.Lock()
 			server.connectToNATS()
+			server.Unlock()
 		}()
 		return nil // we will retry, don't stop server running
 	}
 
 	server.nats = nc
 	return nil
+}
+
+func (server *AccountServer) getNatsConnection() *nats.Conn {
+	server.Lock()
+	defer server.Unlock()
+	conn := server.nats
+	return conn
 }
 
 func (server *AccountServer) sendAccountNotification(claim *jwt.AccountClaims, theJWT []byte) error {

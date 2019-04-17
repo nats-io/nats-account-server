@@ -300,7 +300,7 @@ func SetupTestServer(config conf.AccountServerConfig, useTLS bool, enableNats bo
 
 		// wait for the server to get connected
 		for i := 0; i < 5; i++ {
-			if testSetup.Server.nats != nil {
+			if testSetup.Server.getNatsConnection() != nil {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)

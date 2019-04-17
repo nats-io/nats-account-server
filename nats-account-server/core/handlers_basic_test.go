@@ -22,6 +22,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,8 @@ func TestAccountAndAccounts(t *testing.T) {
 }
 
 func TestUploadGetAccountJWT(t *testing.T) {
+	lock := sync.Mutex{}
+
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
@@ -94,7 +97,9 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	notificationJWT := ""
 	subject := fmt.Sprintf(accountNotificationFormat, pubKey)
 	_, err = testEnv.NC.Subscribe(subject, func(m *nats.Msg) {
+		lock.Lock()
 		notificationJWT = string(m.Data)
+		lock.Unlock()
 	})
 	require.NoError(t, err)
 
@@ -119,7 +124,10 @@ func TestUploadGetAccountJWT(t *testing.T) {
 
 	testEnv.Server.nats.Flush()
 	testEnv.NC.Flush()
+
+	lock.Lock()
 	require.Equal(t, notificationJWT, string(savedJWT))
+	lock.Unlock()
 
 	savedClaims, err := jwt.DecodeAccountClaims(string(savedJWT))
 	require.NoError(t, err)
@@ -154,6 +162,20 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	require.True(t, strings.Contains(decoded, `"alg": "ed25519"`))          // header prefix doesn't change
 	require.True(t, strings.Contains(decoded, UnixToDate(int64(expireAt)))) // expires are resolved to readable form
 	require.True(t, strings.Contains(decoded, "times.*"))                   // activation token is decoded
+
+	notificationJWT = ""
+
+	path = fmt.Sprintf("/jwt/v1/accounts/%s?notify=true", pubKey)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	testEnv.Server.nats.Flush()
+	testEnv.NC.Flush()
+
+	lock.Lock()
+	require.Equal(t, notificationJWT, string(savedJWT))
+	lock.Unlock()
 }
 
 func TestUnknownURL(t *testing.T) {
