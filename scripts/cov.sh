@@ -2,8 +2,12 @@
 
 rm -rf ./cov
 mkdir cov
-go test -v -race -covermode=atomic -coverprofile=./cov/coverage.out -coverpkg=github.com/nats-io/account-server .
-gocovmerge ./cov/*.out > coverage.out
+go test -covermode=atomic -coverprofile=./cov/conf.out ./nats-account-server/conf
+go test -covermode=atomic -coverprofile=./cov/core.out ./nats-account-server/core
+go test -covermode=atomic -coverprofile=./cov/logging.out ./nats-account-server/logging
+go test -covermode=atomic -coverprofile=./cov/store.out ./nats-account-server/store
+
+gocovmerge ./cov/*.out > ./coverage.out
 rm -rf ./cov
 
 # If we have an arg, assume travis run and push to coveralls. Otherwise launch browser results
