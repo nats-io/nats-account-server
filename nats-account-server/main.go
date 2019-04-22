@@ -70,9 +70,9 @@ func main() {
 
 				if err != nil {
 					if server.Logger() != nil {
-						server.Logger().Errorf("error starting bridge, %s", err.Error())
+						server.Logger().Errorf("error starting server, %s", err.Error())
 					} else {
-						log.Printf("error starting bridge, %s", err.Error())
+						log.Printf("error starting server, %s", err.Error())
 					}
 					server.Stop()
 					os.Exit(0)
@@ -87,9 +87,9 @@ func main() {
 
 	if err != nil {
 		if server.Logger() != nil {
-			server.Logger().Errorf("error starting bridge, %s", err.Error())
+			server.Logger().Errorf("error starting server, %s", err.Error())
 		} else {
-			log.Printf("error starting bridge, %s", err.Error())
+			log.Printf("error starting server, %s", err.Error())
 		}
 		server.Stop()
 		os.Exit(0)
