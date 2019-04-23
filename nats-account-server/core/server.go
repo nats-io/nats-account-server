@@ -214,11 +214,11 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 	if config.Dir != "" {
 		if config.ReadOnly {
 			server.logger.Noticef("creating a read-only store at %s", config.Dir)
-			return store.NewImmutableDirJWTStore(config.Dir)
+			return store.NewImmutableDirJWTStore(config.Dir, config.Shard)
 		}
 
 		server.logger.Noticef("creating a store at %s", config.Dir)
-		return store.NewDirJWTStore(config.Dir, true)
+		return store.NewDirJWTStore(config.Dir, config.Shard, true)
 	}
 
 	if config.ReadOnly {

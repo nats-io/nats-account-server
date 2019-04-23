@@ -66,6 +66,7 @@ type NATSConfig struct {
 type StoreConfig struct {
 	NSC      string // an nsc operator folder
 	Dir      string // the path to a folder for mutable storage
+	Shard    bool   // optional setting to shard the directory store, avoiding too many files in one folder
 	ReadOnly bool   // flag to indicate read-only status
 }
 

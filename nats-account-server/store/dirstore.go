@@ -28,15 +28,16 @@ const (
 	extension = "jwt"
 )
 
-// DirJWTStore implements the JWT Store interface, keeping JWTs in a sharded
+// DirJWTStore implements the JWT Store interface, keeping JWTs in an optionally sharded
 // directory structure
 type DirJWTStore struct {
 	directory string
 	readonly  bool
+	shard     bool
 }
 
 // NewDirJWTStore returns an empty, mutable directory-based JWT store
-func NewDirJWTStore(dirPath string, create bool) (JWTStore, error) {
+func NewDirJWTStore(dirPath string, shard bool, create bool) (JWTStore, error) {
 	dirPath, err := conf.ValidateDirPath(dirPath)
 
 	if err != nil {
@@ -54,11 +55,12 @@ func NewDirJWTStore(dirPath string, create bool) (JWTStore, error) {
 	return &DirJWTStore{
 		directory: dirPath,
 		readonly:  false,
+		shard:     shard,
 	}, nil
 }
 
 // NewImmutableDirJWTStore returns an immutable store with the provided directory
-func NewImmutableDirJWTStore(dirPath string) (JWTStore, error) {
+func NewImmutableDirJWTStore(dirPath string, sharded bool) (JWTStore, error) {
 	dirPath, err := conf.ValidateDirPath(dirPath)
 
 	if err != nil {
@@ -68,6 +70,7 @@ func NewImmutableDirJWTStore(dirPath string) (JWTStore, error) {
 	return &DirJWTStore{
 		directory: dirPath,
 		readonly:  true,
+		shard:     sharded,
 	}, nil
 }
 
@@ -122,10 +125,16 @@ func (store *DirJWTStore) pathForKey(publicKey string) string {
 		return ""
 	}
 
-	last := publicKey[len(publicKey)-2:]
-	fileName := fmt.Sprintf("%s.%s", publicKey, extension)
+	var dirPath string
 
-	dirPath := filepath.Join(store.directory, last, fileName)
+	if store.shard {
+		last := publicKey[len(publicKey)-2:]
+		fileName := fmt.Sprintf("%s.%s", publicKey, extension)
+		dirPath = filepath.Join(store.directory, last, fileName)
+	} else {
+		fileName := fmt.Sprintf("%s.%s", publicKey, extension)
+		dirPath = filepath.Join(store.directory, fileName)
+	}
 
 	return dirPath
 }
