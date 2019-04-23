@@ -18,15 +18,15 @@ package core
 
 import (
 	"fmt"
-	"github.com/nats-io/account-server/nats-account-server/conf"
-	"github.com/nats-io/nkeys"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/nats-io/account-server/nats-account-server/conf"
 	"github.com/nats-io/jwt"
+	"github.com/nats-io/nkeys"
 	nsc "github.com/nats-io/nsc/cmd/store"
 	"github.com/stretchr/testify/require"
 )
