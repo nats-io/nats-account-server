@@ -249,10 +249,8 @@ HTTP is configured in the main section under `http`:
 
 ```yaml
 http: {
-  http {
-      host: "localhost",
-      port: 9090,
-  }
+  host: "localhost",
+  port: 9090,
   readtimeout: 5000,
   writetimeout: 5000,
 }
@@ -260,7 +258,8 @@ http: {
 
 The HTTP section contains the following properties:
 
-* `http` - a host-port object
+* `host` - a host on the local machine
+* `port` - the port to run on
 * `readtimeout` - the time, in milliseconds, to wait for reads to complete
 * `writetimeout` - the time, in milliseconds, to wait for writes to complete
 * `tls` - (optional) [TLS configuration](#tls), only the `cert` and `key` properties are used.
