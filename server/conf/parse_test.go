@@ -31,6 +31,13 @@ type Simple struct {
 	Balance float64
 }
 
+type SimpleWTags struct {
+	Name    string `conf:"name"`
+	Age     int64
+	OptOut  bool `conf:"opt_out"`
+	Balance float64
+}
+
 func TestSimpleStruct(t *testing.T) {
 	configString := `
 	Name: "stephen"
@@ -40,6 +47,24 @@ func TestSimpleStruct(t *testing.T) {
 	`
 
 	config := Simple{}
+
+	err := LoadConfigFromString(configString, &config, false)
+	require.NoError(t, err)
+	require.Equal(t, "stephen", config.Name)
+	require.Equal(t, int64(28), config.Age)
+	require.Equal(t, true, config.OptOut)
+	require.Equal(t, 5.5, config.Balance)
+}
+
+func TestSimpleStructTagsMixed(t *testing.T) {
+	configString := `
+	name: "stephen"
+	age: 28
+	opt_out: true
+	Balance: 5.5
+	`
+
+	config := SimpleWTags{}
 
 	err := LoadConfigFromString(configString, &config, false)
 	require.NoError(t, err)
@@ -295,19 +320,24 @@ func TestEqualSignAndSpace(t *testing.T) {
 }
 
 type PrimitiveArrays struct {
-	Ints     []int
-	Int8s    []int8
-	Int16s   []int16
-	Int32s   []int32
-	Int64s   []int64
-	Float32s []float32
-	Float64s []float64
-	Strings  []string
+	Ints        []int
+	Int8s       []int8
+	Int16s      []int16
+	Int32s      []int32
+	Int64s      []int64
+	Float32s    []float32
+	Float64s    []float64
+	Strings     []string
+	StringsWTag []string `conf:"strings_w_tag"`
 }
 
 func TestArrays(t *testing.T) {
 	configString := `
 	strings: [
+		"mister",
+		"zero"
+	],
+	strings_w_tag: [
 		"mister",
 		"zero"
 	],
@@ -325,6 +355,7 @@ func TestArrays(t *testing.T) {
 	err := LoadConfigFromString(configString, &config, false)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"mister", "zero"}, config.Strings)
+	require.ElementsMatch(t, []string{"mister", "zero"}, config.StringsWTag)
 	require.ElementsMatch(t, []int{10, 15, -1}, config.Ints)
 	require.ElementsMatch(t, []int8{10, 15, -1}, config.Int8s)
 	require.ElementsMatch(t, []int16{10, 15, -1}, config.Int16s)

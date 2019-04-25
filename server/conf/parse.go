@@ -147,9 +147,16 @@ func parseStructs(keyName string, t reflect.Type, v interface{}, strict bool) (r
 	return buf, fmt.Errorf("error parsing %s option %v", keyName, v)
 }
 
-//Return non-array values
-func get(data map[string]interface{}, key string) interface{} {
+func get(data map[string]interface{}, key string, confTag string) interface{} {
 	if len(key) == 0 || data == nil {
+		return nil
+	}
+
+	if confTag != "" {
+		val, ok := data[confTag]
+		if ok {
+			return val
+		}
 		return nil
 	}
 
@@ -202,7 +209,9 @@ func parseStruct(data map[string]interface{}, config interface{}, strict bool) e
 
 		fieldType := dataType.Field(i)
 		fieldName := fieldType.Name
-		configVal := get(data, fieldName)
+		fieldTag := fieldType.Tag
+		confTag := fieldTag.Get("conf")
+		configVal := get(data, fieldName, confTag)
 
 		if configVal == nil {
 			if strict {
