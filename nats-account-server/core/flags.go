@@ -15,4 +15,6 @@ type Flags struct {
 	Debug           bool
 	Verbose         bool
 	DebugAndVerbose bool
+
+	HostPort string
 }
