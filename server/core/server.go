@@ -214,6 +214,10 @@ func (server *AccountServer) Start() error {
 		return err
 	}
 
+	server.logger.Noticef("nats-account-server is running")
+	server.logger.Noticef("configure the nats-server with:")
+	server.logger.Noticef("  resolver: URL(%s://%s/jwt/v1/accounts/)", server.protocol, server.hostPort)
+
 	return nil
 }
 
