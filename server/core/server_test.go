@@ -26,11 +26,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/account-server/nats-account-server/conf"
 	gnatsserver "github.com/nats-io/gnatsd/server"
 	gnatsd "github.com/nats-io/gnatsd/test"
 	nats "github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
+	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nkeys"
 	nsc "github.com/nats-io/nsc/cmd"
 )

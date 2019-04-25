@@ -25,7 +25,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/nats-io/account-server/nats-account-server/core"
+	"github.com/nats-io/nats-account-server/server/core"
 )
 
 func main() {

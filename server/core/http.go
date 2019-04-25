@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/nats-io/account-server/nats-account-server/conf"
+	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/rs/cors"
 )
 

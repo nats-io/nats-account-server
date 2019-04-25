@@ -26,9 +26,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/account-server/nats-account-server/conf"
 	nats "github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
+	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )

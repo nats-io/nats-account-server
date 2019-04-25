@@ -3,14 +3,14 @@ build: fmt check compile
 
 fmt:
 	misspell -locale US .
-	gofmt -s -w nats-account-server/*.go
-	gofmt -s -w nats-account-server/conf/*.go
-	gofmt -s -w nats-account-server/core/*.go
-	gofmt -s -w nats-account-server/logging/*.go
-	goimports -w nats-account-server/*.go
-	goimports -w nats-account-server/conf/*.go
-	goimports -w nats-account-server/core/*.go
-	goimports -w nats-account-server/logging/*.go
+	gofmt -s -w server/conf/*.go
+	gofmt -s -w server/core/*.go
+	gofmt -s -w server/logging/*.go
+	gofmt -s -w server/store/*.go
+	goimports -w server/conf/*.go
+	goimports -w server/core/*.go
+	goimports -w server/logging/*.go
+	goimports -w server/store/*.go
 
 check:
 	go vet ./...

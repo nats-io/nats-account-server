@@ -17,7 +17,7 @@
 package conf
 
 import (
-	"github.com/nats-io/account-server/nats-account-server/logging"
+	"github.com/nats-io/nats-account-server/server/logging"
 )
 
 // AccountServerConfig is the root structure for an account server configuration file.

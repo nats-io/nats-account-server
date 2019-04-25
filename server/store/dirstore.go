@@ -18,10 +18,11 @@ package store
 
 import (
 	"fmt"
-	"github.com/nats-io/account-server/nats-account-server/conf"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+
+	"github.com/nats-io/nats-account-server/server/conf"
 )
 
 const (

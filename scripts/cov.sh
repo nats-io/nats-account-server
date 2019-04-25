@@ -2,10 +2,10 @@
 
 rm -rf ./cov
 mkdir cov
-go test -covermode=atomic -coverprofile=./cov/conf.out ./nats-account-server/conf
-go test -covermode=atomic -coverprofile=./cov/core.out ./nats-account-server/core
-go test -covermode=atomic -coverprofile=./cov/logging.out ./nats-account-server/logging
-go test -covermode=atomic -coverprofile=./cov/store.out ./nats-account-server/store
+go test -covermode=atomic -coverprofile=./cov/conf.out ./server/conf
+go test -covermode=atomic -coverprofile=./cov/core.out ./server/core
+go test -covermode=atomic -coverprofile=./cov/logging.out ./server/logging
+go test -covermode=atomic -coverprofile=./cov/store.out ./server/store
 
 gocovmerge ./cov/*.out > ./coverage.out
 rm -rf ./cov

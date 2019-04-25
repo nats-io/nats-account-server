@@ -28,11 +28,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/account-server/nats-account-server/conf"
-	"github.com/nats-io/account-server/nats-account-server/logging"
-	"github.com/nats-io/account-server/nats-account-server/store"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
+	"github.com/nats-io/nats-account-server/server/conf"
+	"github.com/nats-io/nats-account-server/server/logging"
+	"github.com/nats-io/nats-account-server/server/store"
 )
 
 var version = "0.0-dev"

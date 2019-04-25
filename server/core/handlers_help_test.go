@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/nats-io/account-server/nats-account-server/conf"
+	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/stretchr/testify/require"
 )
 

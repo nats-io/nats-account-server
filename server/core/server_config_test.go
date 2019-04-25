@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nats-io/account-server/nats-account-server/conf"
 	"github.com/nats-io/jwt"
+	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nkeys"
 	nsc "github.com/nats-io/nsc/cmd/store"
 	"github.com/stretchr/testify/require"
