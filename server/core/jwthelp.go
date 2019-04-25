@@ -17,10 +17,10 @@
 package core
 
 const jwtAPIHelp = `
-# JWT API HELP
+# NATS Account Server JWT API HELP
 
 This document describes the various URL paths that encompass the HTTP API for working 
-with JWTs on the Account Server
+with JWTs on the NATS Account Server
 
 ## GET /jwt/v1/help
 
