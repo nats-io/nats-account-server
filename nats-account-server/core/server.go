@@ -24,13 +24,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/nats-io/account-server/nats-account-server/conf"
 	"github.com/nats-io/account-server/nats-account-server/logging"
 	"github.com/nats-io/account-server/nats-account-server/store"
-	nats "github.com/nats-io/go-nats"
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
 )
 
@@ -125,6 +126,21 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 	if flags.Verbose || flags.DebugAndVerbose {
 		server.config.Logging.Trace = true
 	}
+
+	if flags.HostPort != "" {
+		h, p, err := net.SplitHostPort(flags.HostPort)
+		if err != nil {
+			return fmt.Errorf("error parsing hostport: %v", err)
+		}
+		server.config.HTTP.HTTP.Host = h
+		server.config.HTTP.HTTP.Port, err = strconv.Atoi(p)
+		if err != nil {
+			return fmt.Errorf("error parsing hostport: %v", err)
+
+		}
+	}
+
+	fmt.Printf("%v\n", server.config.HTTP.HTTP)
 
 	return nil
 }

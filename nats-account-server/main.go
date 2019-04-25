@@ -41,6 +41,7 @@ func main() {
 	flag.BoolVar(&flags.Debug, "D", false, "turn on debug logging")
 	flag.BoolVar(&flags.Verbose, "V", false, "turn on verbose logging")
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
+	flag.StringVar(&flags.HostPort, "hp", "localhost:9090", "http hostport")
 	flag.Parse()
 
 	go func() {
