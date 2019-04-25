@@ -312,12 +312,12 @@ The server does depend on the nats-server repo as well as nsc, and as a result c
 
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
-[Build-Status-Url]: https://travis-ci.com/nats-io/account-server
-[Build-Status-Image]: https://travis-ci.com/nats-io/account-server.svg?branch=master
-[Coverage-Url]: https://coveralls.io/r/nats-io/account-server?branch=master
-[Coverage-image]: https://coveralls.io/repos/github/nats-io/account-server/badge.svg?branch=master
-[ReportCard-Url]: https://goreportcard.com/report/nats-io/account-server
-[ReportCard-Image]: https://goreportcard.com/badge/github.com/nats-io/account-server
+[Build-Status-Url]: https://travis-ci.org/nats-io/nats-account-server
+[Build-Status-Image]: https://travis-ci.org/nats-io/nats-account-server.svg?branch=master
+[Coverage-Url]: https://coveralls.io/r/nats-io/nats-account-server?branch=master
+[Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-account-server/badge.svg?branch=master
+[ReportCard-Url]: https://goreportcard.com/report/nats-io/nats-account-server
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/nats-io/nats-account-server
 
 <a name="license"></a>
 
