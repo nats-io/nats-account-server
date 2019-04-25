@@ -132,15 +132,13 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 		if err != nil {
 			return fmt.Errorf("error parsing hostport: %v", err)
 		}
-		server.config.HTTP.HTTP.Host = h
-		server.config.HTTP.HTTP.Port, err = strconv.Atoi(p)
+		server.config.HTTP.Host = h
+		server.config.HTTP.Port, err = strconv.Atoi(p)
 		if err != nil {
 			return fmt.Errorf("error parsing hostport: %v", err)
 
 		}
 	}
-
-	fmt.Printf("%v\n", server.config.HTTP.HTTP)
 
 	return nil
 }

@@ -18,7 +18,6 @@ package conf
 
 import (
 	"fmt"
-	"net"
 	"reflect"
 	"strconv"
 	"strings"
@@ -88,27 +87,6 @@ func parseString(keyName string, v interface{}) (string, error) {
 	return sv, nil
 }
 
-func parseHostPort(keyName string, v interface{}) (HostPort, error) {
-	r := HostPort{}
-	switch v := v.(type) {
-	case int64:
-		r.Port = int(v)
-	case string:
-		h, p, err := net.SplitHostPort(string(v))
-		if err != nil {
-			return r, fmt.Errorf("unable to parse hostport %s for key %s", v, keyName)
-		}
-		r.Port, err = strconv.Atoi(p)
-		if err != nil {
-			return r, fmt.Errorf("unable to parse port %s for key %s", v, keyName)
-		}
-		r.Host = h
-	default:
-		return r, fmt.Errorf("error parsing hostport option %v for key %s", v, keyName)
-	}
-	return r, nil
-}
-
 func parsePrimitiveArray(keyName string, t reflect.Type, v interface{}) (reflect.Value, error) {
 	buf := reflect.MakeSlice(reflect.SliceOf(t), 0, 0)
 	ia, iaok := v.([]interface{})
@@ -169,29 +147,6 @@ func parseStructs(keyName string, t reflect.Type, v interface{}, strict bool) (r
 	return buf, fmt.Errorf("error parsing %s option %v", keyName, v)
 }
 
-func parseHostPorts(keyName string, v interface{}) ([]HostPort, error) {
-	buf := []HostPort{}
-	ia, iaok := v.([]interface{})
-	if iaok {
-		for _, e := range ia {
-			val, err := parseHostPort(keyName, e)
-			if err != nil {
-				return buf, err
-			}
-			buf = append(buf, val)
-		}
-		return buf, nil
-	}
-
-	val, err := parseHostPort(keyName, v)
-	if err != nil {
-		return buf, err
-	}
-	buf = append(buf, val)
-
-	return buf, nil
-}
-
 //Return non-array values
 func get(data map[string]interface{}, key string) interface{} {
 	if len(key) == 0 || data == nil {
@@ -221,7 +176,6 @@ func parseStruct(data map[string]interface{}, config interface{}, strict bool) e
 	var fields reflect.Value
 	var maybeFields reflect.Value
 
-	hostPortType := reflect.TypeOf(HostPort{})
 	mapStringInterfaceType := reflect.TypeOf(map[string]interface{}{})
 
 	// Get all the fields in the config struct
@@ -313,36 +267,19 @@ func parseStruct(data map[string]interface{}, config interface{}, strict bool) e
 				field.Set(theArray)
 			case reflect.Struct:
 				var structs reflect.Value
-				if fieldType.Type.Elem().AssignableTo(hostPortType) {
-					hps, err := parseHostPorts(fieldName, configVal)
-					if err != nil {
-						return err
-					}
-					structs = reflect.ValueOf(hps)
-				} else {
-					structs, err = parseStructs(fieldName, fieldType.Type.Elem(), configVal, strict)
-					if err != nil {
-						return err
-					}
+				structs, err = parseStructs(fieldName, fieldType.Type.Elem(), configVal, strict)
+				if err != nil {
+					return err
 				}
 
 				field.Set(structs)
 			default:
 				if strict {
-					return fmt.Errorf("unknown field type in configuration %s, bool, int, float, string, hostport and arrays/structs of those are supported", fieldName)
+					return fmt.Errorf("unknown field type in configuration %s, bool, int, float, string and arrays/structs of those are supported", fieldName)
 				}
 			}
 		case reflect.Struct:
-			if field.Type().AssignableTo(hostPortType) {
-				var v HostPort
-				if configVal != nil {
-					v, err = parseHostPort(fieldName, configVal)
-					if err != nil {
-						return err
-					}
-					field.Set(reflect.ValueOf(v))
-				}
-			} else if configVal != nil {
+			if configVal != nil {
 				configData, ok := configVal.(map[string]interface{})
 				if !ok {
 					return fmt.Errorf("struct field %s doesn't have a matching map in the config file", fieldName)

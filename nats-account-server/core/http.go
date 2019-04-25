@@ -107,7 +107,7 @@ func (server *AccountServer) createHTTPListener() error {
 	var listen net.Listener
 
 	conf := server.config.HTTP
-	hp := conf.HTTP.String()
+	hp := net.JoinHostPort(conf.Host, fmt.Sprintf("%d", conf.Port))
 	tlsConf := conf.TLS
 
 	if tlsConf.Cert == "" {

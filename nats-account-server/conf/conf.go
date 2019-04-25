@@ -40,7 +40,8 @@ type TLSConf struct {
 
 // HTTPConfig is used to specify the host/port/tls for an HTTP server
 type HTTPConfig struct {
-	HTTP         HostPort
+	Host         string
+	Port         int
 	TLS          TLSConf
 	ReadTimeout  int //milliseconds
 	WriteTimeout int //milliseconds

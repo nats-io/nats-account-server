@@ -51,6 +51,26 @@ func TestAccountAndAccounts(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusOK)
 }
 
+func TestAccountAndAccountsNewPort(t *testing.T) {
+	config := conf.DefaultServerConfig()
+	config.HTTP.Port = 9093
+	testEnv, err := SetupTestServer(config, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts")
+	url := testEnv.URLForPath(path)
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	path = fmt.Sprintf("/jwt/v1/accounts/")
+	url = testEnv.URLForPath(path)
+	resp, err = http.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+}
+
 func TestUploadGetAccountJWT(t *testing.T) {
 	lock := sync.Mutex{}
 
