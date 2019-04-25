@@ -18,5 +18,4 @@ before_script:
 - staticcheck ./...
 
 script:
-# go version isn't valid for now, waiting to turn on coveralls
 - if [[ "$TRAVIS_GO_VERSION" == 1.12.* ]] ; then ./scripts/cov.sh TRAVIS; else go test -v -race ./...; fi
