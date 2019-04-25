@@ -84,7 +84,7 @@ cases a status 500 may be returned if there was an issue saving the JWT.
 
 This repository provides three JWT store implementations, and can be extended to provide others.
 
-* Directory Store - The directory store saves and loads JWTs into a sharded structure under a root folder. The last two
+* Directory Store - The directory store saves and loads JWTs into an optionally sharded structure under a root folder. The last two
 characters in the accounts public key are used to create a sub-folder, and the accounts public key is used as the file name, with
 ".jwt" appended. The directory store can be run in read-only mode.
 
@@ -283,6 +283,7 @@ This section can contain the following properties:
 * `nsc` - the path to an NSC operator folder, this setting takes precedent over the others
 * `dir` - the path to a folder to use for storing JWTS
 * `readonly` - turns on/off mutability for the directory or memory stores
+* `shard` - if "true" the directory store will shard the files into sub-directories based on the last 2 characters of the public keys.
 
 A memory store is created if `nsc` and `dir` are not set.
 
