@@ -145,8 +145,6 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 
 // ApplyConfigFile applies the config file to the server's config
 func (server *AccountServer) ApplyConfigFile(configFile string) error {
-	config := server.config
-
 	if configFile == "" {
 		configFile = os.Getenv("NATS_ACCOUNT_SERVER_CONFIG")
 		if configFile != "" {
@@ -160,7 +158,7 @@ func (server *AccountServer) ApplyConfigFile(configFile string) error {
 		return fmt.Errorf("no config file specified")
 	}
 
-	if err := conf.LoadConfigFromFile(configFile, &config, false); err != nil {
+	if err := conf.LoadConfigFromFile(configFile, &server.config, false); err != nil {
 		return err
 	}
 

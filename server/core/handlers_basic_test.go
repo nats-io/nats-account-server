@@ -53,7 +53,7 @@ func TestAccountAndAccounts(t *testing.T) {
 
 func TestAccountAndAccountsNewPort(t *testing.T) {
 	config := conf.DefaultServerConfig()
-	config.HTTP.Port = 9093
+	config.HTTP.Port = 14193
 	testEnv, err := SetupTestServer(config, false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
