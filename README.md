@@ -303,6 +303,22 @@ Use `make test` to run the tests, and `make install` to install.
 
 The server does depend on the nats-server repo as well as nsc, and as a result contains a number of dependencies. However, the final executable is fairly small, ~10mb.
 
+## Docker
+
+You can build the docker image using:
+
+```bash
+% docker build . -t "nats-io/nats-account-server:0.5"
+```
+
+Then run it with:
+
+```bash
+% docker run -v ~/.nsc/nats/<op name>:/<op name> -p 9090:9090 "nats-io/nats-account-server:0.5" -nsc /<op name> -nats docker.for.mac.host.internal:4222 -hp 0.0.0.0:9090
+```
+
+Note the use of `docker.for.mac.host.internal` for the mac host, and update that properly. Also, we use the operator name for the folder name to allow the server to find the operator JWT.
+
 <a name="resources"></a>
 
 ## External Resources
