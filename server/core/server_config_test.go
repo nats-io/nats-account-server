@@ -164,6 +164,9 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	{
 		store: {
 			Dir: %s,
+		},
+		http: {
+			ReadTimeout: 2000,
 		}
 	}
 	`
@@ -184,6 +187,9 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
+
+	require.Equal(t, server.config.Store.Dir, path)
+	require.Equal(t, server.config.HTTP.ReadTimeout, 2000)
 
 	httpClient, err := testHTTPClient(false)
 	require.NoError(t, err)
