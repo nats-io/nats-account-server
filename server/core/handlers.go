@@ -17,6 +17,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -234,6 +235,19 @@ func (server *AccountServer) writeJWTAsText(w http.ResponseWriter, pubKey string
 	}
 }
 
+func UnescapedIndentedMarshal(v interface{}, prefix, indent string) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent(prefix, indent)
+
+	err := enc.Encode(v)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey string, theJWT string) {
 
 	claim, err := jwt.DecodeGeneric(theJWT)
@@ -256,13 +270,13 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 		return
 	}
 
-	headerJSON, err := json.MarshalIndent(header, "", "    ")
+	headerJSON, err := UnescapedIndentedMarshal(header, "", "    ")
 	if err != nil {
 		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim header", pubKey, err, w)
 		return
 	}
 
-	claimJSON, err := json.MarshalIndent(claim, "", "    ")
+	claimJSON, err := UnescapedIndentedMarshal(claim, "", "    ")
 	if err != nil {
 		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim", pubKey, err, w)
 		return
@@ -285,7 +299,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 		activateToken, subErr := jwt.DecodeActivationClaims(tokenStr)
 
 		if subErr == nil {
-			token, subErr := json.MarshalIndent(activateToken, "                ", "    ")
+			token, subErr := UnescapedIndentedMarshal(activateToken, "                ", "    ")
 
 			tokenStr = string(token)
 			tokenStr = strings.TrimSpace(tokenStr) // get rid of leading whitespace
@@ -362,6 +376,8 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	jsonBuff = append(jsonBuff, claimJSON...)
 	jsonBuff = append(jsonBuff, newLineBytes...)
 	jsonBuff = append(jsonBuff, []byte(sig)...)
+	// if this last new line is not set curls will show a '%' in the output.
+	jsonBuff = append(jsonBuff, '\n')
 
 	w.Header().Add(ContentType, TextPlain)
 	w.WriteHeader(http.StatusOK)
