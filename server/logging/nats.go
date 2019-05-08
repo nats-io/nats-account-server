@@ -17,7 +17,7 @@
 package logging
 
 import (
-	"github.com/nats-io/gnatsd/logger"
+	"github.com/nats-io/nats-server/logger"
 )
 
 // NewNATSLogger creates a new logger that uses the gnatsd library
