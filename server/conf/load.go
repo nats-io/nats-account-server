@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"io/ioutil"
 
-	"github.com/nats-io/gnatsd/conf"
+	"github.com/nats-io/nats-server/conf"
 )
 
 // LoadConfigFromFile - given a struct, load a config from a file and fill in the struct
