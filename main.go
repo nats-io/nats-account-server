@@ -22,11 +22,28 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
+	"github.com/mitchellh/go-homedir"
 	"github.com/nats-io/nats-account-server/server/core"
 )
+
+func expandPath(p string) string {
+	var err error
+	if p != "" {
+		p, err = homedir.Expand(p)
+		if err != nil {
+			panic(fmt.Sprintf("error parsing path: %s", p))
+		}
+		p, err = filepath.Abs(p)
+		if err != nil {
+			panic(fmt.Sprintf("error resolving path: %s", p))
+		}
+	}
+	return p
+}
 
 func main() {
 	var server *core.AccountServer
@@ -43,6 +60,12 @@ func main() {
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
 	flag.StringVar(&flags.HostPort, "hp", "localhost:9090", "http hostport")
 	flag.Parse()
+
+	// resolve paths with dots/tildes
+	flags.ConfigFile = expandPath(flags.ConfigFile)
+	flags.Creds = expandPath(flags.Creds)
+	flags.Directory = expandPath(flags.Directory)
+	flags.NSCFolder = expandPath(flags.NSCFolder)
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
