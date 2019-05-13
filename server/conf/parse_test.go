@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2019 The NATS Authors
+ * Copyright 2019 The NATS Authors
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -36,15 +36,16 @@ type SimpleWTags struct {
 	Age     int64
 	OptOut  bool `conf:"opt_out"`
 	Balance float64
+	AllIn   string
 }
 
 func TestSimpleStruct(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Age: 28
-	OptOut: true
-	Balance: 5.5
-	`
+	  Name: "stephen"
+	  Age: 28
+	  OptOut: true
+	  Balance: 5.5
+	  `
 
 	config := Simple{}
 
@@ -58,17 +59,19 @@ func TestSimpleStruct(t *testing.T) {
 
 func TestSimpleStructTagsMixed(t *testing.T) {
 	configString := `
-	name: "stephen"
-	age: 28
-	opt_out: true
-	Balance: 5.5
-	`
+	  name: "stephen"
+	  age: 28
+	  opt_out: true
+	  Balance: 5.5
+	  Allin: "hello"
+	  `
 
 	config := SimpleWTags{}
 
 	err := LoadConfigFromString(configString, &config, false)
 	require.NoError(t, err)
 	require.Equal(t, "stephen", config.Name)
+	require.Equal(t, "hello", config.AllIn)
 	require.Equal(t, int64(28), config.Age)
 	require.Equal(t, true, config.OptOut)
 	require.Equal(t, 5.5, config.Balance)
@@ -76,8 +79,8 @@ func TestSimpleStructTagsMixed(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	configString := `
-	Age: 15
-	`
+	  Age: 15
+	  `
 
 	config := Simple{
 		Name:    "stephen",
@@ -96,11 +99,11 @@ func TestDefaults(t *testing.T) {
 
 func TestStrictWithAllFields(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Age: 28
-	OptOut: true
-	Balance: 5.5
-	`
+	  Name: "stephen"
+	  Age: 28
+	  OptOut: true
+	  Balance: 5.5
+	  `
 
 	config := Simple{
 		Name:    "zero",
@@ -118,10 +121,10 @@ func TestStrictWithAllFields(t *testing.T) {
 
 func TestStrictWithMissingFields(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Age: 28
-	OptOut: true
-	`
+	  Name: "stephen"
+	  Age: 28
+	  OptOut: true
+	  `
 
 	config := Simple{}
 
@@ -131,8 +134,8 @@ func TestStrictWithMissingFields(t *testing.T) {
 
 func TestStringBadValue(t *testing.T) {
 	configString := `
-	Name: 23
-	`
+	  Name: 23
+	  `
 
 	config := Simple{}
 
@@ -142,8 +145,8 @@ func TestStringBadValue(t *testing.T) {
 
 func TestStringNoQuotes(t *testing.T) {
 	configString := `
-	Name: alpha
-	`
+	  Name: alpha
+	  `
 
 	config := Simple{}
 
@@ -154,8 +157,8 @@ func TestStringNoQuotes(t *testing.T) {
 
 func TestBoolAsString(t *testing.T) {
 	configString := `
-	OptOut: "true"
-	`
+	  OptOut: "true"
+	  `
 
 	config := Simple{}
 
@@ -166,8 +169,8 @@ func TestBoolAsString(t *testing.T) {
 
 func TestBoolBadValue(t *testing.T) {
 	configString := `
-	OptOut: 32
-	`
+	  OptOut: 32
+	  `
 
 	config := Simple{}
 
@@ -185,12 +188,12 @@ type Ints struct {
 
 func TestIntTypes(t *testing.T) {
 	configString := `
-	Big: 1000000000
-	Medium: 100000
-	Small: 1000
-	Tiny: 100
-	Any: 100000
-	`
+	  Big: 1000000000
+	  Medium: 100000
+	  Small: 1000
+	  Tiny: 100
+	  Any: 100000
+	  `
 
 	config := Ints{}
 
@@ -205,12 +208,12 @@ func TestIntTypes(t *testing.T) {
 
 func TestIntTypesAsStrings(t *testing.T) {
 	configString := `
-	Big: "1000000000"
-	Medium: "100000"
-	Small: "1000"
-	Tiny: "100"
-	Any: "100000"
-	`
+	  Big: "1000000000"
+	  Medium: "100000"
+	  Small: "1000"
+	  Tiny: "100"
+	  Any: "100000"
+	  `
 
 	config := Ints{}
 
@@ -225,12 +228,12 @@ func TestIntTypesAsStrings(t *testing.T) {
 
 func TestIntTypesBadValue(t *testing.T) {
 	configString := `
-	Big: "a"
-	Medium: "a"
-	Small: "a"
-	Tiny: "a"
-	Any: "a"
-	`
+	  Big: "a"
+	  Medium: "a"
+	  Small: "a"
+	  Tiny: "a"
+	  Any: "a"
+	  `
 
 	config := Ints{}
 
@@ -245,9 +248,9 @@ type Floats struct {
 
 func TestFloatTypes(t *testing.T) {
 	configString := `
-	Big: 1000000.1888
-	Medium: 100000.321
-	`
+	  Big: 1000000.1888
+	  Medium: 100000.321
+	  `
 
 	config := Floats{}
 
@@ -259,9 +262,9 @@ func TestFloatTypes(t *testing.T) {
 
 func TestFloatTypesAsStrings(t *testing.T) {
 	configString := `
-	Big: "1000000.1888"
-	Medium: "100000.321"
-	`
+	  Big: "1000000.1888"
+	  Medium: "100000.321"
+	  `
 
 	config := Floats{}
 
@@ -273,9 +276,9 @@ func TestFloatTypesAsStrings(t *testing.T) {
 
 func TestFloatTypesBadValue(t *testing.T) {
 	configString := `
-	Big: "a"
-	Medium: "b"
-	`
+	  Big: "a"
+	  Medium: "b"
+	  `
 
 	config := Floats{}
 
@@ -285,11 +288,11 @@ func TestFloatTypesBadValue(t *testing.T) {
 
 func TestLowerCase(t *testing.T) {
 	configString := `
-	name: "stephen"
-	age: 28
-	optout: true
-	balance: 5.5
-	`
+	  name: "stephen"
+	  age: 28
+	  optout: true
+	  balance: 5.5
+	  `
 
 	config := Simple{}
 
@@ -303,11 +306,11 @@ func TestLowerCase(t *testing.T) {
 
 func TestEqualSignAndSpace(t *testing.T) {
 	configString := `
-	name: "stephen"
-	age = 28
-	optout true
-	balance: 5.5
-	`
+	  name: "stephen"
+	  age = 28
+	  optout true
+	  balance: 5.5
+	  `
 
 	config := Simple{}
 
@@ -333,22 +336,22 @@ type PrimitiveArrays struct {
 
 func TestArrays(t *testing.T) {
 	configString := `
-	strings: [
-		"mister",
-		"zero"
-	],
-	strings_w_tag: [
-		"mister",
-		"zero"
-	],
-	ints: [10, 15, -1],
-	int8s: [10, 15, -1],
-	int16s: [10, 15, -1],
-	int32s: [10, 15, -1],
-	int64s: [10, 15, -1],
-	float32s: [1.1, 2.2, 3.3],
-	float64s: [1.1, 2.2, 3.3],
-	`
+	  strings: [
+		  "mister",
+		  "zero"
+	  ],
+	  strings_w_tag: [
+		  "mister",
+		  "zero"
+	  ],
+	  ints: [10, 15, -1],
+	  int8s: [10, 15, -1],
+	  int16s: [10, 15, -1],
+	  int32s: [10, 15, -1],
+	  int64s: [10, 15, -1],
+	  float32s: [1.1, 2.2, 3.3],
+	  float64s: [1.1, 2.2, 3.3],
+	  `
 
 	config := PrimitiveArrays{}
 
@@ -367,15 +370,15 @@ func TestArrays(t *testing.T) {
 
 func TestArraysSingleton(t *testing.T) {
 	configString := `
-	strings: "mister",
-	ints: 10,
-	int8s: 10,
-	int16s: 10,
-	int32s: 10,
-	int64s: 10,
-	float32s: 1.2,
-	float64s: 1.3,
-	`
+	  strings: "mister",
+	  ints: 10,
+	  int8s: 10,
+	  int16s: 10,
+	  int32s: 10,
+	  int64s: 10,
+	  float32s: 1.2,
+	  float64s: 1.3,
+	  `
 
 	config := PrimitiveArrays{}
 
@@ -393,8 +396,8 @@ func TestArraysSingleton(t *testing.T) {
 
 func TestArraysSingletonBadValue(t *testing.T) {
 	configString := `
-	ints: hello,
-	`
+	  ints: hello,
+	  `
 
 	config := PrimitiveArrays{}
 	err := LoadConfigFromString(configString, &config, false)
@@ -403,8 +406,8 @@ func TestArraysSingletonBadValue(t *testing.T) {
 
 func TestArraysBadValue(t *testing.T) {
 	configString := `
-	strings: 43a
-	`
+	  strings: 43a
+	  `
 
 	config := PrimitiveArrays{}
 
@@ -412,8 +415,8 @@ func TestArraysBadValue(t *testing.T) {
 	require.NoError(t, err)
 
 	configString = `
-	ints: 43a
-	`
+	  ints: 43a
+	  `
 	config = PrimitiveArrays{}
 	err = LoadConfigFromString(configString, &config, false)
 	require.Error(t, err)
@@ -436,14 +439,14 @@ type GrandParent struct {
 
 func TestStructField(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Child: {
-		Name: "mister",
-		Child: {
-			Name: "zero",
-		},
-	}
-	`
+	  Name: "stephen"
+	  Child: {
+		  Name: "mister",
+		  Child: {
+			  Name: "zero",
+		  },
+	  }
+	  `
 
 	config := GrandParent{}
 
@@ -456,9 +459,9 @@ func TestStructField(t *testing.T) {
 
 func TestStructFieldBadValue(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Child: "string"
-	`
+	  Name: "stephen"
+	  Child: "string"
+	  `
 
 	config := GrandParent{}
 
@@ -468,13 +471,13 @@ func TestStructFieldBadValue(t *testing.T) {
 
 func TestStructFieldWithDefault(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Child: {
-		Child: {
-			Name: "zero",
-		},
-	}
-	`
+	  Name: "stephen"
+	  Child: {
+		  Child: {
+			  Name: "zero",
+		  },
+	  }
+	  `
 
 	config := GrandParent{
 		Child: Parent{
@@ -491,9 +494,9 @@ func TestStructFieldWithDefault(t *testing.T) {
 
 func TestArrayStructs(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Children: [{Name: "mister", Child:{Name: "zero"}}, {Name:"alpha", Child:{Name: "omega"}}]
-	`
+	  Name: "stephen"
+	  Children: [{Name: "mister", Child:{Name: "zero"}}, {Name:"alpha", Child:{Name: "omega"}}]
+	  `
 
 	config := GrandParent{}
 
@@ -509,9 +512,9 @@ func TestArrayStructs(t *testing.T) {
 
 func TestArrayStructsSingleton(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Children: {Name: "mister", Child:{Name: "zero"}}
-	`
+	  Name: "stephen"
+	  Children: {Name: "mister", Child:{Name: "zero"}}
+	  `
 
 	config := GrandParent{}
 
@@ -525,9 +528,9 @@ func TestArrayStructsSingleton(t *testing.T) {
 
 func TestArrayStructsBadArray(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Children: "string"
-	`
+	  Name: "stephen"
+	  Children: "string"
+	  `
 
 	config := GrandParent{}
 
@@ -542,9 +545,9 @@ type ComplexHolder struct {
 
 func TestComplexFailsOnStrict(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	Comp: 34
-	`
+	  Name: "stephen"
+	  Comp: 34
+	  `
 
 	config := ComplexHolder{}
 
@@ -559,9 +562,9 @@ type BoolArray struct {
 
 func TestBoolArrayNotSupported(t *testing.T) {
 	configString := `
-	Name: "stephen"
-	TheArray: [true, false, true]
-	`
+	  Name: "stephen"
+	  TheArray: [true, false, true]
+	  `
 
 	config := BoolArray{}
 
@@ -587,8 +590,8 @@ type HasPrivate struct {
 
 func TestPrivateField(t *testing.T) {
 	configString := `
-	name: "stephen"
-	`
+	  name: "stephen"
+	  `
 
 	config := HasPrivate{
 		name: "alberto",
@@ -611,10 +614,10 @@ type StringStringMapConf struct {
 
 func TestMap(t *testing.T) {
 	configString := `
-	One: {
-	Name: "stephen"
-	}
-	`
+	  One: {
+	  Name: "stephen"
+	  }
+	  `
 
 	config := SimpleMapConf{}
 
@@ -625,8 +628,8 @@ func TestMap(t *testing.T) {
 
 func TestBadMapField(t *testing.T) {
 	configString := `
-	One: "test"
-	`
+	  One: "test"
+	  `
 
 	config := SimpleMapConf{}
 
@@ -636,13 +639,13 @@ func TestBadMapField(t *testing.T) {
 
 func TestBadMap(t *testing.T) {
 	configString := `
-	One: {
-	Name: "stephen"
-	Age: 28
-	OptOut: true
-	Balance: 5.5
-	}
-	`
+	  One: {
+	  Name: "stephen"
+	  Age: 28
+	  OptOut: true
+	  Balance: 5.5
+	  }
+	  `
 
 	config := StringStringMapConf{}
 
