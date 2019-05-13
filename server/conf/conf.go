@@ -84,6 +84,8 @@ func DefaultServerConfig() AccountServerConfig {
 		HTTP: HTTPConfig{
 			ReadTimeout:  5000,
 			WriteTimeout: 5000,
+			Host:         "localhost",
+			Port:         9090,
 		},
 		NATS: NATSConfig{
 			ConnectTimeout: 5000,

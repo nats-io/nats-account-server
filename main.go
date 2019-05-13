@@ -89,7 +89,18 @@ func main() {
 				}
 				server.Stop()
 				server := core.NewAccountServer()
-				server.InitializeFromFlags(flags)
+				err = server.InitializeFromFlags(flags)
+
+				if err != nil {
+					if server.Logger() != nil {
+						server.Logger().Errorf("error starting server, %s", err.Error())
+					} else {
+						log.Printf("error starting server, %s", err.Error())
+					}
+					server.Stop()
+					os.Exit(0)
+				}
+
 				err = server.Start()
 
 				if err != nil {
@@ -106,7 +117,18 @@ func main() {
 	}()
 
 	server = core.NewAccountServer()
-	server.InitializeFromFlags(flags)
+	err = server.InitializeFromFlags(flags)
+
+	if err != nil {
+		if server.Logger() != nil {
+			server.Logger().Errorf("error starting server, %s", err.Error())
+		} else {
+			log.Printf("error starting server, %s", err.Error())
+		}
+		server.Stop()
+		os.Exit(0)
+	}
+
 	err = server.Start()
 
 	if err != nil {
