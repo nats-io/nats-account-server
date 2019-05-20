@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nkeys"
@@ -154,7 +155,10 @@ func TestNSCFileNotifications(t *testing.T) {
 	err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
-	<-notified
+	select {
+	case <-notified:
+	case <-time.After(3 * time.Second):
+	}
 	require.Equal(t, 1, jwtChanges)
 	require.Equal(t, 0, errors)
 
@@ -164,7 +168,10 @@ func TestNSCFileNotifications(t *testing.T) {
 	err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
-	<-notified
+	select {
+	case <-notified:
+	case <-time.After(3 * time.Second):
+	}
 	require.Equal(t, 2, jwtChanges)
 	require.Equal(t, 0, errors)
 
