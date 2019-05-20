@@ -139,3 +139,7 @@ func (store *DirJWTStore) pathForKey(publicKey string) string {
 
 	return dirPath
 }
+
+// Close is a no-op for a directory store
+func (store *DirJWTStore) Close() {
+}

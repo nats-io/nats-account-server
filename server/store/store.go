@@ -23,4 +23,5 @@ type JWTStore interface {
 	Load(publicKey string) (string, error)
 	Save(publicKey string, theJWT string) error
 	IsReadOnly() bool
+	Close()
 }

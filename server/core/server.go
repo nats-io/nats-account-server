@@ -224,7 +224,28 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 
 	if config.NSC != "" {
 		server.logger.Noticef("creating a read-only store for the NSC folder at %s", config.NSC)
-		return store.NewNSCJWTStore(config.NSC)
+		return store.NewNSCJWTStore(config.NSC, func(pubKey string) {
+			theJWT, err := server.jwtStore.Load(pubKey)
+			if err != nil {
+				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+				return
+			}
+
+			decoded, err := jwt.DecodeAccountClaims(theJWT)
+			if err != nil {
+				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+				return
+			}
+
+			err = server.sendAccountNotification(decoded, []byte(theJWT))
+			if err != nil {
+				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+				return
+			}
+		}, func(err error) {
+			server.logger.Errorf("The NSC store encountered an error, shutting down ...")
+			server.Stop()
+		})
 	}
 
 	if config.Dir != "" {
@@ -323,6 +344,11 @@ func (server *AccountServer) Stop() {
 	}
 
 	server.stopHTTP()
+
+	if server.jwtStore != nil {
+		server.jwtStore.Close()
+		server.logger.Noticef("closed JWT store")
+	}
 }
 
 // FatalError stops the server, prints the messages and exits

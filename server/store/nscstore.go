@@ -18,27 +18,123 @@ package store
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
+	"github.com/fsnotify/fsnotify"
 	nsc "github.com/nats-io/nsc/cmd/store"
 )
 
-// NSCJWTStore implements the JWT Store interface, keeping all data in NSCory
+// JWTChanged functions are called when the NSC store notices a JWT changed
+type JWTChanged func(publicKey string)
+
+// JWTError functions are called when the NSC store file watcher has an error
+type JWTError func(err error)
+
+// NSCJWTStore implements the JWT Store interface, keeping all data in NSC
 type NSCJWTStore struct {
-	nsc *nsc.Store
+	nsc           *nsc.Store
+	changed       JWTChanged
+	errorOccurred JWTError
+	watcher       *fsnotify.Watcher
+	done          chan bool
 }
 
 // NewNSCJWTStore returns an empty, immutable NSC folder-based JWT store
-func NewNSCJWTStore(dirPath string) (JWTStore, error) {
-
+func NewNSCJWTStore(dirPath string, changeNotification JWTChanged, errorNotification JWTError) (JWTStore, error) {
 	nscStore, err := nsc.LoadStore(dirPath)
 
 	if err != nil {
 		return nil, err
 	}
 
-	return &NSCJWTStore{
-		nsc: nscStore,
-	}, nil
+	theStore := &NSCJWTStore{
+		nsc:           nscStore,
+		changed:       changeNotification,
+		errorOccurred: errorNotification,
+	}
+
+	err = theStore.startWatching()
+
+	if err != nil {
+		theStore.Close()
+		return nil, err
+	}
+
+	return theStore, nil
+}
+
+func (store *NSCJWTStore) startWatching() error {
+
+	watcher, err := fsnotify.NewWatcher()
+	done := make(chan bool)
+
+	if err != nil {
+		return err
+	}
+
+	store.watcher = watcher
+	store.done = done
+
+	dirPath := store.nsc.Dir
+	accountsPath := filepath.Join(dirPath, nsc.Accounts)
+
+	watcher.Add(accountsPath)
+
+	infos, err := store.nsc.List(nsc.Accounts)
+	if err != nil {
+		return err
+	}
+
+	for _, i := range infos {
+		if i.IsDir() {
+			accountJWTPath := filepath.Join(dirPath, nsc.Accounts, i.Name(), nsc.JwtName(i.Name()))
+			watcher.Add(accountJWTPath)
+		}
+	}
+
+	go func() {
+		running := true
+		for running {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					// Check for jwt change, ignore others
+					if strings.HasSuffix(event.Name, ".jwt") {
+						fileName := filepath.Base(event.Name)
+						accountName := strings.Replace(fileName, ".jwt", "", -1)
+
+						c, err := store.nsc.LoadClaim(nsc.Accounts, accountName, nsc.JwtName(accountName))
+						if err != nil {
+							store.errorOccurred(err)
+						}
+						store.changed(c.Subject)
+					}
+				}
+
+				if event.Op&fsnotify.Create == fsnotify.Create {
+					if filepath.Dir(event.Name) == filepath.Join(store.nsc.Dir, nsc.Accounts) {
+						acctName := filepath.Base(event.Name)
+						accountJWTPath := filepath.Join(event.Name, nsc.JwtName(acctName))
+						store.watcher.Add(accountJWTPath)
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				store.errorOccurred(err)
+			case <-done:
+				running = false
+			}
+		}
+	}()
+
+	return nil
 }
 
 // Load checks the NSCory store and returns the matching JWT or an error
@@ -81,4 +177,14 @@ func (store *NSCJWTStore) Save(publicKey string, theJWT string) error {
 // IsReadOnly returns a flag determined at creation time
 func (store *NSCJWTStore) IsReadOnly() bool {
 	return true
+}
+
+// Close cleans up the dir watchers
+func (store *NSCJWTStore) Close() {
+	if store.done != nil {
+		store.done <- true
+	}
+	if store.watcher != nil {
+		store.watcher.Close()
+	}
 }

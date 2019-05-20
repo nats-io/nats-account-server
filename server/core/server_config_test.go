@@ -43,6 +43,7 @@ func TestStartWithDirFlag(t *testing.T) {
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
+	server.config.HTTP.Port = 0 // reset port so we don't conflict
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -136,6 +137,7 @@ func TestStartWithNSCFlag(t *testing.T) {
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
+	server.config.HTTP.Port = 0 // reset port so we don't conflict
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -167,6 +169,7 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 		},
 		http: {
 			ReadTimeout: 2000,
+			Port: 0,
 		}
 	}
 	`
@@ -184,6 +187,7 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
+	server.config.HTTP.Port = 0 // reset port so we don't conflict
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
