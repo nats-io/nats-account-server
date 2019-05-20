@@ -19,6 +19,7 @@ package store
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -125,6 +126,12 @@ func TestBadFolderNSCStore(t *testing.T) {
 }
 
 func TestNSCFileNotifications(t *testing.T) {
+
+	// Skip the file notification test on travis
+	if os.Getenv("TRAVIS_GO_VERSION") != "" {
+		return
+	}
+
 	_, _, kp := CreateOperatorKey(t)
 	_, apub, _ := CreateAccountKey(t)
 	s := CreateTestStoreForOperator(t, "x", kp)
