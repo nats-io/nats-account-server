@@ -89,7 +89,8 @@ characters in the accounts public key are used to create a sub-folder, and the a
 ".jwt" appended. The directory store can be run in read-only mode.
 
 * NSC Store - The NSC store uses an operator folder, as created by the `nsc` tool as a JWT source. The store is read-only, but
-will automatically host new JWTs added by `nsc`. Use the `notify` flag to push the change to the nats-servers.
+will automatically host new JWTs added by `nsc`. The server will watch for changes in the account JWT files and send NATS notifications on changes, if
+configured to do so.
 
 * Memory Store - By default the account server uses an in-memory store. This store is provided for testing and shouldn't be used in
 production.

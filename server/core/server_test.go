@@ -218,6 +218,8 @@ func SetupTestServer(config conf.AccountServerConfig, useTLS bool, enableNats bo
 	natsPort := atomic.AddUint64(&port, 1)
 	natsURL := fmt.Sprintf("nats://localhost:%d", natsPort)
 
+	config.HTTP.Port = int(atomic.AddUint64(&port, 1))
+
 	config.OperatorJWTPath = testSetup.OperatorJWTFile
 	config.SystemAccountJWTPath = testSetup.SystemAccountJWTFile
 

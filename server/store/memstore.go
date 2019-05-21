@@ -66,3 +66,7 @@ func (store *MemJWTStore) Save(publicKey string, theJWT string) error {
 func (store *MemJWTStore) IsReadOnly() bool {
 	return store.readonly
 }
+
+// Close is a no-op for a mem store
+func (store *MemJWTStore) Close() {
+}

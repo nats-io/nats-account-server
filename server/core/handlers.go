@@ -235,6 +235,7 @@ func (server *AccountServer) writeJWTAsText(w http.ResponseWriter, pubKey string
 	}
 }
 
+// UnescapedIndentedMarshal handle indention for decoded JWTs
 func UnescapedIndentedMarshal(v interface{}, prefix, indent string) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

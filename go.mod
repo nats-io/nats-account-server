@@ -1,6 +1,7 @@
 module github.com/nats-io/nats-account-server
 
 require (
+	github.com/fsnotify/fsnotify v1.4.7
 	github.com/golang/protobuf v1.3.1 // indirect
 	github.com/julienschmidt/httprouter v1.2.0
 	github.com/mitchellh/go-homedir v1.0.0
