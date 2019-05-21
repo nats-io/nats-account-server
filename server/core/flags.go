@@ -9,6 +9,8 @@ type Flags struct {
 
 	Directory string
 
+	ReadOnly bool
+
 	NATSURL string
 	Creds   string
 

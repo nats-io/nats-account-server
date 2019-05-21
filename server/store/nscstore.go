@@ -67,14 +67,13 @@ func NewNSCJWTStore(dirPath string, changeNotification JWTChanged, errorNotifica
 func (store *NSCJWTStore) startWatching() error {
 
 	watcher, err := fsnotify.NewWatcher()
-	done := make(chan bool)
+	done := make(chan bool, 1)
 
 	if err != nil {
 		return err
 	}
 
 	store.watcher = watcher
-	store.done = done
 
 	dirPath := store.nsc.Dir
 	accountsPath := filepath.Join(dirPath, nsc.Accounts)
@@ -93,6 +92,7 @@ func (store *NSCJWTStore) startWatching() error {
 		}
 	}
 
+	store.done = done
 	go func() {
 		running := true
 		for running {
@@ -107,7 +107,6 @@ func (store *NSCJWTStore) startWatching() error {
 					if strings.HasSuffix(event.Name, ".jwt") {
 						fileName := filepath.Base(event.Name)
 						accountName := strings.Replace(fileName, ".jwt", "", -1)
-
 						c, err := store.nsc.LoadClaim(nsc.Accounts, accountName, nsc.JwtName(accountName))
 						if err != nil {
 							store.errorOccurred(err)
@@ -120,7 +119,10 @@ func (store *NSCJWTStore) startWatching() error {
 					if filepath.Dir(event.Name) == filepath.Join(store.nsc.Dir, nsc.Accounts) {
 						acctName := filepath.Base(event.Name)
 						accountJWTPath := filepath.Join(event.Name, nsc.JwtName(acctName))
-						store.watcher.Add(accountJWTPath)
+						err := store.watcher.Add(accountJWTPath)
+						if err != nil {
+							store.errorOccurred(err)
+						}
 					}
 				}
 			case err, ok := <-watcher.Errors:
