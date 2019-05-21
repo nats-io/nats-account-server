@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/nats-io/nats-account-server/server/conf"
@@ -34,6 +35,8 @@ const (
 // DirJWTStore implements the JWT Store interface, keeping JWTs in an optionally sharded
 // directory structure
 type DirJWTStore struct {
+	sync.Mutex
+
 	directory     string
 	readonly      bool
 	shard         bool
@@ -108,6 +111,8 @@ func NewImmutableDirJWTStore(dirPath string, sharded bool, changeNotification JW
 }
 
 func (store *DirJWTStore) startWatching() error {
+	store.Lock()
+	defer store.Unlock()
 
 	watcher, err := fsnotify.NewWatcher()
 	done := make(chan bool, 1)
@@ -145,12 +150,18 @@ func (store *DirJWTStore) startWatching() error {
 
 	go func() {
 		running := true
-		for running {
+		store.Lock()
+		watcher := store.watcher
+		store.Unlock()
+
+		for running && watcher != nil {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
 					return
 				}
+
+				fmt.Printf("event %s\n", event.String())
 
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					// Check for jwt change, ignore others
@@ -159,27 +170,34 @@ func (store *DirJWTStore) startWatching() error {
 						pubKey := strings.Replace(fileName, ".jwt", "", -1)
 						store.changed(pubKey)
 					}
-				}
-
-				if event.Op&fsnotify.Create == fsnotify.Create {
-					info, err := os.Stat(event.Name)
-					if err != nil {
-						store.errorOccurred(err)
-					}
-
-					if !info.IsDir() {
-						if strings.HasSuffix(event.Name, extension) {
-							err := store.watcher.Add(event.Name)
-							if err != nil {
-								store.errorOccurred(err)
-							}
+				} else if event.Op&fsnotify.Create == fsnotify.Create {
+					if strings.HasSuffix(event.Name, extension) {
+						err := watcher.Add(event.Name)
+						if err != nil {
+							store.errorOccurred(err)
 						}
-						break
-					}
+					} else if filepath.Dir(event.Name) == store.directory && store.shard { // Only go 1 level down
+						err := watcher.Add(event.Name)
+						if err != nil {
+							store.errorOccurred(err)
+						}
+						var files []string
+						err = filepath.Walk(event.Name, func(path string, info os.FileInfo, err error) error {
+							if !info.IsDir() && strings.HasSuffix(path, extension) {
+								files = append(files, path)
+							}
+							return nil
+						})
 
-					// Only go 1 level down
-					if filepath.Dir(event.Name) == store.directory && store.shard {
-						store.watcher.Add(event.Name)
+						if err != nil {
+							store.errorOccurred(err)
+							break
+						}
+
+						for _, file := range files {
+							watcher.Add(file)
+							fmt.Printf("Watching %s\n", file)
+						}
 					}
 				}
 			case err, ok := <-watcher.Errors:
@@ -198,6 +216,9 @@ func (store *DirJWTStore) startWatching() error {
 
 // Load checks the memory store and returns the matching JWT or an error
 func (store *DirJWTStore) Load(publicKey string) (string, error) {
+	store.Lock()
+	defer store.Unlock()
+
 	path := store.pathForKey(publicKey)
 
 	if path == "" {
@@ -215,6 +236,9 @@ func (store *DirJWTStore) Load(publicKey string) (string, error) {
 
 // Save puts the JWT in a map by public key, no checks are performed
 func (store *DirJWTStore) Save(publicKey string, theJWT string) error {
+	store.Lock()
+	defer store.Unlock()
+
 	if store.readonly {
 		return fmt.Errorf("store is read-only")
 	}
@@ -263,6 +287,9 @@ func (store *DirJWTStore) pathForKey(publicKey string) string {
 
 // Close is a no-op for a directory store
 func (store *DirJWTStore) Close() {
+	store.Lock()
+	defer store.Unlock()
+
 	if store.done != nil {
 		store.done <- true
 	}

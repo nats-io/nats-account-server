@@ -19,6 +19,7 @@ package store
 import (
 	"io/ioutil"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,14 +157,14 @@ func TestShardedDirStoreNotifications(t *testing.T) {
 	require.NoError(t, err)
 
 	notified := make(chan bool)
-	jwtChanges := 0
-	errors := 0
+	jwtChanges := int32(0)
+	errors := int32(0)
 
 	store, err := NewDirJWTStore(dir, true, false, func(pubKey string) {
-		jwtChanges++
+		atomic.AddInt32(&jwtChanges, 1)
 		notified <- true
 	}, func(err error) {
-		errors++
+		atomic.AddInt32(&errors, 1)
 		notified <- true
 	})
 	require.NoError(t, err)
@@ -181,6 +182,8 @@ func TestShardedDirStoreNotifications(t *testing.T) {
 		store.Save(k, v)
 	}
 
+	time.Sleep(time.Second)
+
 	for k, v := range expected {
 		got, err := store.Load(k)
 		require.NoError(t, err)
@@ -193,25 +196,25 @@ func TestShardedDirStoreNotifications(t *testing.T) {
 	case <-notified:
 	case <-time.After(3 * time.Second):
 	}
-	require.Equal(t, 1, jwtChanges)
-	require.Equal(t, 0, errors)
+	require.Equal(t, int32(1), atomic.LoadInt32(&jwtChanges))
+	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
 
 	// re-use the folder for readonly mode
 	roNotified := make(chan bool)
-	roJWTChanges := 0
-	roErrors := 0
+	roJWTChanges := int32(0)
+	roErrors := int32(0)
 
 	readOnlyStore, err := NewImmutableDirJWTStore(dir, true, func(pubKey string) {
-		roJWTChanges++
+		atomic.AddInt32(&roJWTChanges, 1)
 		roNotified <- true
 	}, func(err error) {
-		roErrors++
+		atomic.AddInt32(&roErrors, 1)
 		roNotified <- true
 	})
 	require.NoError(t, err)
 	require.True(t, readOnlyStore.IsReadOnly())
 
-	got, err := store.Load("one")
+	got, err := readOnlyStore.Load("one")
 	require.NoError(t, err)
 	require.Equal(t, "zip", got)
 
@@ -221,15 +224,15 @@ func TestShardedDirStoreNotifications(t *testing.T) {
 	case <-roNotified:
 	case <-time.After(3 * time.Second):
 	}
-	require.Equal(t, 1, roJWTChanges)
-	require.Equal(t, 0, roErrors)
+	require.Equal(t, int32(1), atomic.LoadInt32(&roJWTChanges))
+	require.Equal(t, int32(0), atomic.LoadInt32(&roErrors))
 
 	select {
 	case <-notified:
 	case <-time.After(3 * time.Second):
 	}
-	require.Equal(t, 2, jwtChanges) // still have the changes from before
-	require.Equal(t, 0, errors)
+	require.Equal(t, int32(2), atomic.LoadInt32(&jwtChanges)) // still have the changes from before
+	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
 
 	store.Close()
 	readOnlyStore.Close()
@@ -246,14 +249,14 @@ func TestUnShardedDirStoreNotifications(t *testing.T) {
 	require.NoError(t, err)
 
 	notified := make(chan bool)
-	jwtChanges := 0
-	errors := 0
+	jwtChanges := int32(0)
+	errors := int32(0)
 
 	store, err := NewDirJWTStore(dir, false, false, func(pubKey string) {
-		jwtChanges++
+		atomic.AddInt32(&jwtChanges, 1)
 		notified <- true
 	}, func(err error) {
-		errors++
+		atomic.AddInt32(&errors, 1)
 		notified <- true
 	})
 	require.NoError(t, err)
@@ -270,6 +273,8 @@ func TestUnShardedDirStoreNotifications(t *testing.T) {
 		store.Save(k, v)
 	}
 
+	time.Sleep(time.Second)
+
 	for k, v := range expected {
 		got, err := store.Load(k)
 		require.NoError(t, err)
@@ -280,27 +285,27 @@ func TestUnShardedDirStoreNotifications(t *testing.T) {
 
 	select {
 	case <-notified:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
-	require.Equal(t, 1, jwtChanges)
-	require.Equal(t, 0, errors)
+	require.Equal(t, int32(1), atomic.LoadInt32(&jwtChanges))
+	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
 
 	// re-use the folder for readonly mode
 	roNotified := make(chan bool)
-	roJWTChanges := 0
-	roErrors := 0
+	roJWTChanges := int32(0)
+	roErrors := int32(0)
 
 	readOnlyStore, err := NewImmutableDirJWTStore(dir, false, func(pubKey string) {
-		roJWTChanges++
+		atomic.AddInt32(&roJWTChanges, 1)
 		roNotified <- true
 	}, func(err error) {
-		roErrors++
+		atomic.AddInt32(&roErrors, 1)
 		roNotified <- true
 	})
 	require.NoError(t, err)
 	require.True(t, readOnlyStore.IsReadOnly())
 
-	got, err := store.Load("one")
+	got, err := readOnlyStore.Load("one")
 	require.NoError(t, err)
 	require.Equal(t, "zip", got)
 
@@ -308,17 +313,17 @@ func TestUnShardedDirStoreNotifications(t *testing.T) {
 
 	select {
 	case <-roNotified:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
-	require.Equal(t, 1, roJWTChanges)
-	require.Equal(t, 0, roErrors)
+	require.Equal(t, int32(1), atomic.LoadInt32(&roJWTChanges))
+	require.Equal(t, int32(0), atomic.LoadInt32(&roErrors))
 
 	select {
 	case <-notified:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
-	require.Equal(t, 2, jwtChanges) // still have the changes from before
-	require.Equal(t, 0, errors)
+	require.Equal(t, int32(2), atomic.LoadInt32(&jwtChanges))
+	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
 
 	store.Close()
 	readOnlyStore.Close()
