@@ -30,5 +30,6 @@ cover: test
 	go tool cover -html=./coverage.out
 
 test: check
+	go mod vendor
 	rm -rf ./cover.out
 	go test -race -coverpkg=./... -coverprofile=./coverage.out ./...
