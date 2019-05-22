@@ -14,18 +14,18 @@
  *
  */
 
- package core
+package core
 
- import (
-	 "testing"
- 
-	 "github.com/stretchr/testify/require"
- )
- 
- func TestUnixToDateEmptyString(t *testing.T) {
-	 require.Equal(t, "", UnixToDate(0))
- }
+import (
+	"testing"
 
- func TestShortKeyTooShort(t *testing.T) {
-	 require.Equal(t, "foo", ShortKey("foo"))
- }
+	"github.com/stretchr/testify/require"
+)
+
+func TestUnixToDateEmptyString(t *testing.T) {
+	require.Equal(t, "", UnixToDate(0))
+}
+
+func TestShortKeyTooShort(t *testing.T) {
+	require.Equal(t, "foo", ShortKey("foo"))
+}
