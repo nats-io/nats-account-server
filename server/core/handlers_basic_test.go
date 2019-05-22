@@ -307,3 +307,157 @@ func TestUploadGetAccountJWTTLS(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 }
+
+func TestInvalidJWTPost(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte("hello world")))
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+}
+
+func TestInvalidSigner(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	acctJWT, err := account.Encode(accountKey)
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+}
+
+func TestUnknownSigner(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	operatorKey, err := nkeys.CreateOperator()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	acctJWT, err := account.Encode(operatorKey)
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+}
+
+func TestExpiredAccount(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	operatorKey := testEnv.OperatorKey
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	account.Expires = time.Now().Unix() - 1000;
+	acctJWT, err := account.Encode(operatorKey)
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+}
+
+
+func TestCacheHeader(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	operatorKey := testEnv.OperatorKey
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	acctJWT, err := account.Encode(operatorKey)
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	etag := resp.Header["Etag"][0]
+
+	request, err := http.NewRequest("GET", url, nil)
+	require.NoError(t, err)
+	request.Header.Set("If-None-Match", etag)
+
+	resp, err = testEnv.HTTP.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotModified, resp.StatusCode)
+}

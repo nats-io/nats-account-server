@@ -66,14 +66,10 @@ github.com/nats-io/gnatsd v1.4.1/go.mod h1:nqco77VO78hLCJpIcVfygDP2rPGfsEHkGTUk9
 github.com/nats-io/go-nats v1.7.2 h1:cJujlwCYR8iMz5ofZSD/p2WLW8FabhkQ2lIEVbSvNSA=
 github.com/nats-io/go-nats v1.7.2/go.mod h1:+t7RHT5ApZebkrQdnn6AhQJmhJJiKAvJUio1PiiCtj0=
 github.com/nats-io/jwt v0.0.8/go.mod h1:mQxQ0uHQ9FhEVPIcTSKwx2lqZEpXWWcCgA7R6NrWvvY=
-github.com/nats-io/jwt v0.2.0 h1:PtxWRbBzg9ATjuvJtrb86BucbnKeTpcod1Ej54EA2bo=
-github.com/nats-io/jwt v0.2.0/go.mod h1:mQxQ0uHQ9FhEVPIcTSKwx2lqZEpXWWcCgA7R6NrWvvY=
 github.com/nats-io/jwt v0.2.4 h1:SZ27ZMqlP8US5QYFE+GPYtZZQa7PZUVZ6lNV3L7Z7EU=
 github.com/nats-io/jwt v0.2.4/go.mod h1:mQxQ0uHQ9FhEVPIcTSKwx2lqZEpXWWcCgA7R6NrWvvY=
 github.com/nats-io/nats-server v0.0.0-20190506224138-6584a9a8283f h1:Nl/INayD720cp/BLYdrX8GOJxazyIoz8Xs0C+WyEYxk=
 github.com/nats-io/nats-server v0.0.0-20190506224138-6584a9a8283f/go.mod h1:I2iRIIxSsuCa9kR7PNMOffC7o3Vn+f5sn9NNRC9dddo=
-github.com/nats-io/nats-server v1.4.1 h1:Ul1oSOGNV/L8kjr4v6l2f9Yet6WY+LevH1/7cRZ/qyA=
-github.com/nats-io/nats-server v1.4.1/go.mod h1:c8f/fHd2B6Hgms3LtCaI7y6pC4WD1f4SUxcCud5vhBc=
 github.com/nats-io/nkeys v0.0.2 h1:+qM7QpgXnvDDixitZtQUBDY9w/s9mu1ghS+JIbsrx6M=
 github.com/nats-io/nkeys v0.0.2/go.mod h1:dab7URMsZm6Z/jp9Z5UGa87Uutgc2mVpXLC4B7TDb/4=
 github.com/nats-io/nsc v0.0.0-20181222012937-6aff930ee7ef h1:PZfHH02sxkZP8eNw6u7BUqKPCPHqYsA0ctRIckQJGTI=
@@ -144,8 +140,6 @@ golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e/go.mod h1:STP8DvDyc/dI5b8T5h
 golang.org/x/sys v0.0.0-20181107165924-66b7b1311ac8/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20181205085412-a5c9d58dba9a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
-golang.org/x/sys v0.0.0-20190410170021-cc4d4f50624c h1:OUGWoQpM/o3TxM7Fp3CEqRpaYCbg4H1hOVPnZoUtr2U=
-golang.org/x/sys v0.0.0-20190410170021-cc4d4f50624c/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20190506115046-ca7f33d4116e h1:bq5BY1tGuaK8HxuwN6pT6kWgTVLeJ5KwuyBpsl1CZL4=
 golang.org/x/sys v0.0.0-20190506115046-ca7f33d4116e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=

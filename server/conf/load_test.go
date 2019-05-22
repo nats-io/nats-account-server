@@ -49,6 +49,12 @@ func TestLoadFromString(t *testing.T) {
 	require.Equal(t, 5.5, config.Balance)
 }
 
+func TestLoadFromEmptyString(t *testing.T) {
+	config := SimpleConf{}
+	err := LoadConfigFromString("", &config, true)
+	require.Error(t, err)
+}
+
 func TestLoadFromFile(t *testing.T) {
 	file, err := ioutil.TempFile(os.TempDir(), "prefix")
 	require.NoError(t, err)
