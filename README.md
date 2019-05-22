@@ -86,7 +86,8 @@ This repository provides three JWT store implementations, and can be extended to
 
 * Directory Store - The directory store saves and loads JWTs into an optionally sharded structure under a root folder. The last two
 characters in the accounts public key are used to create a sub-folder, and the accounts public key is used as the file name, with
-".jwt" appended. The directory store can be run in read-only mode.
+".jwt" appended. The directory store can be run in read-only mode. The server will watch for changes in read-only mode and send NATS notifications
+on changes, if configured to do so. In writable mode the server will only notify the nats-server of a change if the POST command is used to update a JWT.
 
 * NSC Store - The NSC store uses an operator folder, as created by the `nsc` tool as a JWT source. The store is read-only, but
 will automatically host new JWTs added by `nsc`. The server will watch for changes in the account JWT files and send NATS notifications on changes, if
@@ -114,6 +115,8 @@ The account server can be started with or without a NATS configuration, and will
 The server will compile to an executable named `nats-account-server`. You can run this executable without flags to get a memory based account server with no
 [notifications](#nats). For more interesting operation there are a hand full of flags and a [configuration](#config) file.
 
+### NSC Mode
+
 To run the server on an NSC folder, use the `-nsc` flag to point to a specific operator folder in your NSC directory. For example:
 
 ```bash
@@ -133,6 +136,29 @@ If the `-nats` flag is set, you can force a notification using a GET request lik
 ```
 
 The nsc-based account server will not accept POST requests.
+
+### Directory Mode
+
+To run against a folder, use the `-dir` flag with an optional `-ro` flag. The `-ro` flag tells the server not to accept POST requests, and instead to watch the file system for changes. If the server accepts POST requests, it does not watch the file system for changes.
+
+```bash
+% nats-account-server -dir ~/myjwts
+```
+
+### Directory Mode and Git
+
+If you want to store your JWTs in a revision controlled folder, you can do something like:
+
+```bash
+% git clone <url to myjwts> myjwts
+% nats-account-server -dir myjwts -ro -nats nats://192.169.0.1:4222
+```
+
+The account server will watch for file changes and send notifications to the nats-server when a change occurs.
+
+Note, creation of a file won't send the notification, only an actual write to the file. So if you edit a JWT and do a git pull, the notification will be sent.
+
+### Running with a Configuration File
 
 To run with a [configuration](#config) file, use the `-c` flag:
 

@@ -107,7 +107,7 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 	} else if flags.Directory != "" {
 		server.config.Store = conf.StoreConfig{
 			Dir:      flags.Directory,
-			ReadOnly: false,
+			ReadOnly: flags.ReadOnly,
 		}
 	}
 
@@ -219,43 +219,47 @@ func (server *AccountServer) Start() error {
 	return nil
 }
 
+func (server *AccountServer) jwtChangedCallback(pubKey string) {
+	theJWT, err := server.jwtStore.Load(pubKey)
+	if err != nil {
+		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+		return
+	}
+
+	decoded, err := jwt.DecodeAccountClaims(theJWT)
+	if err != nil {
+		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+		return
+	}
+
+	err = server.sendAccountNotification(decoded, []byte(theJWT))
+	if err != nil {
+		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
+		return
+	}
+}
+
+func (server *AccountServer) storeErrorCallback(err error) {
+	server.logger.Errorf("The NSC store encountered an error, shutting down ...")
+	server.Stop()
+}
+
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
 
 	if config.NSC != "" {
 		server.logger.Noticef("creating a read-only store for the NSC folder at %s", config.NSC)
-		return store.NewNSCJWTStore(config.NSC, func(pubKey string) {
-			theJWT, err := server.jwtStore.Load(pubKey)
-			if err != nil {
-				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-				return
-			}
-
-			decoded, err := jwt.DecodeAccountClaims(theJWT)
-			if err != nil {
-				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-				return
-			}
-
-			err = server.sendAccountNotification(decoded, []byte(theJWT))
-			if err != nil {
-				server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-				return
-			}
-		}, func(err error) {
-			server.logger.Errorf("The NSC store encountered an error, shutting down ...")
-			server.Stop()
-		})
+		return store.NewNSCJWTStore(config.NSC, server.jwtChangedCallback, server.storeErrorCallback)
 	}
 
 	if config.Dir != "" {
 		if config.ReadOnly {
 			server.logger.Noticef("creating a read-only store at %s", config.Dir)
-			return store.NewImmutableDirJWTStore(config.Dir, config.Shard)
+			return store.NewImmutableDirJWTStore(config.Dir, config.Shard, server.jwtChangedCallback, server.storeErrorCallback)
 		}
 
 		server.logger.Noticef("creating a store at %s", config.Dir)
-		return store.NewDirJWTStore(config.Dir, config.Shard, true)
+		return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
 	}
 
 	if config.ReadOnly {
