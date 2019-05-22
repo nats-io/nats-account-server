@@ -48,14 +48,20 @@ type DirJWTStore struct {
 
 // NewDirJWTStore returns an empty, mutable directory-based JWT store
 func NewDirJWTStore(dirPath string, shard bool, create bool, changeNotification JWTChanged, errorNotification JWTError) (JWTStore, error) {
-	dirPath, err := conf.ValidateDirPath(dirPath)
+	fullPath, err := conf.ValidateDirPath(dirPath)
 
 	if err != nil {
 		if !create {
 			return nil, err
 		}
 
-		err := os.MkdirAll(dirPath, 0755)
+		err = os.MkdirAll(dirPath, 0755)
+
+		if err != nil {
+			return nil, err
+		}
+
+		fullPath, err = conf.ValidateDirPath(dirPath)
 
 		if err != nil {
 			return nil, err
@@ -63,7 +69,7 @@ func NewDirJWTStore(dirPath string, shard bool, create bool, changeNotification 
 	}
 
 	theStore := &DirJWTStore{
-		directory:     dirPath,
+		directory:     fullPath,
 		readonly:      false,
 		shard:         shard,
 		changed:       changeNotification,
