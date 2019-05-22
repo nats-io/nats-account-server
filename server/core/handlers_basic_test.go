@@ -402,7 +402,7 @@ func TestExpiredAccount(t *testing.T) {
 	require.NoError(t, err)
 
 	account := jwt.NewAccountClaims(pubKey)
-	account.Expires = time.Now().Unix() - 1000;
+	account.Expires = time.Now().Unix() - 1000
 	acctJWT, err := account.Encode(operatorKey)
 	require.NoError(t, err)
 
@@ -417,7 +417,6 @@ func TestExpiredAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.StatusCode == http.StatusOK)
 }
-
 
 func TestCacheHeader(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
