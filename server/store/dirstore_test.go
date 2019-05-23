@@ -19,6 +19,7 @@ package store
 import (
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,6 +145,24 @@ func TestReadonlyRequiresDir(t *testing.T) {
 func TestNoCreateRequiresDir(t *testing.T) {
 	_, err := NewDirJWTStore("/a/b/c", true, false, func(pubKey string) {}, func(err error) {})
 	require.Error(t, err)
+}
+
+func TestCreateMakesDir(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	fullPath := filepath.Join(dir, "a/b")
+
+	_, err = os.Stat(fullPath)
+	require.Error(t, err)
+	require.True(t, os.IsNotExist(err))
+
+	s, err := NewDirJWTStore(fullPath, false, true, func(pubKey string) {}, func(err error) {})
+	require.NoError(t, err)
+	s.Close()
+
+	_, err = os.Stat(fullPath)
+	require.NoError(t, err)
 }
 
 func TestShardedDirStoreNotifications(t *testing.T) {
