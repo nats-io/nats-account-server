@@ -27,9 +27,12 @@ install: build
 	go install ./...
 
 cover: test
-	go tool cover -html=./coverage.out
+	go tool cover -html=./coverage.out -tags test
 
 test: check
 	go mod vendor
 	rm -rf ./cover.out
-	go test -race -coverpkg=./... -coverprofile=./coverage.out ./...
+	go test -race -coverpkg=./server/... -coverprofile=./coverage.out ./...
+
+fasttest:
+	scripts/cov.sh

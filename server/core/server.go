@@ -19,7 +19,6 @@ package core
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -353,11 +352,4 @@ func (server *AccountServer) Stop() {
 		server.jwtStore.Close()
 		server.logger.Noticef("closed JWT store")
 	}
-}
-
-// FatalError stops the server, prints the messages and exits
-func (server *AccountServer) FatalError(format string, args ...interface{}) {
-	server.Stop()
-	log.Fatalf(format, args...)
-	os.Exit(-1)
 }

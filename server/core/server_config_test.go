@@ -22,8 +22,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	nats "github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nkeys"
@@ -133,11 +135,11 @@ func TestStartWithNSCFlag(t *testing.T) {
 	flags := Flags{
 		DebugAndVerbose: true,
 		NSCFolder:       filepath.Join(path, "x"),
+		HostPort:        "localhost:0",
 	}
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
-	server.config.HTTP.Port = 0 // reset port so we don't conflict
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -183,11 +185,12 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 
 	flags := Flags{
 		ConfigFile: fullPath,
+		HostPort:   "localhost:0",
 	}
 
 	server := NewAccountServer()
-	server.InitializeFromFlags(flags)
-	server.config.HTTP.Port = 0 // reset port so we don't conflict
+	err = server.InitializeFromFlags(flags)
+	require.NoError(t, err)
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -206,4 +209,92 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 
 	help := string(body)
 	require.Equal(t, jwtAPIHelp, help)
+}
+
+func TestNATSFlags(t *testing.T) {
+	lock := sync.Mutex{}
+
+	// Setup the full environment, but we will make another server to
+	// test flags
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	_, _, kp := CreateOperatorKey(t)
+	_, apub, _ := CreateAccountKey(t)
+	s, path := CreateTestStoreForOperator(t, "x", kp)
+
+	c := jwt.NewAccountClaims(apub)
+	c.Name = "foo"
+	cd, err := c.Encode(kp)
+	require.NoError(t, err)
+	err = s.StoreClaim([]byte(cd))
+	require.NoError(t, err)
+
+	flags := Flags{
+		DebugAndVerbose: true,
+		NSCFolder:       filepath.Join(path, "x"),
+		HostPort:        "localhost:0",
+		NATSURL:         testEnv.NC.ConnectedUrl(),
+		Creds:           testEnv.SystemUserCredsFile,
+	}
+
+	server := NewAccountServer()
+	err = server.InitializeFromFlags(flags)
+	require.NoError(t, err)
+	err = server.Start()
+	require.NoError(t, err)
+	defer server.Stop()
+
+	httpClient, err := testHTTPClient(false)
+	require.NoError(t, err)
+
+	notificationJWT := ""
+	subject := fmt.Sprintf(accountNotificationFormat, apub)
+	_, err = testEnv.NC.Subscribe(subject, func(m *nats.Msg) {
+		lock.Lock()
+		notificationJWT = string(m.Data)
+		lock.Unlock()
+	})
+	require.NoError(t, err)
+
+	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/jwt/v1/accounts/%s?notify=true", server.port, apub))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	jwt := string(body)
+	require.Equal(t, cd, jwt)
+
+	server.nats.Flush()
+	testEnv.NC.Flush()
+
+	lock.Lock()
+	require.Equal(t, notificationJWT, string(jwt))
+	lock.Unlock()
+}
+
+func TestStartWithBadHostPortFlag(t *testing.T) {
+	_, _, kp := CreateOperatorKey(t)
+	_, path := CreateTestStoreForOperator(t, "x", kp)
+
+	flags := Flags{
+		DebugAndVerbose: true,
+		NSCFolder:       filepath.Join(path, "x"),
+		HostPort:        "localhost",
+	}
+
+	server := NewAccountServer()
+	err := server.InitializeFromFlags(flags)
+	require.Error(t, err)
+
+	flags = Flags{
+		DebugAndVerbose: true,
+		NSCFolder:       filepath.Join(path, "x"),
+		HostPort:        "localhost:blam",
+	}
+
+	err = server.InitializeFromFlags(flags)
+	require.Error(t, err)
 }

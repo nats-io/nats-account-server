@@ -44,7 +44,8 @@ func (server *AccountServer) startHTTP() error {
 
 	router, err := server.buildRouter()
 	if err != nil {
-		server.FatalError("error creating the router: %v", err)
+		server.logger.Errorf("error creating the router: %v", err)
+		return err
 	}
 
 	xrs := cors.New(cors.Options{
