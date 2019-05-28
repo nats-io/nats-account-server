@@ -55,6 +55,7 @@ func main() {
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
 	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
 	flag.StringVar(&flags.Creds, "creds", "", "the creds file for connecting to NATS")
+	flag.StringVar(&flags.Primary, "primary", "", "the URL for the primary server, in the form http(s)://host:port/")
 	flag.BoolVar(&flags.Debug, "D", false, "turn on debug logging")
 	flag.BoolVar(&flags.Verbose, "V", false, "turn on verbose logging")
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")

@@ -205,6 +205,23 @@ func (ts *TestSetup) initKeys() error {
 	return nil
 }
 
+func (ts *TestSetup) CreateReplica(dir string) (*AccountServer, error) {
+	config := conf.DefaultServerConfig()
+	config.Primary = ts.URLForPath("/")
+	config.NATS = ts.Server.config.NATS
+	config.HTTP.Port = int(atomic.AddUint64(&port, 1))
+	config.OperatorJWTPath = ts.OperatorJWTFile
+	config.SystemAccountJWTPath = ts.SystemAccountJWTFile
+	config.Logging.Trace = true
+	config.Logging.Debug = true
+	config.Store.Dir = dir
+	config.HTTP.TLS = ts.Server.config.HTTP.TLS
+
+	replica := NewAccountServer()
+	replica.InitializeFromConfig(config)
+	return replica, replica.Start()
+}
+
 var port = uint64(14222)
 
 // SetupTestServer creates an operator, gnatsd, context, config and test http server with a router

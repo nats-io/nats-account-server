@@ -128,6 +128,92 @@ func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 }
 
+func (server *AccountServer) loadReplicatedJWT(pubKey string) (string, error) {
+	now := time.Now().UTC()
+	server.cacheLock.Lock()
+	staleAt, ok := server.validUntil[pubKey]
+	server.cacheLock.Unlock()
+	stale := true // no valid until -> stale
+
+	if ok {
+		stale = int64(staleAt.Sub(now).Seconds()) < 0
+	}
+
+	// if we aren't stale and we have the jwt, return it
+	if !stale {
+		theJWT, err := server.jwtStore.Load(pubKey)
+
+		if err == nil && theJWT != "" {
+			return theJWT, nil
+		}
+	}
+
+	primary := server.primary
+
+	if strings.HasSuffix(primary, "/") {
+		primary = primary[:len(primary)-1]
+	}
+
+	url := fmt.Sprintf("%s/jwt/v1/accounts/%s", primary, pubKey)
+
+	resp, err := server.httpClient.Get(url)
+
+	// if we can't contact the primary, fallback to what we have on disk
+	if err != nil {
+		theJWT, err := server.jwtStore.Load(pubKey)
+		return theJWT, err
+	}
+
+	// but if the primary wasn't happy with the request, return an error
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("primary did not return with status OK")
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	theJWT := string(body)
+
+	err = server.jwtStore.Save(pubKey, theJWT)
+	if err != nil {
+		return "", err
+	}
+
+	// Default cache time is 1 hour (see cacheControl)
+	server.cacheLock.Lock()
+	server.validUntil[pubKey] = time.Now().Add(time.Hour)
+	server.cacheLock.Unlock()
+
+	return theJWT, nil
+}
+
+func (server *AccountServer) loadJWT(pubKey string) (string, error) {
+	if server.primary != "" {
+		return server.loadReplicatedJWT(pubKey)
+	}
+
+	return server.jwtStore.Load(pubKey)
+}
+
+func (server *AccountServer) cacheControl(pubKey string, decoded *jwt.AccountClaims) string {
+	now := time.Now().UTC()
+	maxAge := int64(time.Unix(decoded.Expires, 0).Sub(now).Seconds())
+	stale := int64(60 * 60) // One hour
+
+	if server.primary != "" && maxAge > 0 {
+		staleAt, ok := server.validUntil[pubKey]
+
+		if ok {
+			stale = int64(staleAt.Sub(now).Seconds())
+		} else {
+			return ""
+		}
+	}
+	return fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d", maxAge, stale, stale)
+}
+
 // GetAccountJWT looks up an account JWT by public key and returns it
 // Supports cache control
 func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
@@ -151,7 +237,7 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
 	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
 
-	theJWT, err := server.jwtStore.Load(pubKey)
+	theJWT, err := server.loadJWT(pubKey)
 
 	if err != nil {
 		if server.systemAccountClaims != nil && pubKey == server.systemAccountClaims.Subject && server.systemAccountJWT != "" {
@@ -190,12 +276,6 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 
 	// Check for if not modified, and also set etag and cache control
 	e := `"` + decoded.ID + `"`
-	maxAge := int64(time.Unix(decoded.Expires, 0).Sub(time.Now().UTC()).Seconds())
-	staleWhile := 60 * 60 // One hour
-	staleError := 60 * 60 // One hour
-	cacheControl := fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d", maxAge, staleWhile, staleError)
-	w.Header().Set("Etag", e)
-	w.Header().Set("Cache-Control", cacheControl)
 
 	if match := r.Header.Get("If-None-Match"); match != "" {
 		if strings.Contains(match, e) {
@@ -204,12 +284,21 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// send notification if requested, even though this is a GET request
 	if notify {
 		server.logger.Tracef("trying to send notification for - %s", shortCode)
 		if err := server.sendAccountNotification(decoded, []byte(theJWT)); err != nil {
 			server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
 			return
 		}
+	}
+
+	w.Header().Set("Etag", e)
+
+	cacheControl := server.cacheControl(pubKey, decoded)
+
+	if cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
 	}
 
 	w.Header().Add(ContentType, ApplicationJWT)

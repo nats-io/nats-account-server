@@ -29,6 +29,9 @@ type AccountServerConfig struct {
 
 	OperatorJWTPath      string
 	SystemAccountJWTPath string
+
+	Primary            string
+	ReplicationTimeout int //milliseconds
 }
 
 // TLSConf holds the configuration for a TLS connection/server
@@ -92,6 +95,7 @@ func DefaultServerConfig() AccountServerConfig {
 			ReconnectWait:  1000,
 			MaxReconnects:  0,
 		},
-		Store: StoreConfig{}, // in memory store
+		Store:              StoreConfig{}, // in memory store
+		ReplicationTimeout: 5000,
 	}
 }
