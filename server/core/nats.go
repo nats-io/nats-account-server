@@ -26,7 +26,8 @@ import (
 )
 
 const (
-	accountNotificationFormat = "$SYS.ACCOUNT.%s.CLAIMS.UPDATE"
+	accountNotificationFormat    = "$SYS.ACCOUNT.%s.CLAIMS.UPDATE"
+	activationNotificationFormat = "$SYS.ACCOUNT.%s.CLAIMS.ACTIVATE.%s"
 )
 
 func (server *AccountServer) natsError(nc *nats.Conn, sub *nats.Subscription, err error) {
@@ -114,6 +115,9 @@ func (server *AccountServer) connectToNATS() error {
 	if server.primary != "" {
 		subject := strings.Replace(accountNotificationFormat, "%s", "*", -1)
 		nc.Subscribe(subject, server.handleAccountNotification)
+
+		subject = strings.Replace(activationNotificationFormat, "%s", "*", -1)
+		nc.Subscribe(subject, server.handleActivationNotification)
 	}
 
 	server.nats = nc
@@ -157,5 +161,42 @@ func (server *AccountServer) handleAccountNotification(msg *nats.Msg) {
 	// Default cache time is 1 hour (see cacheControl)
 	server.cacheLock.Lock()
 	server.validUntil[pubKey] = time.Now().Add(time.Hour)
+	server.cacheLock.Unlock()
+}
+
+func (server *AccountServer) sendActivationNotification(hash string, account string, theJWT []byte) error {
+	if server.nats == nil {
+		server.logger.Noticef("skipping activation notification for %s, no NATS configured", ShortKey(hash))
+		return nil
+	}
+
+	subject := fmt.Sprintf(activationNotificationFormat, account, hash)
+	return server.nats.Publish(subject, theJWT)
+}
+
+func (server *AccountServer) handleActivationNotification(msg *nats.Msg) {
+	jwtBytes := msg.Data
+	theJWT := string(jwtBytes)
+	claim, err := jwt.DecodeActivationClaims(theJWT)
+
+	if err != nil || claim == nil {
+		return
+	}
+
+	hash, err := claim.HashID()
+	if err != nil {
+		server.logger.Errorf("unable to calculate hash id from activation token in notification")
+		return
+	}
+
+	err = server.jwtStore.Save(hash, theJWT)
+	if err != nil {
+		server.logger.Errorf("unable to save activation token in notification, %s", hash)
+		return
+	}
+
+	// Default cache time is 1 hour (see cacheControl)
+	server.cacheLock.Lock()
+	server.validUntil[hash] = time.Now().Add(time.Hour)
 	server.cacheLock.Unlock()
 }

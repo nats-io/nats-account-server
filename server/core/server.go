@@ -33,6 +33,7 @@ import (
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nats-account-server/server/logging"
 	"github.com/nats-io/nats-account-server/server/store"
+	"github.com/nats-io/nkeys"
 )
 
 var version = "0.0-dev"
@@ -245,22 +246,24 @@ func (server *AccountServer) Start() error {
 }
 
 func (server *AccountServer) jwtChangedCallback(pubKey string) {
-	theJWT, err := server.jwtStore.Load(pubKey)
-	if err != nil {
-		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-		return
-	}
+	if nkeys.IsValidPublicAccountKey(pubKey) {
+		theJWT, err := server.jwtStore.Load(pubKey)
+		if err != nil {
+			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
+			return
+		}
 
-	decoded, err := jwt.DecodeAccountClaims(theJWT)
-	if err != nil {
-		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-		return
-	}
+		decoded, err := jwt.DecodeAccountClaims(theJWT)
+		if err != nil {
+			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
+			return
+		}
 
-	err = server.sendAccountNotification(decoded, []byte(theJWT))
-	if err != nil {
-		server.logger.Noticef("error trying to send notification from file change for %s, %s", pubKey, err.Error())
-		return
+		err = server.sendAccountNotification(decoded, []byte(theJWT))
+		if err != nil {
+			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
+			return
+		}
 	}
 }
 

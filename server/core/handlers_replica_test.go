@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGetReplicatedJWT(t *testing.T) {
+func TestGetReplicatedAccountJWT(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
@@ -262,4 +262,117 @@ func TestReplicatedFromDir(t *testing.T) {
 	forcedToUseDisk := string(body)
 
 	require.Equal(t, replicatedJWT, forcedToUseDisk)
+}
+
+func TestGetReplicatedActivationJWT(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	account2Key, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	acct2PubKey, err := account2Key.PublicKey()
+	require.NoError(t, err)
+
+	expireAt := time.Now().Add(24 * time.Hour).Unix()
+	act := jwt.NewActivationClaims(acct2PubKey)
+	act.ImportType = jwt.Stream
+	act.Name = "times"
+	act.ImportSubject = "times.*"
+	act.Expires = expireAt
+	actJWT, err := act.Encode(accountKey)
+	require.NoError(t, err)
+
+	act, err = jwt.DecodeActivationClaims(actJWT)
+	require.NoError(t, err)
+
+	hash, err := act.HashID()
+	require.NoError(t, err)
+
+	url := testEnv.URLForPath("/jwt/v1/activations")
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(actJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	// Get the URL from the main server
+	path := fmt.Sprintf("/jwt/v1/activations/%s", hash)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	savedJWT := string(body)
+
+	// Now start up the replica
+	replica, err := testEnv.CreateReplica("")
+	require.NoError(t, err)
+	defer replica.Stop()
+
+	// Try to get the account from the replica
+
+	url = fmt.Sprintf("%s://%s%s", replica.protocol, replica.hostPort, path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	replicatedJWT := string(body)
+
+	require.Equal(t, savedJWT, replicatedJWT)
+
+	// Update the jwt
+	expireAt = time.Now().Add(48 * time.Hour).Unix()
+	act.Expires = expireAt
+	actJWT, err = act.Encode(accountKey)
+	require.NoError(t, err)
+
+	url = testEnv.URLForPath("/jwt/v1/activations")
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(actJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	// Let the nats notification propogate
+	time.Sleep(3 * time.Second)
+
+	// Check that they match
+	path = fmt.Sprintf("/jwt/v1/activations/%s", hash)
+	url = testEnv.URLForPath(path)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	savedJWT = string(body)
+
+	url = fmt.Sprintf("%s://%s%s", replica.protocol, replica.hostPort, path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	replicatedJWT = string(body)
+
+	require.Equal(t, savedJWT, replicatedJWT)
+
+	// set the hash to stale
+	replica.validUntil[hash] = time.Now().Add(-time.Hour)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	forcedReload := string(body)
+
+	require.Equal(t, savedJWT, forcedReload)
 }

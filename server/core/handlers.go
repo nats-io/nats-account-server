@@ -30,7 +30,6 @@ import (
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/nats-io/jwt"
-	"github.com/nats-io/nkeys"
 )
 
 // http headers
@@ -50,266 +49,26 @@ func (server *AccountServer) JWTHelp(w http.ResponseWriter, r *http.Request, par
 	w.Write([]byte(jwtAPIHelp))
 }
 
-// UpdateAccountJWT is the target of the post request that updates an account JWT
-// Sends a nats notification
-func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-	theJWT, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
+func (server *AccountServer) sendErrorResponse(httpStatus int, msg string, account string, err error, w http.ResponseWriter) error {
+	account = ShortKey(account)
 	if err != nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
-		return
-	}
-
-	claim, err := jwt.DecodeAccountClaims(string(theJWT))
-
-	if err != nil || claim == nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
-		return
-	}
-
-	issuer := claim.Issuer
-
-	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer in request", claim.Issuer, err, w)
-		return
-	}
-
-	if !nkeys.IsValidPublicAccountKey(claim.Subject) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Subject in request", claim.Subject, err, w)
-		return
-	}
-
-	ok := false
-
-	for _, k := range server.trustedKeys {
-		if k == issuer {
-			ok = true
-			break
-		}
-	}
-
-	if !ok {
-		server.sendErrorResponse(http.StatusBadRequest, "untrusted issuer in request", claim.Subject, err, w)
-		return
-	}
-
-	pubKey := claim.Subject
-	shortCode := ShortKey(pubKey)
-
-	vr := &jwt.ValidationResults{}
-
-	claim.Validate(vr)
-
-	if vr.IsBlocking(true) {
-		validationResults, err := json.Marshal(vr)
-
-		if err != nil {
-			server.sendErrorResponse(http.StatusInternalServerError, "unable to marshal JWT validation", shortCode, err, w)
-			return
-		}
-
-		server.logger.Errorf("attempt to update JWT %s with blocking validation errors", shortCode)
-		http.Error(w, string(validationResults), http.StatusBadRequest)
-		return
-	}
-
-	if err := server.jwtStore.Save(pubKey, string(theJWT)); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error saving JWT", shortCode, err, w)
-		return
-	}
-
-	if err := server.sendAccountNotification(claim, theJWT); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
-		return
-	}
-
-	server.logger.Noticef("updated JWT for account - %s - %s", shortCode, claim.ID)
-	w.WriteHeader(http.StatusOK)
-}
-
-func (server *AccountServer) loadReplicatedJWT(pubKey string) (string, error) {
-	now := time.Now().UTC()
-	server.cacheLock.Lock()
-	staleAt, ok := server.validUntil[pubKey]
-	server.cacheLock.Unlock()
-	stale := true // no valid until -> stale
-
-	if ok {
-		stale = int64(staleAt.Sub(now).Seconds()) < 0
-	}
-
-	// if we aren't stale and we have the jwt, return it
-	if !stale {
-		theJWT, err := server.jwtStore.Load(pubKey)
-
-		if err == nil && theJWT != "" {
-			return theJWT, nil
-		}
-	}
-
-	primary := server.primary
-
-	if strings.HasSuffix(primary, "/") {
-		primary = primary[:len(primary)-1]
-	}
-
-	url := fmt.Sprintf("%s/jwt/v1/accounts/%s", primary, pubKey)
-
-	resp, err := server.httpClient.Get(url)
-
-	// if we can't contact the primary, fallback to what we have on disk
-	if err != nil {
-		theJWT, err := server.jwtStore.Load(pubKey)
-		return theJWT, err
-	}
-
-	// but if the primary wasn't happy with the request, return an error
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("primary did not return with status OK")
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	theJWT := string(body)
-
-	err = server.jwtStore.Save(pubKey, theJWT)
-	if err != nil {
-		return "", err
-	}
-
-	// Default cache time is 1 hour (see cacheControl)
-	server.cacheLock.Lock()
-	server.validUntil[pubKey] = time.Now().Add(time.Hour)
-	server.cacheLock.Unlock()
-
-	return theJWT, nil
-}
-
-func (server *AccountServer) loadJWT(pubKey string) (string, error) {
-	if server.primary != "" {
-		return server.loadReplicatedJWT(pubKey)
-	}
-
-	return server.jwtStore.Load(pubKey)
-}
-
-func (server *AccountServer) cacheControl(pubKey string, decoded *jwt.AccountClaims) string {
-	now := time.Now().UTC()
-	maxAge := int64(time.Unix(decoded.Expires, 0).Sub(now).Seconds())
-	stale := int64(60 * 60) // One hour
-
-	if server.primary != "" && maxAge > 0 {
-		staleAt, ok := server.validUntil[pubKey]
-
-		if ok {
-			stale = int64(staleAt.Sub(now).Seconds())
+		if account != "" {
+			server.logger.Errorf("%s - %s - %s", account, msg, err.Error())
 		} else {
-			return ""
+			server.logger.Errorf("%s - %s", msg, err.Error())
 		}
-	}
-	return fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d", maxAge, stale, stale)
-}
-
-// GetAccountJWT looks up an account JWT by public key and returns it
-// Supports cache control
-func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-	pubKey := string(params.ByName("pubkey"))
-	shortCode := ShortKey(pubKey)
-
-	if pubKey == "" {
-		server.logger.Tracef("server sent resolver check")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	server.logger.Tracef("request for JWT for - %s", ShortKey(pubKey))
-
-	check := strings.ToLower(r.URL.Query().Get("check")) == "true"
-	notify := strings.ToLower(r.URL.Query().Get("notify")) == "true"
-	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
-	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
-
-	theJWT, err := server.loadJWT(pubKey)
-
-	if err != nil {
-		if server.systemAccountClaims != nil && pubKey == server.systemAccountClaims.Subject && server.systemAccountJWT != "" {
-			theJWT = server.systemAccountJWT
-			server.logger.Tracef("returning system JWT from configuration")
-		} else {
-			server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
-			return
-		}
-	}
-
-	if text {
-		server.writeJWTAsText(w, pubKey, theJWT)
-		return
-	}
-
-	if decode {
-		server.writeDecodedJWT(w, pubKey, theJWT)
-		return
-	}
-
-	decoded, err := jwt.DecodeAccountClaims(theJWT)
-
-	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
-		return
-	}
-
-	if check {
-		now := time.Now().UTC().Unix()
-		if decoded.Expires < now && decoded.Expires > 0 {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-	}
-
-	// Check for if not modified, and also set etag and cache control
-	e := `"` + decoded.ID + `"`
-
-	if match := r.Header.Get("If-None-Match"); match != "" {
-		if strings.Contains(match, e) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
-
-	// send notification if requested, even though this is a GET request
-	if notify {
-		server.logger.Tracef("trying to send notification for - %s", shortCode)
-		if err := server.sendAccountNotification(decoded, []byte(theJWT)); err != nil {
-			server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
-			return
-		}
-	}
-
-	w.Header().Set("Etag", e)
-
-	cacheControl := server.cacheControl(pubKey, decoded)
-
-	if cacheControl != "" {
-		w.Header().Set("Cache-Control", cacheControl)
-	}
-
-	w.Header().Add(ContentType, ApplicationJWT)
-	w.WriteHeader(http.StatusOK)
-	_, err = w.Write([]byte(theJWT))
-
-	if err != nil {
-		server.logger.Errorf("error writing JWT for %s - %s", shortCode, err.Error())
 	} else {
-		server.logger.Tracef("returning JWT for - %s", shortCode)
+		if account != "" {
+			server.logger.Errorf("%s - %s", account, msg)
+		} else {
+			server.logger.Errorf("%s", msg)
+		}
 	}
+
+	w.Header().Set(ContentType, TextPlain)
+	w.WriteHeader(httpStatus)
+	fmt.Fprintln(w, msg)
+	return err
 }
 
 func (server *AccountServer) writeJWTAsText(w http.ResponseWriter, pubKey string, theJWT string) {
@@ -342,7 +101,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 
 	claim, err := jwt.DecodeGeneric(theJWT)
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error decoding account claim", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error decoding claim", pubKey, err, w)
 		return
 	}
 
@@ -351,24 +110,24 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	sig := parts[2]
 	headerString, err := base64.RawURLEncoding.DecodeString(head)
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error decoding account claim header", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error decoding claim header", pubKey, err, w)
 		return
 	}
 	header := jwt.Header{}
 	if err := json.Unmarshal(headerString, &header); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error unmarshaling account claim header", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error unmarshaling claim header", pubKey, err, w)
 		return
 	}
 
 	headerJSON, err := UnescapedIndentedMarshal(header, "", "    ")
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim header", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling claim header", pubKey, err, w)
 		return
 	}
 
 	claimJSON, err := UnescapedIndentedMarshal(claim, "", "    ")
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account claim", pubKey, err, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling claim", pubKey, err, w)
 		return
 	}
 
@@ -404,7 +163,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	})
 
 	if subErr != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account tokens", pubKey, subErr, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling tokens", pubKey, subErr, w)
 		return
 	}
 
@@ -455,7 +214,7 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	})
 
 	if subErr != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling account tokens", pubKey, subErr, w)
+		server.sendErrorResponse(http.StatusInternalServerError, "error marshaling tokens", pubKey, subErr, w)
 		return
 	}
 
@@ -480,24 +239,88 @@ func (server *AccountServer) writeDecodedJWT(w http.ResponseWriter, pubKey strin
 	}
 }
 
-func (server *AccountServer) sendErrorResponse(httpStatus int, msg string, account string, err error, w http.ResponseWriter) error {
-	account = ShortKey(account)
-	if err != nil {
-		if account != "" {
-			server.logger.Errorf("%s - %s - %s", account, msg, err.Error())
+func (server *AccountServer) cacheControlForExpiration(pubKey string, expires int64) string {
+	now := time.Now().UTC()
+	maxAge := int64(time.Unix(expires, 0).Sub(now).Seconds())
+	stale := int64(60 * 60) // One hour
+
+	if server.primary != "" && maxAge > 0 {
+		staleAt, ok := server.validUntil[pubKey]
+
+		if ok {
+			stale = int64(staleAt.Sub(now).Seconds())
 		} else {
-			server.logger.Errorf("%s - %s", msg, err.Error())
+			return ""
 		}
-	} else {
-		if account != "" {
-			server.logger.Errorf("%s - %s", account, msg)
-		} else {
-			server.logger.Errorf("%s", msg)
+	}
+	return fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d", maxAge, stale, stale)
+}
+
+func (server *AccountServer) loadReplicatedJWT(pubKey string, path string) (string, error) {
+	now := time.Now().UTC()
+	server.cacheLock.Lock()
+	staleAt, ok := server.validUntil[pubKey]
+	server.cacheLock.Unlock()
+	stale := true // no valid until -> stale
+
+	if ok {
+		stale = int64(staleAt.Sub(now).Seconds()) < 0
+	}
+
+	// if we aren't stale and we have the jwt, return it
+	if !stale {
+		theJWT, err := server.jwtStore.Load(pubKey)
+
+		if err == nil && theJWT != "" {
+			return theJWT, nil
 		}
 	}
 
-	w.Header().Set(ContentType, TextPlain)
-	w.WriteHeader(httpStatus)
-	fmt.Fprintln(w, msg)
-	return err
+	primary := server.primary
+
+	if strings.HasSuffix(primary, "/") {
+		primary = primary[:len(primary)-1]
+	}
+
+	url := fmt.Sprintf("%s/%s/%s", primary, path, pubKey)
+
+	resp, err := server.httpClient.Get(url)
+
+	// if we can't contact the primary, fallback to what we have on disk
+	if err != nil {
+		theJWT, err := server.jwtStore.Load(pubKey)
+		return theJWT, err
+	}
+
+	// but if the primary wasn't happy with the request, return an error
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("primary did not return with status OK")
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	theJWT := string(body)
+
+	err = server.jwtStore.Save(pubKey, theJWT)
+	if err != nil {
+		return "", err
+	}
+
+	// Default cache time is 1 hour (see cacheControl)
+	server.cacheLock.Lock()
+	server.validUntil[pubKey] = time.Now().Add(time.Hour)
+	server.cacheLock.Unlock()
+
+	return theJWT, nil
+}
+
+func (server *AccountServer) loadJWT(pubKey string, path string) (string, error) {
+	if server.primary != "" {
+		return server.loadReplicatedJWT(pubKey, path)
+	}
+
+	return server.jwtStore.Load(pubKey)
 }
