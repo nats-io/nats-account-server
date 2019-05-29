@@ -17,6 +17,7 @@
 package core
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -59,6 +60,15 @@ type AccountServer struct {
 	trustedKeys         []string
 	systemAccountClaims *jwt.AccountClaims
 	systemAccountJWT    string
+
+	// In replica mode the server uses a directory or memory for storage. Requests
+	// are checked against the http cache settings and try to update from the primary
+	// if necessary. However, if a version of the JWT is available in the persistent store
+	// it will be returned if the primary is down, regarldess of the cache situation.
+	primary    string
+	cacheLock  sync.Mutex
+	validUntil map[string]time.Time // map of pubkey to stale time
+	httpClient *http.Client
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -139,6 +149,10 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 		}
 	}
 
+	if flags.Primary != "" {
+		server.config.Primary = flags.Primary
+	}
+
 	return nil
 }
 
@@ -183,9 +197,21 @@ func (server *AccountServer) Start() error {
 	server.running = true
 	server.startTime = time.Now()
 	server.logger = logging.NewNATSLogger(server.config.Logging)
+	server.validUntil = map[string]time.Time{}
 
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
+
+	server.httpClient = server.createHTTPClient()
+	server.primary = server.config.Primary
+
+	if server.primary != "" {
+		server.logger.Noticef("starting in replicated mode, with primary at %s", server.primary)
+
+		if len(server.config.NATS.Servers) == 0 {
+			server.logger.Noticef("running in replicated mode without NATS notifications can result in delayed updates")
+		}
+	}
 
 	if err := server.initializeTrustedKeys(); err != nil {
 		return err
@@ -246,9 +272,12 @@ func (server *AccountServer) storeErrorCallback(err error) {
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
 
-	if config.NSC != "" {
-		server.logger.Noticef("creating a read-only store for the NSC folder at %s", config.NSC)
-		return store.NewNSCJWTStore(config.NSC, server.jwtChangedCallback, server.storeErrorCallback)
+	if server.primary != "" && config.NSC != "" {
+		return nil, fmt.Errorf("replicas cannot be run in NSC mode")
+	}
+
+	if server.primary != "" && config.ReadOnly {
+		return nil, fmt.Errorf("replica mode cannot be used in read-only mode, but will not allow POST operations")
 	}
 
 	if config.Dir != "" {
@@ -259,6 +288,11 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 
 		server.logger.Noticef("creating a store at %s", config.Dir)
 		return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
+	}
+
+	if config.NSC != "" {
+		server.logger.Noticef("creating a read-only store for the NSC folder at %s", config.NSC)
+		return store.NewNSCJWTStore(config.NSC, server.jwtChangedCallback, server.storeErrorCallback)
 	}
 
 	if config.ReadOnly {
@@ -322,6 +356,29 @@ func (server *AccountServer) initializeSystemAccount() error {
 	server.systemAccountJWT = string(data)
 
 	return nil
+}
+
+func (server *AccountServer) createHTTPClient() *http.Client {
+	conf := server.config.HTTP
+	tlsConf := conf.TLS
+
+	timeout := time.Duration(time.Duration(server.config.ReplicationTimeout) * time.Millisecond)
+	tr := &http.Transport{
+		MaxIdleConnsPerHost: 1,
+	}
+
+	if tlsConf.Cert != "" {
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
+	client := http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+	}
+
+	return &client
 }
 
 // Stop the account server

@@ -27,4 +27,5 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, false, config.Logging.Trace)
 	require.Equal(t, 5000, config.HTTP.ReadTimeout)
 	require.Equal(t, 5000, config.NATS.ConnectTimeout)
+	require.Equal(t, 5000, config.ReplicationTimeout)
 }

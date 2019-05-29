@@ -111,6 +111,11 @@ func (server *AccountServer) connectToNATS() error {
 		return nil // we will retry, don't stop server running
 	}
 
+	if server.primary != "" {
+		subject := strings.Replace(accountNotificationFormat, "%s", "*", -1)
+		nc.Subscribe(subject, server.handleAccountNotification)
+	}
+
 	server.nats = nc
 	return nil
 }
@@ -132,4 +137,25 @@ func (server *AccountServer) sendAccountNotification(claim *jwt.AccountClaims, t
 
 	subject := fmt.Sprintf(accountNotificationFormat, pubKey)
 	return server.nats.Publish(subject, theJWT)
+}
+
+func (server *AccountServer) handleAccountNotification(msg *nats.Msg) {
+	jwtBytes := msg.Data
+	theJWT := string(jwtBytes)
+	claim, err := jwt.DecodeAccountClaims(theJWT)
+
+	if err != nil || claim == nil {
+		return
+	}
+
+	pubKey := claim.Subject
+	err = server.jwtStore.Save(pubKey, theJWT)
+	if err != nil {
+		return
+	}
+
+	// Default cache time is 1 hour (see cacheControl)
+	server.cacheLock.Lock()
+	server.validUntil[pubKey] = time.Now().Add(time.Hour)
+	server.cacheLock.Unlock()
 }
