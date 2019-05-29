@@ -179,11 +179,14 @@ func (server *AccountServer) buildRouter() (*httprouter.Router, error) {
 	// replicas use a writable store, thus the extra check
 	if !server.jwtStore.IsReadOnly() && server.primary == "" {
 		r.POST("/jwt/v1/accounts/:pubkey", server.UpdateAccountJWT)
+		r.POST("/jwt/v1/activations", server.UpdateActivationJWT)
 	}
 
 	r.GET("/jwt/v1/accounts/:pubkey", server.GetAccountJWT)
 	r.GET("/jwt/v1/accounts/", server.GetAccountJWT) // Server test point
 	r.GET("/jwt/v1/accounts", server.GetAccountJWT)  // Server test point
+
+	r.GET("/jwt/v1/activations/:hash", server.GetActivationJWT)
 
 	return r, nil
 }

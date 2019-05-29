@@ -41,11 +41,12 @@ A 304 is returned if the request contains the appropriate If-None-Match header.
 
 A status 404 is returned if the JWT is not found.
 
-Three optional query parameters are supported:
+Four optional query parameters are supported:
 
   * check - can be set to "true" which will tell the server to return 404 if the JWT is expired
   * text - can be set to "true" to change the content type to text/plain
   * decode - can be set to "true" to display the JSON for the JWT header and body
+  * noticy - can be set to "true" to trigger a notification event if NATS is configured
 
 ## POST /jwt/v1/accounts/<pubkey> (optional)
 
@@ -55,4 +56,37 @@ The JWT must be signed by the operator specified in the server's configuration.
 
 A status 400 is returned if there is a problem with the JWT or the server is in read-only mode. In rare
 cases a status 500 may be returned if there was an issue saving the JWT.
+
+## GET /jwt/v1/activations/<hash>
+
+Retrieve an activation token by its hash.
+
+The hash is calculated by creating a string with jwtIssuer.jwtSubject.<subject> and 
+constructing the sha-256 hash and base32 encoding that. Where <subject> is the exported 
+subject, minus any wildcards, so foo.* becomes foo. The one special case is that if the 
+export starts with "*" or is ">" the <subject> will be set to "_".
+
+Three optional query parameters are supported:
+
+  * text - can be set to "true" to change the content type to text/plain
+  * decode - can be set to "true" to display the JSON for the JWT header and body
+  * noticy - can be set to "true" to trigger a notification event if NATS is configured
+
+The response contains cache control headers, and uses the JTI as the ETag.
+
+A 304 is returned if the request contains the appropriate If-None-Match header.
+
+## POST /jwt/v1/activations
+
+Post a new activation token a JWT.
+
+The body of the POST should be a valid activation token, with an account subject and issuer.
+
+Activation tokens are stored by their hash, so two tokens with the same hash will overwrite each other,
+however this should only happen if the accounts and subjects match which requires either the
+same export or a matching one.
+
+A status 400 is returned if there is a problem with the JWT or saving it. In rare
+cases a status 500 may be returned if there was an issue saving the JWT. Otherwise
+a status 200 is returned.
 `
