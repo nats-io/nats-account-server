@@ -15,6 +15,7 @@ The nats-server can be configured to use local account information or to rely on
 account JWTs. The server in this repository is intended as a simple to use solution for hosting account JWTs.
 
 * [HTTP API](#http)
+  * [Activation Tokens](#activation)
 * [JWT Stores](#store)
 * [NATS Notifications](#nats)
 * [Running the Server](#run)
@@ -77,6 +78,49 @@ The JWT must be signed by the operator specified in the [server's configuration]
 
 A status 400 is returned if there is a problem with the JWT or the server is in read-only mode. In rare
 cases a status 500 may be returned if there was an issue saving the JWT.
+
+<a name="activation"></a>
+
+### Activation Tokens
+
+The account server also supports storing activation tokens. These tokens are used when one account needs to give permission to another account to access a private export. Tokens can be configured as full tokens, or URLs. By hosting them in the account server you can avoid the copy/paste process of embedding tokens. They can also be updated more easily on expiration.
+
+```bash
+GET /jwt/v1/activations/<hash>
+```
+
+Retrieve an activation token by its hash.
+
+The hash is calculated by creating a string with jwtIssuer.jwtSubject.[subject] and
+constructing the SHA-256 hash and base32 encoding that. Where [subject] is the exported
+subject, minus any wildcards, so foo.* becomes foo. The one special case is that if the
+export starts with "*" or is ">" the [subject] will be set to "_".
+
+Three optional query parameters are supported:
+
+* text - can be set to "true" to change the content type to text/plain
+* decode - can be set to "true" to display the JSON for the JWT header and body
+* notify - can be set to "true" to trigger a notification event if NATS is configured
+
+The response contains cache control headers, and uses the JTI as the ETag.
+
+A 304 is returned if the request contains the appropriate If-None-Match header.
+
+```bash
+POST /jwt/v1/activations
+```
+
+Post a new activation token a JWT.
+
+The body of the POST should be a valid activation token, with an account subject and issuer.
+
+Activation tokens are stored by their hash, so two tokens with the same hash will overwrite each other,
+however this should only happen if the accounts and subjects match which requires either the
+same export or a matching one.
+
+A status 400 is returned if there is a problem with the JWT or saving it. In rare
+cases a status 500 may be returned if there was an issue saving the JWT. Otherwise
+a status 200 is returned.
 
 <a name="store"></a>
 
@@ -145,7 +189,7 @@ To run against a folder, use the `-dir` flag with an optional `-ro` flag. The `-
 % nats-account-server -dir ~/myjwts
 ```
 
-### Directory Mode and Git
+#### Directory Mode and Git
 
 If you want to store your JWTs in a revision controlled folder, you can do something like:
 
@@ -154,7 +198,7 @@ If you want to store your JWTs in a revision controlled folder, you can do somet
 % nats-account-server -dir myjwts -ro -nats nats://192.169.0.1:4222
 ```
 
-The account server will watch for file changes and send notifications to the nats-server when a change occurs.
+The account server will watch for file changes and send notifications to the nats-server when a change occurs. Only account JWTs are watched, activation JWT changes are ignored.
 
 Note, creation of a file won't send the notification, only an actual write to the file. So if you edit a JWT and do a git pull, the notification will be sent.
 
@@ -172,6 +216,14 @@ Finally, you can use the `-D`, `-V` or `-DV` flags to turn on debug or verbose l
 
 <a name="config"></a>
 
+### Replica Mode
+
+For larger clusters you may deploy nats-servers in distributed locations geographically. This can lead to delay times when the server requests a JWT from the account server. To help alleviate this delay, or to allow load balancing and fault tolerance, the account server can run in replica mode. In this mode the server retrieves all JWTs from its primary. The replica will listen for NATS notifications and update appropriately. The replica will also look update on a regular time table in case a NATS message is missed.
+
+Both account and activation tokens are replicated.
+
+A replication timeout can be used to tune HTTP/network delays between the replica and the primary server.
+
 ## Configuration
 
 The configuration file uses the same YAML/JSON-like format as the nats-server. Configuration is organized into a root section with several sub-sections. The root section can contain the following entries:
@@ -183,6 +235,8 @@ The configuration file uses the same YAML/JSON-like format as the nats-server. C
 * `operatorjwtpath` - the path to an operator JWT, required for stores that accept POST request, all JWTs sent in a POST must be signed by
 one of the operator's keys
 * `systemaccountjwtpath` - the path to an account JWT that should be returned as the system account, works outside the normal store if necessary, however, the system account can be in the store, in which case this setting is optional
+* `primary` - the URL for the primary server, sets the server to run in replica mode, the format of the url is protocol://host:port
+* `replicationtimeout` - the time in milliseconds that the replica allows when talking to the primary, defaults to 5000, or five seconds
 
 The default configuration is:
 
@@ -203,6 +257,7 @@ The default configuration is:
         reconnectwait:  1000,
         maxreconnects:  0,
     },
+    replicationtimeout: 5000,
 }
 ```
 
