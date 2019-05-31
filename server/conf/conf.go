@@ -93,7 +93,7 @@ func DefaultServerConfig() AccountServerConfig {
 		NATS: NATSConfig{
 			ConnectTimeout: 5000,
 			ReconnectWait:  1000,
-			MaxReconnects:  0,
+			MaxReconnects:  -1,
 		},
 		Store:              StoreConfig{}, // in memory store
 		ReplicationTimeout: 5000,

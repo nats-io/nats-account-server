@@ -18,6 +18,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -48,7 +49,10 @@ func (server *AccountServer) natsReconnected(nc *nats.Conn) {
 func (server *AccountServer) natsClosed(nc *nats.Conn) {
 	if server.checkRunning() {
 		server.logger.Errorf("nats connection closed, shutting down bridge")
-		go server.Stop()
+		go func() {
+			server.Stop()
+			os.Exit(0)
+		}()
 	}
 }
 
