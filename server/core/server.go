@@ -102,7 +102,7 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 	server.config = conf.DefaultServerConfig()
 
 	if flags.ConfigFile != "" {
-		return server.ApplyConfigFile(flags.ConfigFile)
+		server.ApplyConfigFile(flags.ConfigFile)
 	}
 
 	if flags.NSCFolder != "" {
