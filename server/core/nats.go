@@ -51,7 +51,7 @@ func (server *AccountServer) natsClosed(nc *nats.Conn) {
 		server.logger.Errorf("nats connection closed, shutting down bridge")
 		go func() {
 			server.Stop()
-			os.Exit(0)
+			os.Exit(-1)
 		}()
 	}
 }
@@ -109,9 +109,13 @@ func (server *AccountServer) connectToNATS() error {
 		server.natsTimer = time.NewTimer(time.Duration(reconnectWait) * time.Millisecond)
 		go func() {
 			<-server.natsTimer.C
-			server.Lock()
-			server.connectToNATS()
-			server.Unlock()
+
+			server.natsTimer = nil
+			if server.checkRunning() {
+				server.Lock()
+				server.connectToNATS()
+				server.Unlock()
+			}
 		}()
 		return nil // we will retry, don't stop server running
 	}

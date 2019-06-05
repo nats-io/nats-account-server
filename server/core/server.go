@@ -403,6 +403,7 @@ func (server *AccountServer) Stop() {
 
 	if server.nats != nil {
 		server.nats.Close()
+		server.nats = nil
 		server.logger.Noticef("disconnected from NATS")
 	}
 
@@ -410,6 +411,7 @@ func (server *AccountServer) Stop() {
 
 	if server.jwtStore != nil {
 		server.jwtStore.Close()
+		server.jwtStore = nil
 		server.logger.Noticef("closed JWT store")
 	}
 }
