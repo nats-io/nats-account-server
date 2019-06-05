@@ -70,8 +70,8 @@ func (server *AccountServer) startHTTP() error {
 				}
 				go server.Stop()
 			}
+			server.http = nil
 		}
-		server.http.Handler = nil
 	}()
 
 	server.logger.Noticef("%s listening on port %d\n", server.protocol, server.port)
@@ -99,6 +99,7 @@ func (server *AccountServer) stopHTTP() {
 		}
 		server.listener = nil
 	}
+
 	server.logger.Noticef("http stopped")
 }
 
