@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	nats "github.com/nats-io/go-nats"
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/jwt"
 )
 
