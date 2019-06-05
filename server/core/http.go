@@ -42,11 +42,7 @@ func (server *AccountServer) startHTTP() error {
 		return err
 	}
 
-	router, err := server.buildRouter()
-	if err != nil {
-		server.logger.Errorf("error creating the router: %v", err)
-		return err
-	}
+	router := server.buildRouter()
 
 	xrs := cors.New(cors.Options{
 		AllowOriginFunc: func(orig string) bool {
@@ -69,7 +65,9 @@ func (server *AccountServer) startHTTP() error {
 	go func() {
 		if err := server.http.Serve(server.listener); err != nil {
 			if err != http.ErrServerClosed {
-				server.logger.Errorf("error attempting to serve requests: %v", err)
+				if server.logger != nil {
+					server.logger.Errorf("error attempting to serve requests: %v", err)
+				}
 				go server.Stop()
 			}
 		}
@@ -119,7 +117,7 @@ func (server *AccountServer) createHTTPListener() error {
 		server.protocol = "http"
 		server.port = listen.Addr().(*net.TCPAddr).Port
 		server.hostPort = hp
-		if hp == "" || strings.HasPrefix(hp, ":") {
+		if strings.HasPrefix(hp, ":") {
 			server.hostPort = fmt.Sprintf("127.0.0.1:%d", server.port)
 		}
 		server.listener = listen
@@ -139,7 +137,7 @@ func (server *AccountServer) createHTTPListener() error {
 	server.protocol = "https"
 	server.port = listen.Addr().(*net.TCPAddr).Port
 	server.hostPort = hp
-	if hp == "" || strings.HasPrefix(hp, ":") {
+	if strings.HasPrefix(hp, ":") {
 		server.hostPort = fmt.Sprintf("127.0.0.1:%d", server.port)
 	}
 	server.listener = listen
@@ -170,7 +168,7 @@ func (server *AccountServer) makeTLSConfig(tlsConf conf.TLSConf) (*tls.Config, e
 }
 
 // BuildRouter creates the http.Router for the NGS server
-func (server *AccountServer) buildRouter() (*httprouter.Router, error) {
+func (server *AccountServer) buildRouter() *httprouter.Router {
 	r := httprouter.New()
 
 	r.GET("/jwt/v1/help", server.JWTHelp)
@@ -188,5 +186,5 @@ func (server *AccountServer) buildRouter() (*httprouter.Router, error) {
 
 	r.GET("/jwt/v1/activations/:hash", server.GetActivationJWT)
 
-	return r, nil
+	return r
 }
