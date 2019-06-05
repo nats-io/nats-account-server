@@ -81,7 +81,7 @@ func IsStdOut(fp string) bool {
 func WriteJson(fp string, v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("error marshalling: %v", err)
+		return fmt.Errorf("error marshaling: %v", err)
 	}
 
 	if err := ioutil.WriteFile(fp, data, 0600); err != nil {
@@ -188,7 +188,7 @@ func ExtractToken(s string) (string, bool) {
 	}
 
 	if start != -1 && end != -1 {
-		lines := append(lines[start:end])
+		lines := lines[start:end]
 		return strings.Join(lines, ""), true
 	}
 	return s, false
@@ -210,7 +210,7 @@ func ExtractSeed(s string) (nkeys.KeyPair, error) {
 	}
 
 	if start != -1 && end != -1 {
-		lines := append(lines[start:end])
+		lines := lines[start:end]
 		s = strings.Join(lines, "")
 	}
 	return nkeys.FromSeed([]byte(s))
@@ -283,7 +283,7 @@ func RenderDate(d int64) string {
 		return ""
 	}
 
-	return fmt.Sprintf("%s", UnixToDate(d))
+	return UnixToDate(d)
 }
 
 func NKeyValidator(kind nkeys.PrefixByte) cli.Validator {
