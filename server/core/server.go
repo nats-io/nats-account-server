@@ -22,7 +22,6 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -160,17 +159,9 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 // ApplyConfigFile applies the config file to the server's config
 func (server *AccountServer) ApplyConfigFile(configFile string) error {
 	if configFile == "" {
-		configFile = os.Getenv("NATS_ACCOUNT_SERVER_CONFIG")
-		if configFile != "" {
-			server.logger.Noticef("using config specified in $NATS_ACCOUNT_SERVER_CONFIG %q", configFile)
-		}
-	} else {
-		server.logger.Noticef("loading configuration from %q", configFile)
-	}
-
-	if configFile == "" {
 		return fmt.Errorf("no config file specified")
 	}
+	server.logger.Noticef("loading configuration from %q", configFile)
 
 	if err := conf.LoadConfigFromFile(configFile, &server.config, false); err != nil {
 		return err

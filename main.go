@@ -50,7 +50,7 @@ func main() {
 	var err error
 
 	flags := core.Flags{}
-	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file, can be set with $NATS_ACCOUNT_SERVER_CONFIG")
+	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
 	flag.StringVar(&flags.NSCFolder, "nsc", "", "the nsc folder to host accounts from, mutually exclusive from dir, and makes the server read-only")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
 	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
