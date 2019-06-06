@@ -38,7 +38,9 @@ init --interactive
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			p.SetDefaults()
+			if err := p.SetDefaults(); err != nil {
+				return err
+			}
 
 			if err := p.Interactive(cmd); err != nil {
 				return err
@@ -121,6 +123,12 @@ init --interactive
 	_ = cmd.Flags().MarkHidden("create-account")
 	_ = cmd.Flags().MarkHidden("create-operator")
 	_ = cmd.Flags().MarkHidden("create-user")
+	_ = cmd.Flags().MarkHidden("create-cluster")
+	_ = cmd.Flags().MarkHidden("create-server")
+	_ = cmd.Flags().MarkHidden("server-key")
+	_ = cmd.Flags().MarkHidden("cluster-key")
+	_ = cmd.Flags().MarkHidden("cluster-name")
+	_ = cmd.Flags().MarkHidden("server-name")
 
 	return cmd
 }
@@ -255,7 +263,7 @@ func (p *InitParams) Interactive(cmd *cobra.Command) error {
 		case 0:
 			return nil
 		case 1:
-			return fmt.Errorf("cancelled")
+			return fmt.Errorf("canceled")
 		case 2:
 			p.operator.Edit()
 		case 3:
@@ -355,6 +363,9 @@ func (p *InitParams) Run() error {
 		// FIXME: super hack
 		if c.kind == nkeys.PrefixByteUser {
 			ctx, err := s.GetContext()
+			if err != nil {
+				return err
+			}
 
 			ks := ctx.KeyStore
 			kp, err := ks.GetUserKey(ctx.Account.Name, c.name)

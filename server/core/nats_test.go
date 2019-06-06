@@ -21,10 +21,10 @@ import (
 	"testing"
 	"time"
 
-	nats "github.com/nats-io/go-nats"
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nats-account-server/server/store"
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )

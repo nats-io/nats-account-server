@@ -30,7 +30,7 @@ import (
 // addCmd represents the add command
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List assets such as accounts, imports, users, clusters, servers",
+	Short: "List assets such as accounts, imports, users",
 }
 
 func init() {
@@ -184,6 +184,9 @@ func createListUsersCmd() *cobra.Command {
 			}
 
 			names, err := s.ListEntries(store.Accounts, config.Account, store.Users)
+			if err != nil {
+				return err
+			}
 			sort.Strings(names)
 
 			var infos []*listEntry
@@ -215,9 +218,10 @@ func createListUsersCmd() *cobra.Command {
 
 func createListClustersCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "clusters",
-		Short: "List clusters",
-		Args:  MaxArgs(0),
+		Use:    "clusters",
+		Hidden: true,
+		Short:  "List clusters",
+		Args:   MaxArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config := GetConfig()
 			if config.StoreRoot == "" {
@@ -262,9 +266,10 @@ func createListClustersCmd() *cobra.Command {
 
 func createListServersCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "servers",
-		Short: "List servers",
-		Args:  MaxArgs(0),
+		Use:    "servers",
+		Hidden: true,
+		Short:  "List servers",
+		Args:   MaxArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config := GetConfig()
 			if config.StoreRoot == "" {
@@ -283,6 +288,9 @@ func createListServersCmd() *cobra.Command {
 			}
 
 			names, err := s.ListEntries(store.Clusters, config.Cluster, store.Servers)
+			if err != nil {
+				return err
+			}
 			sort.Strings(names)
 
 			var infos []*listEntry

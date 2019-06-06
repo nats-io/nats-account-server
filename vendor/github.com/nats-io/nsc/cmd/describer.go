@@ -1,16 +1,18 @@
 /*
- * Copyright 2018 The NATS Authors
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *  * Copyright 2018-2019 The NATS Authors
+ *  * Licensed under the Apache License, Version 2.0 (the "License");
+ *  * you may not use this file except in compliance with the License.
+ *  * You may obtain a copy of the License at
+ *  *
+ *  * http://www.apache.org/licenses/LICENSE-2.0
+ *  *
+ *  * Unless required by applicable law or agreed to in writing, software
+ *  * distributed under the License is distributed on an "AS IS" BASIS,
+ *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  * See the License for the specific language governing permissions and
+ *  * limitations under the License.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 package cmd
@@ -45,15 +47,27 @@ func (a *AccountDescriber) Describe() string {
 	table.UTF8Box()
 
 	table.AddTitle("Account Details")
-	table.AddRow("Name", a.Name)
-	AddStandardClaimInfo(table, a.ClaimsData)
-
+	AddStandardClaimInfo(table, &a.AccountClaims)
 	table.AddSeparator()
+
+	if len(a.SigningKeys) > 0 {
+		AddListValues(table, "Signing Keys", ShortCodesList(a.SigningKeys))
+		table.AddSeparator()
+	}
+
 	lim := a.Limits
 	if lim.Conn > -1 {
 		table.AddRow("Max Connections", fmt.Sprintf("%d", lim.Conn))
 	} else {
 		table.AddRow("Max Connections", "Unlimited")
+	}
+
+	if lim.LeafNodeConn == 0 {
+		table.AddRow("Max Leaf Node Connections", "Not Allowed")
+	} else if lim.LeafNodeConn > 0 {
+		table.AddRow("Max Leaf Node Connections", fmt.Sprintf("%d", lim.LeafNodeConn))
+	} else {
+		table.AddRow("Max Leaf Node Connections", "Unlimited")
 	}
 
 	if lim.Data > -1 {
@@ -221,9 +235,38 @@ func (i *ImportDescriber) LoadActivation() (*jwt.ActivationClaims, error) {
 	return jwt.DecodeActivationClaims(token)
 }
 
-func AddStandardClaimInfo(table *tablewriter.Table, cd jwt.ClaimsData) {
-	table.AddRow("Account ID", ShortCodes(cd.Subject))
+func AddStandardClaimInfo(table *tablewriter.Table, claims jwt.Claims) {
+	label := "Account ID"
+	issuer := ""
+	if ac, ok := claims.(*jwt.ActivationClaims); ok {
+		if ac.IssuerAccount != "" {
+			issuer = ac.IssuerAccount
+		}
+	}
+	if acc, ok := claims.(*jwt.ActivationClaims); ok {
+		if acc.IssuerAccount != "" {
+			issuer = acc.IssuerAccount
+		}
+	}
+	if uc, ok := claims.(*jwt.UserClaims); ok {
+		label = "User ID"
+		if uc.IssuerAccount != "" {
+			issuer = uc.IssuerAccount
+		}
+	}
+	if _, ok := claims.(*jwt.OperatorClaims); ok {
+		label = "Operator ID"
+	}
+
+	cd := claims.Claims()
+	if cd.Name != "" {
+		table.AddRow("Name", cd.Name)
+	}
+	table.AddRow(label, ShortCodes(cd.Subject))
 	table.AddRow("Issuer ID", ShortCodes(cd.Issuer))
+	if issuer != "" {
+		table.AddRow("Issuer Account", ShortCodes(issuer))
+	}
 	table.AddRow("Issued", RenderDate(cd.IssuedAt))
 	table.AddRow("Expires", RenderDate(cd.Expires))
 }
@@ -237,13 +280,17 @@ func NewActivationDescriber(a jwt.ActivationClaims) *ActivationDescriber {
 }
 
 func (c *ActivationDescriber) Describe() string {
+	hash, _ := c.HashID()
+
 	table := tablewriter.CreateTable()
 	table.UTF8Box()
 	table.AddTitle("Activation")
+	AddStandardClaimInfo(table, &c.ActivationClaims)
+	table.AddSeparator()
+	table.AddRow("Hash ID", ShortCodes(hash))
+	table.AddSeparator()
 	table.AddRow("Import Type", strings.Title(c.ImportType.String()))
 	table.AddRow("Import Subject", string(c.ImportSubject))
-	AddStandardClaimInfo(table, c.ActivationClaims.ClaimsData)
-
 	table.AddSeparator()
 
 	AddLimits(table, c.Limits)
@@ -307,11 +354,7 @@ func (u *UserDescriber) Describe() string {
 	table := tablewriter.CreateTable()
 	table.UTF8Box()
 	table.AddTitle("User")
-	table.AddRow("Name", u.Name)
-	table.AddRow("User ID", ShortCodes(u.Subject))
-	table.AddRow("Issuer ID", ShortCodes(u.Issuer))
-	table.AddRow("Issued", RenderDate(u.IssuedAt))
-	table.AddRow("Expires", RenderDate(u.Expires))
+	AddStandardClaimInfo(table, &u.UserClaims)
 
 	if len(u.Pub.Allow) > 0 || len(u.Pub.Deny) > 0 ||
 		len(u.Sub.Allow) > 0 || len(u.Sub.Deny) > 0 {
@@ -407,11 +450,11 @@ func NewOperatorDescriber(o jwt.OperatorClaims) *OperatorDescriber {
 func (o *OperatorDescriber) Describe() string {
 	table := tablewriter.CreateTable()
 	table.UTF8Box()
-	table.AddTitle("Operator")
-	table.AddRow("Name", o.Name)
-	table.AddRow("Operator ID", ShortCodes(o.Subject))
-	table.AddRow("Issued", RenderDate(o.IssuedAt))
-	table.AddRow("Expires", RenderDate(o.Expires))
+	table.AddTitle("Operator Details")
+	AddStandardClaimInfo(table, &o.OperatorClaims)
+	if o.AccountServerURL != "" {
+		table.AddRow("Account JWT Server", o.AccountServerURL)
+	}
 
 	if len(o.Identities) > 0 {
 		table.AddSeparator()
@@ -422,7 +465,7 @@ func (o *OperatorDescriber) Describe() string {
 
 	if len(o.SigningKeys) > 0 {
 		table.AddSeparator()
-		AddListValues(table, "Signing Keys", o.SigningKeys)
+		AddListValues(table, "Signing Keys", ShortCodesList(o.SigningKeys))
 	}
 
 	if len(o.Tags) > 0 {
@@ -431,4 +474,14 @@ func (o *OperatorDescriber) Describe() string {
 	}
 
 	return table.Render()
+}
+
+func ShortCodesList(keys []string) []string {
+	var short []string
+	if len(keys) > 0 {
+		for _, v := range keys {
+			short = append(short, ShortCodes(v))
+		}
+	}
+	return short
 }

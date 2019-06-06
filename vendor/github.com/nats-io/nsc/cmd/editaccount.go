@@ -1,23 +1,24 @@
 /*
- * Copyright 2018 The NATS Authors
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *  * Copyright 2018-2019 The NATS Authors
+ *  * Licensed under the Apache License, Version 2.0 (the "License");
+ *  * you may not use this file except in compliance with the License.
+ *  * You may obtain a copy of the License at
+ *  *
+ *  * http://www.apache.org/licenses/LICENSE-2.0
+ *  *
+ *  * Unless required by applicable law or agreed to in writing, software
+ *  * distributed under the License is distributed on an "AS IS" BASIS,
+ *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  * See the License for the specific language governing permissions and
+ *  * limitations under the License.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 package cmd
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nkeys"
@@ -63,14 +64,17 @@ func createEditAccount() *cobra.Command {
 	cmd.Flags().StringSliceVarP(&params.tags, "tag", "", nil, "add tags for user - comma separated list or option can be specified multiple times")
 	cmd.Flags().StringSliceVarP(&params.rmTags, "rm-tag", "", nil, "remove tag - comma separated list or option can be specified multiple times")
 	cmd.Flags().Int64VarP(&params.conns.NumberValue, "conns", "", -1, "set maximum active connections for the account (-1 is unlimited)")
+	cmd.Flags().Int64VarP(&params.leafConns.NumberValue, "leaf-conns", "", 0, "set maximum active leaf node connections for the account (-1 is unlimited)")
 	cmd.Flags().StringVarP(&params.data.Value, "data", "", "-1", "set maximum data in bytes for the account (-1 is unlimited)")
 	cmd.Flags().Int64VarP(&params.exports.NumberValue, "exports", "", -1, "set maximum number of exports for the account (-1 is unlimited)")
 	cmd.Flags().Int64VarP(&params.imports.NumberValue, "imports", "", -1, "set maximum number of imports for the account (-1 is unlimited)")
 	cmd.Flags().StringVarP(&params.payload.Value, "payload", "", "-1", "set maximum message payload in bytes for the account (-1 is unlimited)")
 	cmd.Flags().Int64VarP(&params.subscriptions.NumberValue, "subscriptions", "", -1, "set maximum subscription for the account (-1 is unlimited)")
 	cmd.Flags().BoolVarP(&params.exportsWc, "wildcard-exports", "", true, "exports can contain wildcards")
+	cmd.Flags().StringSliceVarP(&params.rmSigningKeys, "rm-sk", "", nil, "remove signing key - comma separated list or option can be specified multiple times")
 
 	params.AccountContextParams.BindFlags(cmd)
+	params.signingKeys.BindFlags("sk", "", nkeys.PrefixByteAccount, cmd)
 	params.TimeParams.BindFlags(cmd)
 
 	return cmd
@@ -83,25 +87,28 @@ func init() {
 type EditAccountParams struct {
 	AccountContextParams
 	SignerParams
-	TimeParams
+	GenericClaimsParams
 	claim         *jwt.AccountClaims
 	token         string
-	tags          []string
-	rmTags        []string
 	conns         NumberParams
+	leafConns     NumberParams
 	exports       NumberParams
 	exportsWc     bool
 	imports       NumberParams
 	subscriptions NumberParams
 	payload       DataParams
 	data          DataParams
+	signingKeys   SigningKeysParams
+	rmSigningKeys []string
 }
 
 func (p *EditAccountParams) SetDefaults(ctx ActionCtx) error {
-	p.AccountContextParams.SetDefaults(ctx)
+	if err := p.AccountContextParams.SetDefaults(ctx); err != nil {
+		return err
+	}
 	p.SignerParams.SetDefaults(nkeys.PrefixByteOperator, true, ctx)
 
-	if !InteractiveFlag && ctx.NothingToDo("start", "expiry", "tag", "rm-tag", "conns", "exports", "imports", "subscriptions", "payload", "data", "wildcard-exports") {
+	if !InteractiveFlag && ctx.NothingToDo("start", "expiry", "tag", "rm-tag", "conns", "leaf-conns", "exports", "imports", "subscriptions", "payload", "data", "wildcard-exports", "sk", "rm-sk") {
 		ctx.CurrentCmd().SilenceUsage = false
 		return fmt.Errorf("specify an edit option")
 	}
@@ -132,6 +139,10 @@ func (p *EditAccountParams) Load(ctx ActionCtx) error {
 		p.conns.NumberValue = p.claim.Limits.Conn
 	}
 
+	if !ctx.CurrentCmd().Flags().Changed("leaf-conns") {
+		p.leafConns.NumberValue = p.claim.Limits.LeafNodeConn
+	}
+
 	if !ctx.CurrentCmd().Flags().Changed("data") {
 		p.data.Value = fmt.Sprintf("%d", p.claim.Limits.Data)
 	}
@@ -157,7 +168,15 @@ func (p *EditAccountParams) Load(ctx ActionCtx) error {
 
 func (p *EditAccountParams) PostInteractive(ctx ActionCtx) error {
 	var err error
+	if err = p.signingKeys.Edit(); err != nil {
+		return err
+	}
+
 	if err = p.conns.Edit("max connections (-1 unlimited)"); err != nil {
+		return err
+	}
+
+	if err = p.leafConns.Edit("max leaf node connections (-1 unlimited)"); err != nil {
 		return err
 	}
 
@@ -181,7 +200,7 @@ func (p *EditAccountParams) PostInteractive(ctx ActionCtx) error {
 		return err
 	}
 
-	if err = p.TimeParams.Edit(); err != nil {
+	if err = p.GenericClaimsParams.Edit(); err != nil {
 		return err
 	}
 
@@ -193,7 +212,10 @@ func (p *EditAccountParams) PostInteractive(ctx ActionCtx) error {
 
 func (p *EditAccountParams) Validate(ctx ActionCtx) error {
 	var err error
-	if err = p.TimeParams.Validate(); err != nil {
+	if err = p.signingKeys.Valid(); err != nil {
+		return err
+	}
+	if err = p.GenericClaimsParams.Valid(); err != nil {
 		return err
 	}
 	if err = p.SignerParams.Resolve(ctx); err != nil {
@@ -204,19 +226,18 @@ func (p *EditAccountParams) Validate(ctx ActionCtx) error {
 
 func (p *EditAccountParams) Run(ctx ActionCtx) error {
 	var err error
-	if p.TimeParams.IsStartChanged() {
-		p.claim.NotBefore, _ = p.TimeParams.StartDate()
+	keys, _ := p.signingKeys.PublicKeys()
+	if len(keys) > 0 {
+		p.claim.SigningKeys.Add(keys...)
 	}
+	p.claim.SigningKeys.Remove(p.rmSigningKeys...)
 
-	if p.TimeParams.IsExpiryChanged() {
-		p.claim.Expires, _ = p.TimeParams.ExpiryDate()
+	if err := p.GenericClaimsParams.Run(ctx, p.claim); err != nil {
+		return err
 	}
-
-	p.claim.Tags.Add(p.tags...)
-	p.claim.Tags.Remove(p.rmTags...)
-	sort.Strings(p.claim.Tags)
 
 	p.claim.Limits.Conn = p.conns.NumberValue
+	p.claim.Limits.LeafNodeConn = p.leafConns.NumberValue
 	p.claim.Limits.Data, err = p.data.NumberValue()
 	if err != nil {
 		return fmt.Errorf("error parsing %s: %s", "data", p.data.Value)
@@ -229,7 +250,6 @@ func (p *EditAccountParams) Run(ctx ActionCtx) error {
 		return fmt.Errorf("error parsing %s: %s", "payload", p.data.Value)
 	}
 	p.claim.Limits.Subs = p.subscriptions.NumberValue
-
 	p.token, err = p.claim.Encode(p.signerKP)
 	if err != nil {
 		return err
