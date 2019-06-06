@@ -27,11 +27,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nats-account-server/server/logging"
 	"github.com/nats-io/nats-account-server/server/store"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
 

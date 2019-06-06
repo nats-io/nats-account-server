@@ -28,8 +28,8 @@ import (
 
 	"github.com/nats-io/nats-account-server/server/conf"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/jwt"
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )

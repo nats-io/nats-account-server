@@ -25,9 +25,9 @@ import (
 	"sync"
 	"testing"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	nsc "github.com/nats-io/nsc/cmd/store"
 	"github.com/stretchr/testify/require"

@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/jwt"
+	nats "github.com/nats-io/nats.go"
 )
 
 const (
