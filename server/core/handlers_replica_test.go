@@ -92,7 +92,7 @@ func TestGetReplicatedAccountJWT(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 
-	// Let the nats notification propogate
+	// Let the nats notification propagate
 	time.Sleep(3 * time.Second)
 
 	// Check that they match
@@ -337,7 +337,7 @@ func TestGetReplicatedActivationJWT(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 
-	// Let the nats notification propogate
+	// Let the nats notification propagate
 	time.Sleep(3 * time.Second)
 
 	// Check that they match
