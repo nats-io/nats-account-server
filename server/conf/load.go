@@ -38,7 +38,7 @@ func LoadConfigFromFile(configFile string, configStruct interface{}, strict bool
 
 // LoadConfigFromString - like LoadConfigFromFile but uses a string
 func LoadConfigFromString(configString string, configStruct interface{}, strict bool) error {
-	m, err := conf.Parse(string(configString))
+	m, err := conf.Parse(configString)
 	if err != nil {
 		return err
 	}
