@@ -204,6 +204,29 @@ func TestIntTypes(t *testing.T) {
 	require.Equal(t, int16(1000), config.Small)
 	require.Equal(t, int8(100), config.Tiny)
 	require.Equal(t, int(100000), config.Any)
+
+	val, err := parseInt("test", int8(8))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), val)
+
+	val, err = parseInt("test", int16(8))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), val)
+
+	val, err = parseInt("test", int32(8))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), val)
+
+	val, err = parseInt("test", int64(8))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), val)
+
+	val, err = parseInt("test", int(8))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), val)
+
+	val, err = parseInt("test", true)
+	require.Error(t, err)
 }
 
 func TestIntTypesAsStrings(t *testing.T) {
@@ -258,6 +281,17 @@ func TestFloatTypes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, float64(1000000.1888), config.Big)
 	require.Equal(t, float32(100000.321), config.Medium)
+
+	val, err := parseFloat("test", float32(8))
+	require.NoError(t, err)
+	require.Equal(t, float64(8), val)
+
+	val, err = parseFloat("test", float64(8))
+	require.NoError(t, err)
+	require.Equal(t, float64(8), val)
+
+	val, err = parseFloat("test", true)
+	require.Error(t, err)
 }
 
 func TestFloatTypesAsStrings(t *testing.T) {
@@ -419,6 +453,17 @@ func TestArraysBadValue(t *testing.T) {
 	  `
 	config = PrimitiveArrays{}
 	err = LoadConfigFromString(configString, &config, false)
+	require.Error(t, err)
+}
+
+func TestArraysBadValueType(t *testing.T) {
+	configString := `
+	  float32s: [1.1, 2.2, true],
+	  `
+
+	config := PrimitiveArrays{}
+
+	err := LoadConfigFromString(configString, &config, false)
 	require.Error(t, err)
 }
 
@@ -651,4 +696,12 @@ func TestBadMap(t *testing.T) {
 
 	err := LoadConfigFromString(configString, &config, false)
 	require.Error(t, err)
+}
+
+func TestEmptyGet(t *testing.T) {
+	val := get(nil, "alpha", "")
+	require.Nil(t, val)
+
+	val = get(map[string]interface{}{}, "", "")
+	require.Nil(t, val)
 }
