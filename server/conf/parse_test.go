@@ -225,7 +225,7 @@ func TestIntTypes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(8), val)
 
-	val, err = parseInt("test", true)
+	_, err = parseInt("test", true)
 	require.Error(t, err)
 }
 
@@ -290,7 +290,7 @@ func TestFloatTypes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, float64(8), val)
 
-	val, err = parseFloat("test", true)
+	_, err = parseFloat("test", true)
 	require.Error(t, err)
 }
 
