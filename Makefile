@@ -36,3 +36,6 @@ test: check
 
 fasttest:
 	scripts/cov.sh
+
+failfast:
+	go test -tags test -race -failfast ./...

@@ -22,7 +22,6 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -160,17 +159,9 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 // ApplyConfigFile applies the config file to the server's config
 func (server *AccountServer) ApplyConfigFile(configFile string) error {
 	if configFile == "" {
-		configFile = os.Getenv("NATS_ACCOUNT_SERVER_CONFIG")
-		if configFile != "" {
-			server.logger.Noticef("using config specified in $NATS_ACCOUNT_SERVER_CONFIG %q", configFile)
-		}
-	} else {
-		server.logger.Noticef("loading configuration from %q", configFile)
-	}
-
-	if configFile == "" {
 		return fmt.Errorf("no config file specified")
 	}
+	server.logger.Noticef("loading configuration from %q", configFile)
 
 	if err := conf.LoadConfigFromFile(configFile, &server.config, false); err != nil {
 		return err
@@ -403,6 +394,7 @@ func (server *AccountServer) Stop() {
 
 	if server.nats != nil {
 		server.nats.Close()
+		server.nats = nil
 		server.logger.Noticef("disconnected from NATS")
 	}
 
@@ -410,6 +402,7 @@ func (server *AccountServer) Stop() {
 
 	if server.jwtStore != nil {
 		server.jwtStore.Close()
+		server.jwtStore = nil
 		server.logger.Noticef("closed JWT store")
 	}
 }

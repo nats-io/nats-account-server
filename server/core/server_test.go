@@ -205,7 +205,7 @@ func (ts *TestSetup) initKeys() error {
 	return nil
 }
 
-func (ts *TestSetup) CreateReplica(dir string) (*AccountServer, error) {
+func (ts *TestSetup) CreateReplicaConfig(dir string) conf.AccountServerConfig {
 	config := conf.DefaultServerConfig()
 	config.Primary = ts.URLForPath("/")
 	config.NATS = ts.Server.config.NATS
@@ -216,7 +216,11 @@ func (ts *TestSetup) CreateReplica(dir string) (*AccountServer, error) {
 	config.Logging.Debug = true
 	config.Store.Dir = dir
 	config.HTTP.TLS = ts.Server.config.HTTP.TLS
+	return config
+}
 
+func (ts *TestSetup) CreateReplica(dir string) (*AccountServer, error) {
+	config := ts.CreateReplicaConfig(dir)
 	replica := NewAccountServer()
 	replica.InitializeFromConfig(config)
 	return replica, replica.Start()

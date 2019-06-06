@@ -50,6 +50,8 @@ func TestStartWithDirFlag(t *testing.T) {
 	require.NoError(t, err)
 	defer server.Stop()
 
+	require.NotNil(t, server.Logger())
+
 	httpClient, err := testHTTPClient(false)
 	require.NoError(t, err)
 
@@ -211,6 +213,15 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	require.Equal(t, jwtAPIHelp, help)
 }
 
+func TestStartWithBadConfigFileFlag(t *testing.T) {
+	server := NewAccountServer()
+	err := server.ApplyConfigFile("")
+	require.Error(t, err)
+
+	err = server.ApplyConfigFile("/a/b/c")
+	require.Error(t, err)
+}
+
 func TestNATSFlags(t *testing.T) {
 	lock := sync.Mutex{}
 
@@ -297,4 +308,49 @@ func TestStartWithBadHostPortFlag(t *testing.T) {
 
 	err = server.InitializeFromFlags(flags)
 	require.Error(t, err)
+}
+
+func TestFlagOverridesConfig(t *testing.T) {
+	path, err := ioutil.TempDir(os.TempDir(), "store")
+	require.NoError(t, err)
+
+	file, err := ioutil.TempFile(os.TempDir(), "config")
+	require.NoError(t, err)
+
+	configString := `
+	{
+		store: {
+			Dir: %s,
+			ReadOnly: false,
+		},
+		http: {
+			ReadTimeout: 2000,
+			Port: 0,
+		}
+	}
+	`
+	configString = fmt.Sprintf(configString, path)
+
+	fullPath, err := conf.ValidateFilePath(file.Name())
+	require.NoError(t, err)
+
+	err = ioutil.WriteFile(fullPath, []byte(configString), 0644)
+	require.NoError(t, err)
+
+	flags := Flags{
+		ConfigFile: fullPath,
+		ReadOnly:   true,
+		Directory:  path,
+	}
+
+	server := NewAccountServer()
+	err = server.InitializeFromFlags(flags)
+	require.NoError(t, err)
+	err = server.Start()
+	require.NoError(t, err)
+	defer server.Stop()
+
+	require.Equal(t, server.config.Store.Dir, path)
+	require.Equal(t, server.config.HTTP.ReadTimeout, 2000)
+	require.True(t, server.jwtStore.IsReadOnly())
 }
