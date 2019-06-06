@@ -89,7 +89,6 @@ func (server *AccountServer) stopHTTP() {
 			server.logger.Errorf("error closing http server: %v", err)
 		} else {
 			server.logger.Noticef("http server stopped")
-			server.listener = nil
 		}
 	}
 
@@ -97,7 +96,6 @@ func (server *AccountServer) stopHTTP() {
 		if err := server.listener.Close(); err != nil {
 			server.logger.Errorf("error closing listener: %v", err)
 		}
-		server.listener = nil
 	}
 
 	server.logger.Noticef("http stopped")
