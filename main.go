@@ -59,7 +59,7 @@ func main() {
 	flag.BoolVar(&flags.Debug, "D", false, "turn on debug logging")
 	flag.BoolVar(&flags.Verbose, "V", false, "turn on verbose logging")
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
-	flag.StringVar(&flags.HostPort, "hp", "localhost:9090", "http hostport")
+	flag.StringVar(&flags.HostPort, "hp", "", "http hostport, defaults to localhost:9090")
 	flag.BoolVar(&flags.ReadOnly, "ro", false, "exclusive to -dir flag, makes the server run in read-only mode, file changes will trigger nats updates (if configured)")
 	flag.Parse()
 

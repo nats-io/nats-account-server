@@ -34,9 +34,9 @@ import (
 func (server *AccountServer) startHTTP() error {
 	var err error
 
-	conf := server.config.HTTP
+	config := server.config.HTTP
 
-	err = server.createHTTPListener()
+	err = server.createHTTPListener(config)
 	if err != nil {
 		server.logger.Errorf("error creating listener: %v", err)
 		return err
@@ -56,8 +56,8 @@ func (server *AccountServer) startHTTP() error {
 
 	httpServer := &http.Server{
 		Handler:      xrs.Handler(router),
-		ReadTimeout:  time.Duration(conf.ReadTimeout) * time.Millisecond,
-		WriteTimeout: time.Duration(conf.WriteTimeout) * time.Millisecond,
+		ReadTimeout:  time.Duration(config.ReadTimeout) * time.Millisecond,
+		WriteTimeout: time.Duration(config.WriteTimeout) * time.Millisecond,
 	}
 
 	server.http = httpServer
@@ -101,12 +101,11 @@ func (server *AccountServer) stopHTTP() {
 	server.logger.Noticef("http stopped")
 }
 
-func (server *AccountServer) createHTTPListener() error {
+func (server *AccountServer) createHTTPListener(config conf.HTTPConfig) error {
 	var listen net.Listener
 
-	conf := server.config.HTTP
-	hp := net.JoinHostPort(conf.Host, fmt.Sprintf("%d", conf.Port))
-	tlsConf := conf.TLS
+	hp := net.JoinHostPort(config.Host, fmt.Sprintf("%d", config.Port))
+	tlsConf := config.TLS
 
 	if tlsConf.Cert == "" {
 		listen, err := net.Listen("tcp", hp)
@@ -123,12 +122,12 @@ func (server *AccountServer) createHTTPListener() error {
 		return nil
 	}
 
-	config, err := server.makeTLSConfig(tlsConf)
+	tlsConfig, err := server.makeTLSConfig(tlsConf)
 	if err != nil {
 		return err
 	}
 
-	listen, err = tls.Listen("tcp", hp, config)
+	listen, err = tls.Listen("tcp", hp, tlsConfig)
 	if err != nil {
 		return err
 	}

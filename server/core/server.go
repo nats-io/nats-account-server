@@ -45,7 +45,7 @@ type AccountServer struct {
 	startTime time.Time
 
 	logger logging.Logger
-	config conf.AccountServerConfig
+	config *conf.AccountServerConfig
 
 	nats      *nats.Conn
 	natsTimer *time.Timer
@@ -163,7 +163,7 @@ func (server *AccountServer) ApplyConfigFile(configFile string) error {
 	}
 	server.logger.Noticef("loading configuration from %q", configFile)
 
-	if err := conf.LoadConfigFromFile(configFile, &server.config, false); err != nil {
+	if err := conf.LoadConfigFromFile(configFile, server.config, false); err != nil {
 		return err
 	}
 
@@ -172,7 +172,7 @@ func (server *AccountServer) ApplyConfigFile(configFile string) error {
 
 // InitializeFromConfig initialize the server's configuration to an existing config object, useful for tests
 // Does not change the config at all, use DefaultServerConfig() to create a default config
-func (server *AccountServer) InitializeFromConfig(config conf.AccountServerConfig) error {
+func (server *AccountServer) InitializeFromConfig(config *conf.AccountServerConfig) error {
 	server.config = config
 	return nil
 }
@@ -353,8 +353,9 @@ func (server *AccountServer) initializeSystemAccount() error {
 }
 
 func (server *AccountServer) createHTTPClient() *http.Client {
-	conf := server.config.HTTP
-	tlsConf := conf.TLS
+	config := server.config.HTTP
+
+	tlsConf := config.TLS
 
 	timeout := time.Duration(time.Duration(server.config.ReplicationTimeout) * time.Millisecond)
 	tr := &http.Transport{

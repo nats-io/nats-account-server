@@ -159,7 +159,7 @@ func TestStartWithNSCFlag(t *testing.T) {
 	require.Equal(t, cd, jwt)
 }
 
-func TestStartWithConfigFileFlag(t *testing.T) {
+func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 	path, err := ioutil.TempDir(os.TempDir(), "store")
 	require.NoError(t, err)
 
@@ -173,7 +173,8 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 		},
 		http: {
 			ReadTimeout: 2000,
-			Port: 0,
+			Port: 80,
+			Host: "nats.io",
 		}
 	}
 	`
@@ -211,6 +212,71 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 
 	help := string(body)
 	require.Equal(t, jwtAPIHelp, help)
+}
+
+func TestStartWithConfigFileFlag(t *testing.T) {
+	file, err := ioutil.TempFile(os.TempDir(), "config")
+	require.NoError(t, err)
+
+	configString := `
+	OperatorJWTPath: "X:/some_path/NATS.jwt"
+	systemaccountjwtpath: "X:/some_path/SYS.jwt"
+	primary: "http://primary.nats.io:5222"
+	http: {
+		host: "a.nats.io",
+		port: 9090,
+		readtimeout: 5000,
+		writetimeout: 5000 }
+	store: {
+		dir: "D:/nats/as_store",
+		readonly: false,
+		shard: false }
+	logging: { 
+		debug: true,
+		pid: true,
+		time: true,
+		trace: false,
+		colors: true }
+	nats: { 
+		servers: ["nats://a.nats.io:4243","nats://b.nats.io:4243"], 
+		usercredentials: "X:/some_path/admin.creds", 
+		ConnectTimeout: 5000,
+		ReconnectWait: 10000
+	}
+	`
+
+	fullPath, err := conf.ValidateFilePath(file.Name())
+	require.NoError(t, err)
+
+	err = ioutil.WriteFile(fullPath, []byte(configString), 0644)
+	require.NoError(t, err)
+
+	flags := Flags{
+		ConfigFile: fullPath,
+	}
+
+	server := NewAccountServer()
+	err = server.InitializeFromFlags(flags)
+	require.NoError(t, err)
+
+	require.Equal(t, "X:/some_path/NATS.jwt", server.config.OperatorJWTPath)
+	require.Equal(t, "X:/some_path/SYS.jwt", server.config.SystemAccountJWTPath)
+	require.Equal(t, "http://primary.nats.io:5222", server.config.Primary)
+
+	require.Equal(t, "D:/nats/as_store", server.config.Store.Dir)
+	require.False(t, server.config.Store.ReadOnly)
+	require.False(t, server.config.Store.Shard)
+
+	require.Equal(t, 5000, server.config.HTTP.ReadTimeout)
+	require.Equal(t, "a.nats.io", server.config.HTTP.Host)
+	require.Equal(t, 9090, server.config.HTTP.Port)
+
+	require.Equal(t, 2, len(server.config.NATS.Servers))
+	require.Equal(t, "nats://a.nats.io:4243", server.config.NATS.Servers[0])
+	require.Equal(t, "nats://b.nats.io:4243", server.config.NATS.Servers[1])
+	require.Equal(t, "X:/some_path/admin.creds", server.config.NATS.UserCredentials)
+	require.Equal(t, 5000, server.config.NATS.ConnectTimeout)
+	require.Equal(t, 10000, server.config.NATS.ReconnectWait)
 }
 
 func TestStartWithBadConfigFileFlag(t *testing.T) {

@@ -205,7 +205,7 @@ func (ts *TestSetup) initKeys() error {
 	return nil
 }
 
-func (ts *TestSetup) CreateReplicaConfig(dir string) conf.AccountServerConfig {
+func (ts *TestSetup) CreateReplicaConfig(dir string) *conf.AccountServerConfig {
 	config := conf.DefaultServerConfig()
 	config.Primary = ts.URLForPath("/")
 	config.NATS = ts.Server.config.NATS
@@ -230,7 +230,7 @@ var port = uint64(14222)
 
 // SetupTestServer creates an operator, gnatsd, context, config and test http server with a router
 // It also sets some required env vars to run tests.
-func SetupTestServer(config conf.AccountServerConfig, useTLS bool, enableNats bool) (*TestSetup, error) {
+func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats bool) (*TestSetup, error) {
 	var err error
 
 	testSetup := &TestSetup{}

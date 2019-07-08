@@ -76,8 +76,8 @@ type StoreConfig struct {
 
 // DefaultServerConfig generates a default configuration with
 // logging set to colors, time, debug and trace
-func DefaultServerConfig() AccountServerConfig {
-	return AccountServerConfig{
+func DefaultServerConfig() *AccountServerConfig {
+	return &AccountServerConfig{
 		Logging: logging.Config{
 			Colors: true,
 			Time:   true,
