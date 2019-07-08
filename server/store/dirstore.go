@@ -167,8 +167,6 @@ func (store *DirJWTStore) startWatching() error {
 					return
 				}
 
-				fmt.Printf("event %s\n", event.String())
-
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					// Check for jwt change, ignore others
 					if strings.HasSuffix(event.Name, extension) {
@@ -202,7 +200,6 @@ func (store *DirJWTStore) startWatching() error {
 
 						for _, file := range files {
 							watcher.Add(file)
-							fmt.Printf("Watching %s\n", file)
 						}
 					}
 				}
