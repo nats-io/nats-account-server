@@ -122,6 +122,14 @@ A status 400 is returned if there is a problem with the JWT or saving it. In rar
 cases a status 500 may be returned if there was an issue saving the JWT. Otherwise
 a status 200 is returned.
 
+### Help
+
+A help page, for the API, is available at:
+
+```bash
+GET /jwt/v1/help
+```
+
 <a name="store"></a>
 
 ## JWT Stores
