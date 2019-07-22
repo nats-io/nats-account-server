@@ -58,6 +58,7 @@ type AccountServer struct {
 
 	jwtStore            store.JWTStore
 	trustedKeys         []string
+	operatorJWT         string
 	systemAccountClaims *jwt.AccountClaims
 	systemAccountJWT    string
 
@@ -323,6 +324,7 @@ func (server *AccountServer) initializeTrustedKeys() error {
 	keys = append(keys, operatorJWT.SigningKeys...)
 
 	server.trustedKeys = keys
+	server.operatorJWT = string(data)
 
 	return nil
 }

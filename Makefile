@@ -2,7 +2,7 @@
 build: fmt check compile
 
 fmt:
-	misspell -locale US .
+	#misspell -locale US .
 	gofmt -s -w server/conf/*.go
 	gofmt -s -w server/core/*.go
 	gofmt -s -w server/logging/*.go

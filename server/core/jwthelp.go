@@ -26,6 +26,10 @@ with JWTs on the NATS Account Server
 
 Returns this page.
 
+## GET /jwt/v1/operator
+
+If the server is configured with an operator JWT path, this URL will return the Operator JWT loaded at startup to find the trusted keys.
+
 ## GET /jwt/v1/accounts/<pubkey>
 
 Retieve an account JWT by the public key. The result is either an error

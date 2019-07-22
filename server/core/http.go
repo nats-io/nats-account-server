@@ -171,6 +171,10 @@ func (server *AccountServer) buildRouter() *httprouter.Router {
 
 	r.GET("/jwt/v1/help", server.JWTHelp)
 
+	if server.operatorJWT != "" {
+		r.GET("/jwt/v1/operator", server.GetOperatorJWT)
+	}
+
 	// replicas and readonly stores cannot accept post requests
 	// replicas use a writable store, thus the extra check
 	if !server.jwtStore.IsReadOnly() && server.primary == "" {

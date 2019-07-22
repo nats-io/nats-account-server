@@ -49,6 +49,20 @@ func (server *AccountServer) JWTHelp(w http.ResponseWriter, r *http.Request, par
 	w.Write([]byte(jwtAPIHelp))
 }
 
+// GetOperatorJWT returns the known operator JWT
+func (server *AccountServer) GetOperatorJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+
+	if server.operatorJWT == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Add(ContentType, TextPlain)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(server.operatorJWT))
+}
+
 func (server *AccountServer) sendErrorResponse(httpStatus int, msg string, account string, err error, w http.ResponseWriter) error {
 	account = ShortKey(account)
 	if err != nil {

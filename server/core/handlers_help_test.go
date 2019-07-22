@@ -61,3 +61,39 @@ func TestJWTHelpTLS(t *testing.T) {
 	help := string(body)
 	require.Equal(t, jwtAPIHelp, help)
 }
+
+func TestOperatorHelp(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/operator")
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	operator := string(body)
+	require.Equal(t, testEnv.Server.operatorJWT, operator)
+}
+
+func TestOperatorHelpTLS(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), true, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/operator")
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	operator := string(body)
+	require.Equal(t, testEnv.Server.operatorJWT, operator)
+}
