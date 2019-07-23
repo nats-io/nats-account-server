@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats-account-server/server/conf"
@@ -62,7 +63,7 @@ func TestJWTHelpTLS(t *testing.T) {
 	require.Equal(t, jwtAPIHelp, help)
 }
 
-func TestOperatorHelp(t *testing.T) {
+func TestOperatorJWT(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
@@ -78,9 +79,29 @@ func TestOperatorHelp(t *testing.T) {
 
 	operator := string(body)
 	require.Equal(t, testEnv.Server.operatorJWT, operator)
+
+	path = fmt.Sprintf("/jwt/v1/operator?text=true")
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	operator = string(body)
+	require.Equal(t, testEnv.Server.operatorJWT, operator)
+
+	path = fmt.Sprintf("/jwt/v1/operator?decode=true")
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	operator = string(body)
+	require.True(t, strings.Contains(operator, `"alg": "ed25519"`)) // header prefix doesn't change
 }
 
-func TestOperatorHelpTLS(t *testing.T) {
+func TestOperatorJWTTLS(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), true, false)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)

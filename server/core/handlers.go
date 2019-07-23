@@ -58,7 +58,20 @@ func (server *AccountServer) GetOperatorJWT(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	w.Header().Add(ContentType, TextPlain)
+	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
+	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
+
+	if text {
+		server.writeJWTAsText(w, "", server.operatorJWT)
+		return
+	}
+
+	if decode {
+		server.writeDecodedJWT(w, "", server.operatorJWT)
+		return
+	}
+
+	w.Header().Add(ContentType, ApplicationJWT)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(server.operatorJWT))
 }
