@@ -244,6 +244,11 @@ func TestExpiredJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusBadRequest) // Already expired
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	message := string(body)
+
+	require.True(t, strings.Contains(message, "expired"))
 
 	account = jwt.NewAccountClaims(pubKey)
 	account.Expires = time.Now().Unix() + 2
