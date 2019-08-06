@@ -35,7 +35,7 @@ import (
 const (
 	// CLIENT is an end user.
 	CLIENT = iota
-	// ROUTER is another router in the cluster.
+	// ROUTER represents another server in the cluster.
 	ROUTER
 	// GATEWAY is a link between 2 clusters.
 	GATEWAY
@@ -202,8 +202,9 @@ type client struct {
 
 // Struct for PING initiation from the server.
 type pinfo struct {
-	tmr *time.Timer
-	out int
+	tmr  *time.Timer
+	last time.Time
+	out  int
 }
 
 // outbound holds pending data for a socket.
@@ -492,7 +493,8 @@ func (c *client) applyAccountLimits() {
 		c.mpay = c.acc.mpay
 	}
 
-	opts := c.srv.getOpts()
+	s := c.srv
+	opts := s.getOpts()
 
 	// We check here if the server has an option set that is lower than the account limit.
 	if c.mpay != jwt.NoLimit && opts.MaxPayload != 0 && int32(opts.MaxPayload) < c.acc.mpay {
@@ -528,16 +530,17 @@ func (c *client) RegisterUser(user *User) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Assign permissions.
 	if user.Permissions == nil {
 		// Reset perms to nil in case client previously had them.
 		c.perms = nil
 		c.mperms = nil
+		c.mu.Unlock()
 		return
 	}
 	c.setPermissions(user.Permissions)
+	c.mu.Unlock()
 }
 
 // RegisterNkey allows auth to call back into a new nkey
@@ -578,14 +581,14 @@ func (c *client) setPermissions(perms *Permissions) {
 	// Loop over publish permissions
 	if perms.Publish != nil {
 		if len(perms.Publish.Allow) > 0 {
-			c.perms.pub.allow = NewSublist()
+			c.perms.pub.allow = NewSublistWithCache()
 		}
 		for _, pubSubject := range perms.Publish.Allow {
 			sub := &subscription{subject: []byte(pubSubject)}
 			c.perms.pub.allow.Insert(sub)
 		}
 		if len(perms.Publish.Deny) > 0 {
-			c.perms.pub.deny = NewSublist()
+			c.perms.pub.deny = NewSublistWithCache()
 		}
 		for _, pubSubject := range perms.Publish.Deny {
 			sub := &subscription{subject: []byte(pubSubject)}
@@ -596,14 +599,14 @@ func (c *client) setPermissions(perms *Permissions) {
 	// Loop over subscribe permissions
 	if perms.Subscribe != nil {
 		if len(perms.Subscribe.Allow) > 0 {
-			c.perms.sub.allow = NewSublist()
+			c.perms.sub.allow = NewSublistWithCache()
 		}
 		for _, subSubject := range perms.Subscribe.Allow {
 			sub := &subscription{subject: []byte(subSubject)}
 			c.perms.sub.allow.Insert(sub)
 		}
 		if len(perms.Subscribe.Deny) > 0 {
-			c.perms.sub.deny = NewSublist()
+			c.perms.sub.deny = NewSublistWithCache()
 			// Also hold onto this array for later.
 			c.darray = perms.Subscribe.Deny
 		}
@@ -632,7 +635,7 @@ func (c *client) checkExpiration(claims *jwt.ClaimsData) {
 // messages based on a deny clause for subscriptions.
 // Lock should be held.
 func (c *client) loadMsgDenyFilter() {
-	c.mperms = &msgDeny{NewSublist(), make(map[string]bool)}
+	c.mperms = &msgDeny{NewSublistWithCache(), make(map[string]bool)}
 	for _, sub := range c.darray {
 		c.mperms.deny.Insert(&subscription{subject: []byte(sub)})
 	}
@@ -736,12 +739,9 @@ func (c *client) readLoop() {
 
 	for {
 		n, err := nc.Read(b)
-		if err != nil {
-			if err == io.EOF {
-				c.closeConnection(ClientClosed)
-			} else {
-				c.closeConnection(ReadError)
-			}
+		// If we have any data we will try to parse and exit at the end.
+		if n == 0 && err != nil {
+			c.closeConnection(closedStateForErr(err))
 			return
 		}
 		start := time.Now()
@@ -821,7 +821,22 @@ func (c *client) readLoop() {
 		if nc == nil {
 			return
 		}
+
+		// We could have had a read error from above but still read some data.
+		// If so do the close here unconditionally.
+		if err != nil {
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
 	}
+}
+
+// Returns the appropriate closed state for a given read error.
+func closedStateForErr(err error) ClosedState {
+	if err == io.EOF {
+		return ClientClosed
+	}
+	return ReadError
 }
 
 // collapsePtoNB will place primary onto nb buffer as needed in prep for WriteTo.
@@ -1009,8 +1024,13 @@ func (c *client) traceMsg(msg []byte) {
 	if !c.trace {
 		return
 	}
-	// FIXME(dlc), allow limits to printable payload.
-	c.Tracef("<<- MSG_PAYLOAD: [%q]", msg[:len(msg)-LEN_CR_LF])
+
+	maxTrace := c.srv.getOpts().MaxTracedMsgLen
+	if maxTrace > 0 && (len(msg)-LEN_CR_LF) > maxTrace {
+		c.Tracef("<<- MSG_PAYLOAD: [\"%s...\"]", msg[:maxTrace])
+	} else {
+		c.Tracef("<<- MSG_PAYLOAD: [%q]", msg[:len(msg)-LEN_CR_LF])
+	}
 }
 
 func (c *client) traceInOp(op string, arg []byte) {
@@ -1061,6 +1081,8 @@ func (c *client) processErr(errStr string) {
 		c.Errorf("Route Error %s", errStr)
 	case GATEWAY:
 		c.Errorf("Gateway Error %s", errStr)
+	case LEAF:
+		c.Errorf("Leafnode Error %s", errStr)
 	}
 	c.closeConnection(ParseError)
 }
@@ -1263,6 +1285,8 @@ func (c *client) authViolation() {
 		hasNkeys = s.nkeys != nil
 		hasUsers = s.users != nil
 		s.mu.Unlock()
+		defer s.sendAuthErrorEvent(c)
+
 	}
 	if hasTrustedNkeys {
 		c.Errorf("%v", ErrAuthentication)
@@ -1279,9 +1303,6 @@ func (c *client) authViolation() {
 	}
 	c.sendErr("Authorization Violation")
 	c.closeConnection(AuthenticationViolation)
-	if s != nil {
-		s.sendAuthErrorEvent(c)
-	}
 }
 
 func (c *client) maxAccountConnExceeded() {
@@ -1424,6 +1445,7 @@ func (c *client) sendPing() {
 // Assume lock is held.
 func (c *client) generateClientInfoJSON(info Info) []byte {
 	info.CID = c.cid
+	info.MaxPayload = c.mpay
 	// Generate the info json
 	b, _ := json.Marshal(info)
 	pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
@@ -1459,25 +1481,25 @@ func (c *client) processPing() {
 		c.mu.Unlock()
 		return
 	}
+
 	c.sendPong()
 
-	// If not a CLIENT, we are done
-	if c.kind != CLIENT {
+	// Record this to suppress us sending one if this
+	// is within a given time interval for activity.
+	c.ping.last = time.Now()
+
+	// If not a CLIENT, we are done. Also the CONNECT should
+	// have been received, but make sure it is so before proceeding
+	if c.kind != CLIENT || !c.flags.isSet(connectReceived) {
 		c.mu.Unlock()
 		return
 	}
 
-	// The CONNECT should have been received, but make sure it
-	// is so before proceeding
-	if !c.flags.isSet(connectReceived) {
-		c.mu.Unlock()
-		return
-	}
 	// If we are here, the CONNECT has been received so we know
 	// if this client supports async INFO or not.
 	var (
-		checkClusterChange bool
-		srv                = c.srv
+		checkInfoChange bool
+		srv             = c.srv
 	)
 	// For older clients, just flip the firstPongSent flag if not already
 	// set and we are done.
@@ -1486,21 +1508,24 @@ func (c *client) processPing() {
 	} else {
 		// This is a client that supports async INFO protocols.
 		// If this is the first PING (so firstPongSent is not set yet),
-		// we will need to check if there was a change in cluster topology.
-		checkClusterChange = !c.flags.isSet(firstPongSent)
+		// we will need to check if there was a change in cluster topology
+		// or we have a different max payload. We will send this first before
+		// pong since most clients do flush after connect call.
+		checkInfoChange = !c.flags.isSet(firstPongSent)
 	}
 	c.mu.Unlock()
 
-	if checkClusterChange {
+	if checkInfoChange {
+		opts := srv.getOpts()
 		srv.mu.Lock()
 		c.mu.Lock()
 		// Now that we are under both locks, we can flip the flag.
-		// This prevents sendAsyncInfoToClients() and and code here
-		// to send a double INFO protocol.
+		// This prevents sendAsyncInfoToClients() and code here to
+		// send a double INFO protocol.
 		c.flags.set(firstPongSent)
 		// If there was a cluster update since this client was created,
 		// send an updated INFO protocol now.
-		if srv.lastCURLsUpdate >= c.start.UnixNano() {
+		if srv.lastCURLsUpdate >= c.start.UnixNano() || c.mpay != int32(opts.MaxPayload) {
 			c.sendInfo(c.generateClientInfoJSON(srv.copyInfo()))
 		}
 		c.mu.Unlock()
@@ -1562,11 +1587,13 @@ func (c *client) processPub(trace bool, arg []byte) error {
 	default:
 		return fmt.Errorf("processPub Parse Error: '%s'", arg)
 	}
+	// If number overruns an int64, parseSize() will have returned a negative value
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
 	maxPayload := atomic.LoadInt32(&c.mpay)
-	if maxPayload != jwt.NoLimit && int32(c.pa.size) > maxPayload {
+	// Use int64() to avoid int32 overrun...
+	if maxPayload != jwt.NoLimit && int64(c.pa.size) > int64(maxPayload) {
 		c.maxPayloadViolation(c.pa.size, maxPayload)
 		return ErrMaxPayload
 	}
@@ -2264,6 +2291,11 @@ func (c *client) processInboundClientMsg(msg []byte) {
 		return
 	}
 
+	// Check to see if we need to map/route to another account.
+	if c.acc.imports.services != nil {
+		c.checkForImportServices(c.acc, msg)
+	}
+
 	// Match the subscriptions. We will use our own L1 map if
 	// it's still valid, avoiding contention on the shared sublist.
 	var r *SublistResult
@@ -2292,11 +2324,6 @@ func (c *client) processInboundClientMsg(msg []byte) {
 				}
 			}
 		}
-	}
-
-	// Check to see if we need to map/route to another account.
-	if c.acc.imports.services != nil {
-		c.checkForImportServices(c.acc, msg)
 	}
 
 	var qnames [][]byte
@@ -2328,6 +2355,7 @@ func (c *client) checkForImportServices(acc *Account, msg []byte) {
 	if acc == nil || acc.imports.services == nil {
 		return
 	}
+
 	acc.mu.RLock()
 	rm := acc.imports.services[string(c.pa.subject)]
 	invalid := rm != nil && rm.invalid
@@ -2416,8 +2444,8 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 	msgh = append(msgh, ' ')
 	si := len(msgh)
 
-	// For sending messages across routes. Reset it if we have one.
-	// We reuse this data structure.
+	// For sending messages across routes and leafnodes.
+	// Reset if we have one since we reuse this data structure.
 	if c.in.rts != nil {
 		c.in.rts = c.in.rts[:0]
 	}
@@ -2428,10 +2456,9 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 		// these after everything else.
 		switch sub.client.kind {
 		case ROUTER:
-			if c.kind == ROUTER {
-				continue
+			if c.kind != ROUTER && !c.isSolicitedLeafNode() {
+				c.addSubToRouteTargets(sub)
 			}
-			c.addSubToRouteTargets(sub)
 			continue
 		case GATEWAY:
 			// Never send to gateway from here.
@@ -2441,7 +2468,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 			// Leaf node delivery audience is different however.
 			// Also leaf nodes are always no echo, so we make sure we are not
 			// going to send back to ourselves here.
-			if c != sub.client {
+			if c != sub.client && (c.kind != ROUTER || !c.isSolicitedLeafNode()) {
 				c.addSubToRouteTargets(sub)
 			}
 			continue
@@ -2500,25 +2527,25 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 		}
 
 	selectQSub:
-
 		// We will hold onto remote or lead qsubs when we are coming from
 		// a route or a leaf node just in case we can no longer do local delivery.
 		var rsub *subscription
 
 		// Find a subscription that is able to deliver this message
 		// starting at a random index.
-		startIndex := c.in.prand.Intn(len(qsubs))
-		for i := 0; i < len(qsubs); i++ {
+		for startIndex, i := c.in.prand.Intn(len(qsubs)), 0; i < len(qsubs); i++ {
 			index := (startIndex + i) % len(qsubs)
 			sub := qsubs[index]
 			if sub == nil {
 				continue
 			}
-			kind := sub.client.kind
+
 			// Potentially sending to a remote sub across a route or leaf node.
-			if kind == ROUTER || kind == LEAF {
-				if c.kind == ROUTER || c.kind == LEAF || (c.kind == CLIENT && kind == LEAF) {
-					// We just came from a route/leaf, so skip and prefer local subs.
+			// We may want to skip this and prefer locals depending on where we
+			// were sourced from.
+			if src, dst := c.kind, sub.client.kind; dst == ROUTER || dst == LEAF {
+				if src == ROUTER || ((src == LEAF || src == CLIENT) && dst == LEAF) {
+					// We just came from a route, so skip and prefer local subs.
 					// Keep our first rsub in case all else fails.
 					if rsub == nil {
 						rsub = sub
@@ -2566,7 +2593,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 
 sendToRoutesOrLeafs:
 
-	// If no messages for routes return here.
+	// If no messages for routes or leafnodes return here.
 	if len(c.in.rts) == 0 {
 		return queues
 	}
@@ -2634,10 +2661,17 @@ func (c *client) processPingTimer() {
 
 	c.Debugf("%s Ping Timer", c.typeString())
 
-	// If we have had activity within the PingInterval no
-	// need to send a ping.
-	if delta := time.Since(c.last); delta < c.srv.getOpts().PingInterval {
-		c.Debugf("Delaying PING due to activity %v ago", delta.Round(time.Second))
+	// If we have had activity within the PingInterval then
+	// there is no need to send a ping. This can be client data
+	// or if we received a ping from the other side.
+	pingInterval := c.srv.getOpts().PingInterval
+	now := time.Now()
+	needRTT := c.rtt == 0 || now.Sub(c.rttStart) > DEFAULT_RTT_MEASUREMENT_INTERVAL
+
+	if delta := now.Sub(c.last); delta < pingInterval && !needRTT {
+		c.Debugf("Delaying PING due to client activity %v ago", delta.Round(time.Second))
+	} else if delta := now.Sub(c.ping.last); delta < pingInterval && !needRTT {
+		c.Debugf("Delaying PING due to remote ping %v ago", delta.Round(time.Second))
 	} else {
 		// Check for violation
 		if c.ping.out+1 > c.srv.getOpts().MaxPingsOut {
@@ -2652,6 +2686,20 @@ func (c *client) processPingTimer() {
 
 	// Reset to fire again.
 	c.setPingTimer()
+}
+
+// Lock should be held
+// We randomize the first one by an offset up to 20%, e.g. 2m ~= max 24s.
+// This is because the clients by default are usually setting same interval
+// and we have alot of cross ping/pongs between clients and servers.
+// We will now suppress the server ping/pong if we have received a client ping.
+func (c *client) setFirstPingTimer(pingInterval time.Duration) {
+	if c.srv == nil {
+		return
+	}
+	addDelay := rand.Int63n(int64(pingInterval / 5))
+	d := pingInterval + time.Duration(addDelay)
+	c.ping.tmr = time.AfterFunc(d, c.processPingTimer)
 }
 
 // Lock should be held

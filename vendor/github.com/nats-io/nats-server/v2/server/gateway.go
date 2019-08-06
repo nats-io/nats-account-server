@@ -46,6 +46,9 @@ var (
 	gatewaySolicitDelay          = int64(defaultSolicitGatewaysDelay)
 )
 
+// Warning when user configures gateway TLS insecure
+const gatewayTLSInsecureWarning = "TLS certificate chain and hostname of solicited gateways will not be verified. DO NOT USE IN PRODUCTION!"
+
 // SetGatewaysSolicitDelay sets the initial delay before gateways
 // connections are initiated.
 // Used by tests.
@@ -231,18 +234,12 @@ func validateGatewayOptions(o *Options) error {
 	if o.Gateway.Port == 0 {
 		return fmt.Errorf("gateway %q has no port specified (select -1 for random port)", o.Gateway.Name)
 	}
-	if o.Gateway.TLSConfig != nil && o.Gateway.TLSConfig.InsecureSkipVerify {
-		return fmt.Errorf("tls InsecureSkipVerify not supported for gateway")
-	}
 	for i, g := range o.Gateway.Gateways {
 		if g.Name == "" {
 			return fmt.Errorf("gateway in the list %d has no name", i)
 		}
 		if len(g.URLs) == 0 {
 			return fmt.Errorf("gateway %q has no URL", g.Name)
-		}
-		if g.TLSConfig != nil && g.TLSConfig.InsecureSkipVerify {
-			return fmt.Errorf("tls InsecureSkipVerify not supported for remote gateway %q", g.Name)
 		}
 	}
 	return nil
@@ -434,6 +431,22 @@ func (s *Server) gatewayAcceptLoop(ch chan struct{}) {
 	}
 	// Setup state that can enable shutdown
 	s.gatewayListener = l
+
+	// Warn if insecure is configured in the main Gateway configuration
+	// or any of the RemoteGateway's. This means that we need to check
+	// remotes even if TLS would not be configured for the accept.
+	warn := tlsReq && opts.Gateway.TLSConfig.InsecureSkipVerify
+	if !warn {
+		for _, g := range opts.Gateway.Gateways {
+			if g.TLSConfig != nil && g.TLSConfig.InsecureSkipVerify {
+				warn = true
+				break
+			}
+		}
+	}
+	if warn {
+		s.Warnf(gatewayTLSInsecureWarning)
+	}
 	s.mu.Unlock()
 
 	// Let them know we are up
@@ -1695,7 +1708,7 @@ func (c *client) processGatewayRUnsub(arg []byte) error {
 		return nil
 	} else {
 		// Plain sub, assume optimistic sends, create entry.
-		e = &outsie{ni: make(map[string]struct{}), sl: NewSublist()}
+		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistWithCache()}
 		newe = true
 	}
 	// This is when a sub or queue sub is supposed to be in
@@ -1796,7 +1809,7 @@ func (c *client) processGatewayRSub(arg []byte) error {
 	} else if queue == nil {
 		return nil
 	} else {
-		e = &outsie{ni: make(map[string]struct{}), sl: NewSublist()}
+		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistWithCache()}
 		newe = true
 		useSl = true
 	}
@@ -2594,7 +2607,7 @@ func (c *client) gatewayAllSubsReceiveStart(info *Info) {
 		e.mode = Transitioning
 		e.Unlock()
 	} else {
-		e := &outsie{sl: NewSublist()}
+		e := &outsie{sl: NewSublistWithCache()}
 		e.mode = Transitioning
 		c.mu.Lock()
 		c.gw.outsim.Store(account, e)

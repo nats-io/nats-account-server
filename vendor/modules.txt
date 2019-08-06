@@ -14,7 +14,7 @@ github.com/dustin/go-humanize
 github.com/fatih/color
 # github.com/fsnotify/fsnotify v1.4.7
 github.com/fsnotify/fsnotify
-# github.com/golang/protobuf v1.3.1
+# github.com/golang/protobuf v1.3.2
 github.com/golang/protobuf/proto
 # github.com/google/go-github v17.0.0+incompatible
 github.com/google/go-github/github
@@ -55,9 +55,9 @@ github.com/mitchellh/go-homedir
 github.com/mitchellh/go-wordwrap
 # github.com/mitchellh/mapstructure v1.1.2
 github.com/mitchellh/mapstructure
-# github.com/nats-io/jwt v0.2.6
+# github.com/nats-io/jwt v0.2.8
 github.com/nats-io/jwt
-# github.com/nats-io/nats-server/v2 v2.0.0
+# github.com/nats-io/nats-server/v2 v2.0.2
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/server
@@ -67,7 +67,7 @@ github.com/nats-io/nats-server/v2/server/pse
 github.com/nats-io/nats.go
 github.com/nats-io/nats.go/encoders/builtin
 github.com/nats-io/nats.go/util
-# github.com/nats-io/nkeys v0.0.2
+# github.com/nats-io/nkeys v0.1.0
 github.com/nats-io/nkeys
 # github.com/nats-io/nsc v0.0.0-20190605004402-38261a2a753e
 github.com/nats-io/nsc/cmd/store
@@ -111,7 +111,7 @@ github.com/ulikunitz/xz/lzma
 github.com/ulikunitz/xz/internal/hash
 # github.com/xlab/tablewriter v0.0.0-20160610135559-80b567a11ad5
 github.com/xlab/tablewriter
-# golang.org/x/crypto v0.0.0-20190530122614-20be4c3c3ed5
+# golang.org/x/crypto v0.0.0-20190701094942-4def268fd1a4
 golang.org/x/crypto/ed25519
 golang.org/x/crypto/ed25519/internal/edwards25519
 golang.org/x/crypto/bcrypt
@@ -122,7 +122,7 @@ golang.org/x/net/context
 # golang.org/x/oauth2 v0.0.0-20181203162652-d668ce993890
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
-# golang.org/x/sys v0.0.0-20190509141414-a5b02f93d862
+# golang.org/x/sys v0.0.0-20190710143415-6ec70d6a5542
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/unix
 golang.org/x/sys/windows/svc
