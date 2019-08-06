@@ -35,7 +35,7 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-var version = "0.0-dev"
+const version = "0.8.0"
 
 // AccountServer is the core structure for the server.
 type AccountServer struct {
