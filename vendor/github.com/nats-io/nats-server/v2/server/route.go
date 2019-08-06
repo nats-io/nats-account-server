@@ -97,7 +97,7 @@ const (
 const sendRouteSubsInGoRoutineThreshold = 1024 * 1024 // 1MB
 
 // Warning when user configures cluster TLS insecure
-const clusterTLSInsecureWarning = "TLS Hostname verification disabled, system will not verify identity of the solicited route"
+const clusterTLSInsecureWarning = "TLS certificate chain and hostname of solicited routes will not be verified. DO NOT USE IN PRODUCTION!"
 
 // Can be changed for tests
 var routeConnectDelay = DEFAULT_ROUTE_CONNECT
@@ -305,8 +305,8 @@ func (c *client) processInboundRoutedMsg(msg []byte) {
 	c.processMsgResults(acc, r, msg, c.pa.subject, c.pa.reply, pmrNoFlag)
 }
 
-// Helper function for routes and gateways to create qfilters need for
-// converted subs from imports, etc.
+// Helper function for routes and gateways and leafnodes to create qfilters
+// needed for converted subs from imports, etc.
 func (c *client) makeQFilter(qsubs [][]*subscription) {
 	qs := make([][]byte, 0, len(qsubs))
 	for _, qsub := range qsubs {
@@ -1280,6 +1280,11 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 			rs := *c.route
 			r = &rs
 		}
+		// Since this duplicate route is going to be removed, make sure we clear
+		// c.route.leafnodeURL, otherwise, when processing the disconnect, this
+		// would cause the leafnode URL for that remote server to be removed
+		// from our list.
+		c.route.leafnodeURL = _EMPTY_
 		c.mu.Unlock()
 
 		remote.mu.Lock()
