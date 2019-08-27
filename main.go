@@ -95,24 +95,24 @@ func main() {
 
 				if err != nil {
 					if server.Logger() != nil {
-						server.Logger().Errorf("error starting server, %s", err.Error())
+						server.Logger().Errorf("%s", err.Error())
 					} else {
-						log.Printf("error starting server, %s", err.Error())
+						log.Printf("%s", err.Error())
 					}
 					server.Stop()
-					os.Exit(0)
+					os.Exit(1)
 				}
 
 				err = server.Start()
 
 				if err != nil {
 					if server.Logger() != nil {
-						server.Logger().Errorf("error starting server, %s", err.Error())
+						server.Logger().Errorf("%s", err.Error())
 					} else {
-						log.Printf("error starting server, %s", err.Error())
+						log.Printf("%s", err.Error())
 					}
 					server.Stop()
-					os.Exit(0)
+					os.Exit(1)
 				}
 			}
 		}
@@ -123,24 +123,24 @@ func main() {
 
 	if err != nil {
 		if server.Logger() != nil {
-			server.Logger().Errorf("error starting server, %s", err.Error())
+			server.Logger().Errorf("%s", err.Error())
 		} else {
-			log.Printf("error starting server, %s", err.Error())
+			log.Printf("%s", err.Error())
 		}
 		server.Stop()
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	err = server.Start()
 
 	if err != nil {
 		if server.Logger() != nil {
-			server.Logger().Errorf("error starting server, %s", err.Error())
+			server.Logger().Errorf("%s", err.Error())
 		} else {
-			log.Printf("error starting server, %s", err.Error())
+			log.Printf("%s", err.Error())
 		}
 		server.Stop()
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	// exit main but keep running goroutines
