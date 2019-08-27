@@ -32,7 +32,6 @@ import (
 	gnatsd "github.com/nats-io/nats-server/v2/test"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
-	nsc "github.com/nats-io/nsc/cmd"
 )
 
 const (
@@ -193,7 +192,10 @@ func (ts *TestSetup) initKeys() error {
 		return err
 	}
 
-	creds := nsc.FormatConfig("User", userJWT, string(seed))
+	creds, err := jwt.FormatUserConfig(userJWT, seed)
+	if err != nil {
+		return err
+	}
 
 	err = ioutil.WriteFile(file.Name(), creds, 0644)
 	if err != nil {
