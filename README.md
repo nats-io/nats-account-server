@@ -232,6 +232,8 @@ Both account and activation tokens are replicated.
 
 A replication timeout can be used to tune HTTP/network delays between the replica and the primary server.
 
+Replicas will try to download an initial set of JWTs from the master on startup. You can configure the maximum number to get with MaxReplicationPack, the default is 10,000, use 0 to disable this feature. JWTs are downloaded in no particular order, so if you have 100 and set max to 50 you will get a random set of 50. Also, if a directory store is used, the JWTs will only be saved if they were issued after the one the replica currently knows about.
+
 ## Configuration
 
 The configuration file uses the same YAML/JSON-like format as the nats-server. Configuration is organized into a root section with several sub-sections. The root section can contain the following entries:
@@ -244,7 +246,8 @@ The configuration file uses the same YAML/JSON-like format as the nats-server. C
 one of the operator's keys
 * `systemaccountjwtpath` - the path to an account JWT that should be returned as the system account, works outside the normal store if necessary, however, the system account can be in the store, in which case this setting is optional
 * `primary` - the URL for the primary server, sets the server to run in replica mode, the format of the url is protocol://host:port
-* `replicationtimeout` - the time in milliseconds that the replica allows when talking to the primary, defaults to 5000, or five seconds
+* `replicationtimeout` - the time in milliseconds that the replica allows when talking to the primary, defaults to 5,000, or five seconds
+* `maxreplicationpack` - the number of JWTs to try to sync with the primary on startup, defaults to 10,000
 
 The default configuration is:
 
