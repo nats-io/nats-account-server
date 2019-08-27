@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/nats-io/nats-account-server/server/store"
 	"net"
 	"net/http"
 	"strings"
@@ -180,6 +181,11 @@ func (server *AccountServer) buildRouter() *httprouter.Router {
 	if !server.jwtStore.IsReadOnly() && server.primary == "" {
 		r.POST("/jwt/v1/accounts/:pubkey", server.UpdateAccountJWT)
 		r.POST("/jwt/v1/activations", server.UpdateActivationJWT)
+	}
+
+	_, ok := server.jwtStore.(store.PackableJWTStore)
+	if ok {
+		r.GET("/jwt/v1/pack", server.PackJWTs)
 	}
 
 	r.GET("/jwt/v1/accounts/:pubkey", server.GetAccountJWT)

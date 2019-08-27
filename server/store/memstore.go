@@ -18,9 +18,11 @@ package store
 
 import (
 	"fmt"
+	"strings"
 )
 
 // MemJWTStore implements the JWT Store interface, keeping all data in memory
+// The store is not thread safe
 type MemJWTStore struct {
 	jwts     map[string]string
 	readonly bool
@@ -69,4 +71,49 @@ func (store *MemJWTStore) IsReadOnly() bool {
 
 // Close is a no-op for a mem store
 func (store *MemJWTStore) Close() {
+}
+
+// Pack up to maxJWTs into a package
+func (store *MemJWTStore) Pack(maxJWTs int) (string, error) {
+	count := 0
+	var pack []string
+
+	if maxJWTs > 0 {
+		pack = make([]string, 0, maxJWTs)
+	} else {
+		pack = []string{}
+	}
+
+	for pubkey, jwt := range store.jwts {
+		pack = append(pack, fmt.Sprintf("%s|%s", pubkey, jwt))
+		count++
+
+		if count == maxJWTs { // won't match negative
+			break
+		}
+	}
+
+	return strings.Join(pack, "\n"), nil
+}
+
+// Merge takes the JWTs from package and adds them to the store
+// Merge is destructive in the sense that it doesn't check if the JWT
+// is newer or anything like that.
+func (store *MemJWTStore) Merge(pack string) error {
+	newJWTs := strings.Split(pack, "\n")
+
+	for _, line := range newJWTs {
+		if line == "" { // ignore blank lines
+			continue
+		}
+
+		split := strings.Split(line, "|")
+		if len(split) != 2 {
+			return fmt.Errorf("line in package didn't contain 2 entries: %q", line)
+		}
+
+		store.Save(split[0], split[1])
+	}
+
+	return nil
 }

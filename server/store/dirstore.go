@@ -18,6 +18,7 @@ package store
 
 import (
 	"fmt"
+	"github.com/nats-io/jwt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -301,4 +302,116 @@ func (store *DirJWTStore) Close() {
 	}
 	store.watcher = nil
 	store.done = nil
+}
+
+// Pack up to maxJWTs into a package
+func (store *DirJWTStore) Pack(maxJWTs int) (string, error) {
+	count := 0
+	var pack []string
+
+	if maxJWTs > 0 {
+		pack = make([]string, 0, maxJWTs)
+	} else {
+		pack = []string{}
+	}
+
+	store.Lock()
+
+	dirPath := store.directory
+
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if !info.IsDir() && strings.HasSuffix(path, extension) { // this is a JWT
+			if count == maxJWTs { // won't match negative
+				return nil
+			}
+
+			pubKey := filepath.Base(path)
+			pubKey = pubKey[0:strings.Index(pubKey, ".")]
+
+			jwtBytes, err := ioutil.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			pack = append(pack, fmt.Sprintf("%s|%s", pubKey, string(jwtBytes)))
+			count++
+		}
+		return nil
+	})
+
+	store.Unlock()
+
+	if err != nil {
+		return "", err
+	}
+
+	return strings.Join(pack, "\n"), nil
+}
+
+// Merge takes the JWTs from package and adds them to the store
+// Merge is destructive in the sense that it doesn't check if the JWT
+// is newer or anything like that.
+func (store *DirJWTStore) Merge(pack string) error {
+	newJWTs := strings.Split(pack, "\n")
+
+	store.Lock()
+	defer store.Unlock()
+
+	for _, line := range newJWTs {
+		if line == "" { // ignore blank lines
+			continue
+		}
+
+		split := strings.Split(line, "|")
+		if len(split) != 2 {
+			return fmt.Errorf("line in package didn't contain 2 entries: %q", line)
+		}
+
+		if err := store.saveIfNewer(split[0], split[1]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Assumes the lock is held, and only updates if the jwt is new, or the one on disk is older
+func (store *DirJWTStore) saveIfNewer(publicKey string, theJWT string) error {
+	path := store.pathForKey(publicKey)
+
+	if path == "" {
+		return fmt.Errorf("invalid public key")
+	}
+
+	dirPath := filepath.Dir(path)
+	_, err := conf.ValidateDirPath(dirPath)
+	if err != nil {
+		err := os.MkdirAll(dirPath, 0755)
+		if err != nil {
+			return err
+		}
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		newJWT, err := jwt.DecodeGeneric(theJWT)
+		if err != nil {
+			return err
+		}
+
+		existing, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		existingJWT, err := jwt.DecodeGeneric(string(existing))
+		if err != nil {
+			return err
+		}
+
+		if existingJWT.IssuedAt > newJWT.IssuedAt {
+			return nil
+		}
+	}
+
+	return ioutil.WriteFile(path, []byte(theJWT), 0644)
 }
