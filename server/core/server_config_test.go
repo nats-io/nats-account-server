@@ -286,6 +286,12 @@ func TestStartWithBadConfigFileFlag(t *testing.T) {
 
 	err = server.ApplyConfigFile("/a/b/c")
 	require.Error(t, err)
+
+	flags := Flags{
+		ConfigFile: "/a/b/c",
+	}
+	err = server.InitializeFromFlags(flags)
+	require.Error(t, err)
 }
 
 func TestNATSFlags(t *testing.T) {
