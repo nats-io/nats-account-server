@@ -17,7 +17,7 @@
 package core
 
 import (
-	"fmt"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -80,14 +80,15 @@ func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Req
 	claim.Validate(vr)
 
 	if vr.IsBlocking(true) {
-		var lines []string
-		lines = append(lines, "The server was unable to update your account JWT. One more more validation issues occurred.")
-		for _, vi := range vr.Issues {
-			lines = append(lines, fmt.Sprintf("\t - %s\n", vi.Description))
+		validationResults, err := json.Marshal(vr)
+
+		if err != nil {
+			server.sendErrorResponse(http.StatusInternalServerError, "unable to marshal JWT validation", shortCode, err, w)
+			return
 		}
-		msg := strings.Join(lines, "\n")
+
 		server.logger.Errorf("attempt to update JWT %s with blocking validation errors", shortCode)
-		http.Error(w, msg, http.StatusBadRequest)
+		http.Error(w, string(validationResults), http.StatusBadRequest)
 		return
 	}
 

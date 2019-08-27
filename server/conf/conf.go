@@ -32,6 +32,7 @@ type AccountServerConfig struct {
 
 	Primary            string
 	ReplicationTimeout int //milliseconds
+	MaxReplicationPack int // maximum number of JWTS to grab on startup
 }
 
 // TLSConf holds the configuration for a TLS connection/server
@@ -97,5 +98,6 @@ func DefaultServerConfig() *AccountServerConfig {
 		},
 		Store:              StoreConfig{}, // in memory store
 		ReplicationTimeout: 5000,
+		MaxReplicationPack: 10000,
 	}
 }

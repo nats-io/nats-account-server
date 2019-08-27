@@ -25,3 +25,18 @@ type JWTStore interface {
 	IsReadOnly() bool
 	Close()
 }
+
+// PackableJWTStore is implemented by stores that can pack up their content or
+// merge content from another stores pack. The format of a packed store is a
+// single string with 1 JWT per line, \n is as the line separator. The line format is:
+// pubkey|encodedjwt\n
+// Stores with locking may be locked during pack/merge which should be considered
+// in very high performance situations.
+// No preference is required on the JWTs included if maxJWTS is less than the total, that
+// is store dependent. Merge implies writability and does not check the "is readonly" flag
+// of a store
+type PackableJWTStore interface {
+	// Pack the jwts, up to maxJWTs. If maxJWTs is negative, do not limit.
+	Pack(maxJWTs int) (string, error)
+	Merge(pack string) error
+}

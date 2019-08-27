@@ -68,3 +68,75 @@ func TestMemStoreReadOnly(t *testing.T) {
 		require.Equal(t, v, got)
 	}
 }
+
+func TestMemStorePackMerge(t *testing.T) {
+	store := NewMemJWTStore()
+	expected := map[string]string{
+		"one":   "alpha",
+		"two":   "beta",
+		"three": "gamma",
+		"four":  "delta",
+	}
+
+	require.False(t, store.IsReadOnly())
+
+	for k, v := range expected {
+		store.Save(k, v)
+	}
+
+	for k, v := range expected {
+		got, err := store.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err := store.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	packable, ok := store.(PackableJWTStore)
+	require.True(t, ok)
+
+	pack, err := packable.Pack(-1)
+	require.NoError(t, err)
+
+	inc := NewMemJWTStore()
+	incP, ok := inc.(PackableJWTStore)
+	require.True(t, ok)
+
+	incP.Merge(pack)
+
+	for k, v := range expected {
+		got, err := inc.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err = inc.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	limitedPack, err := packable.Pack(1)
+	require.NoError(t, err)
+
+	limited := NewMemJWTStore()
+	limitedP, ok := limited.(PackableJWTStore)
+	require.True(t, ok)
+
+	limitedP.Merge(limitedPack)
+
+	count := 0
+	for k, v := range expected {
+		got, err := limited.Load(k)
+		if err == nil {
+			count++
+			require.Equal(t, v, got)
+		}
+	}
+
+	require.Equal(t, 1, count)
+
+	got, err = inc.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+}
