@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -226,6 +227,14 @@ func (server *AccountServer) Start() error {
 		return err
 	}
 
+	if server.primary != "" {
+		err := server.initializeFromPrimary()
+
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := server.startHTTP(); err != nil {
 		return err
 	}
@@ -408,4 +417,45 @@ func (server *AccountServer) Stop() {
 		server.jwtStore = nil
 		server.logger.Noticef("closed JWT store")
 	}
+}
+
+func (server *AccountServer) initializeFromPrimary() error {
+	packer, ok := server.jwtStore.(store.PackableJWTStore)
+	if !ok {
+		server.logger.Noticef("skipping initial JWT pack from primary, configured store doesn't support it")
+		return nil
+	}
+
+	if server.config.MaxReplicationPack == 0 {
+		server.logger.Noticef("skipping initial JWT pack from primary, config has MaxReplicationPack of 0")
+		return nil
+	}
+
+	server.logger.Noticef("grabbing initial JWT pack from primary %s", server.primary)
+	primary := server.primary
+
+	if strings.HasSuffix(primary, "/") {
+		primary = primary[:len(primary)-1]
+	}
+
+	url := fmt.Sprintf("%s/jwt/v1/pack?max=%d", primary, server.config.MaxReplicationPack)
+
+	resp, err := server.httpClient.Get(url)
+
+	// if we can't contact the primary, fallback to what we have on disk
+	if err != nil || resp.StatusCode != http.StatusOK {
+		server.logger.Noticef("unable to initialize from primary, %s, will use what is on disk", err.Error())
+		return nil
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if err := packer.Merge(string(body)); err != nil {
+		return err
+	}
+
+	return nil
 }

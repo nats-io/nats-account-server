@@ -17,72 +17,13 @@
 package store
 
 import (
-	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/nats-io/jwt"
-	"github.com/nats-io/nkeys"
-	nsc "github.com/nats-io/nsc/cmd/store"
 	"github.com/stretchr/testify/require"
 )
-
-type NKeyFactory func() (nkeys.KeyPair, error)
-
-func CreateAccountKey(t *testing.T) (seed []byte, pub string, kp nkeys.KeyPair) {
-	return CreateTestNKey(t, nkeys.CreateAccount)
-}
-
-func CreateOperatorKey(t *testing.T) (seed []byte, pub string, kp nkeys.KeyPair) {
-	return CreateTestNKey(t, nkeys.CreateOperator)
-}
-
-func CreateTestNKey(t *testing.T, f NKeyFactory) ([]byte, string, nkeys.KeyPair) {
-	kp, err := f()
-	require.NoError(t, err)
-
-	seed, err := kp.Seed()
-	require.NoError(t, err)
-
-	pub, err := kp.PublicKey()
-	require.NoError(t, err)
-
-	return seed, pub, kp
-}
-
-func MakeTempStore(t *testing.T, name string, kp nkeys.KeyPair) *nsc.Store {
-	p, err := ioutil.TempDir("", "store_test")
-	require.NoError(t, err)
-
-	var nk *nsc.NamedKey
-	if kp != nil {
-		nk = &nsc.NamedKey{Name: name, KP: kp}
-	}
-
-	s, err := nsc.CreateStore(name, p, nk)
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	return s
-}
-
-func CreateTestStoreForOperator(t *testing.T, name string, operator nkeys.KeyPair) *nsc.Store {
-	s := MakeTempStore(t, name, operator)
-
-	require.NotNil(t, s)
-	require.FileExists(t, filepath.Join(s.Dir, ".nsc"))
-	require.True(t, s.Has("", ".nsc"))
-
-	if operator != nil {
-		tokenName := fmt.Sprintf("%s.jwt", nsc.SafeName(name))
-		require.FileExists(t, filepath.Join(s.Dir, tokenName))
-		require.True(t, s.Has("", tokenName))
-	}
-
-	return s
-}
 
 func TestValidNSCStore(t *testing.T) {
 	_, _, kp := CreateOperatorKey(t)

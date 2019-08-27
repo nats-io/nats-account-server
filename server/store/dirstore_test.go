@@ -17,6 +17,8 @@
 package store
 
 import (
+	"github.com/nats-io/jwt"
+	"github.com/nats-io/nkeys"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -346,4 +348,203 @@ func TestUnShardedDirStoreNotifications(t *testing.T) {
 
 	store.Close()
 	readOnlyStore.Close()
+}
+
+func TestShardedDirStorePackMerge(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+	dir2, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+	dir3, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewDirJWTStore(dir, true, false, nil, nil)
+	require.NoError(t, err)
+
+	expected := map[string]string{
+		"one":   "alpha",
+		"two":   "beta",
+		"three": "gamma",
+		"four":  "delta",
+	}
+
+	require.False(t, store.IsReadOnly())
+
+	for k, v := range expected {
+		store.Save(k, v)
+	}
+
+	for k, v := range expected {
+		got, err := store.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err := store.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	packable, ok := store.(PackableJWTStore)
+	require.True(t, ok)
+
+	pack, err := packable.Pack(-1)
+	require.NoError(t, err)
+
+	inc, err := NewDirJWTStore(dir2, true, false, nil, nil)
+	require.NoError(t, err)
+
+	incP, ok := inc.(PackableJWTStore)
+	require.True(t, ok)
+
+	incP.Merge(pack)
+
+	for k, v := range expected {
+		got, err := inc.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err = inc.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	limitedPack, err := packable.Pack(1)
+	require.NoError(t, err)
+
+	limited, err := NewDirJWTStore(dir3, true, false, nil, nil)
+
+	require.NoError(t, err)
+	limitedP, ok := limited.(PackableJWTStore)
+	require.True(t, ok)
+
+	limitedP.Merge(limitedPack)
+
+	count := 0
+	for k, v := range expected {
+		got, err := limited.Load(k)
+		if err == nil {
+			count++
+			require.Equal(t, v, got)
+		}
+	}
+
+	require.Equal(t, 1, count)
+
+	got, err = inc.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+}
+
+func TestShardedToUnsharedDirStorePackMerge(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+	dir2, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewDirJWTStore(dir, true, false, nil, nil)
+	require.NoError(t, err)
+
+	expected := map[string]string{
+		"one":   "alpha",
+		"two":   "beta",
+		"three": "gamma",
+		"four":  "delta",
+	}
+
+	require.False(t, store.IsReadOnly())
+
+	for k, v := range expected {
+		store.Save(k, v)
+	}
+
+	for k, v := range expected {
+		got, err := store.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err := store.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	packable, ok := store.(PackableJWTStore)
+	require.True(t, ok)
+
+	pack, err := packable.Pack(-1)
+	require.NoError(t, err)
+
+	inc, err := NewDirJWTStore(dir2, false, false, nil, nil)
+	require.NoError(t, err)
+
+	incP, ok := inc.(PackableJWTStore)
+	require.True(t, ok)
+
+	incP.Merge(pack)
+
+	for k, v := range expected {
+		got, err := inc.Load(k)
+		require.NoError(t, err)
+		require.Equal(t, v, got)
+	}
+
+	got, err = inc.Load("random")
+	require.Error(t, err)
+	require.Equal(t, "", got)
+
+	err = packable.Merge("foo")
+	require.Error(t, err)
+
+	err = packable.Merge("") // will skip it
+	require.NoError(t, err)
+
+	err = packable.Merge("a|something") // should fail on a for sharding
+	require.Error(t, err)
+}
+
+func TestMergeOnlyOnNewer(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewDirJWTStore(dir, true, false, func(pubKey string) {}, func(err error) {})
+	require.NoError(t, err)
+
+	dirStore := store.(*DirJWTStore)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	account.Name = "old"
+	olderJWT, err := account.Encode(accountKey)
+	require.NoError(t, err)
+
+	time.Sleep(2 * time.Second)
+
+	account.Name = "new"
+	newerJWT, err := account.Encode(accountKey)
+	require.NoError(t, err)
+
+	// Should work
+	err = dirStore.Save(pubKey, olderJWT)
+	require.NoError(t, err)
+	fromStore, err := dirStore.Load(pubKey)
+	require.NoError(t, err)
+	require.Equal(t, olderJWT, fromStore)
+
+	// should replace
+	err = dirStore.saveIfNewer(pubKey, newerJWT)
+	require.NoError(t, err)
+	fromStore, err = dirStore.Load(pubKey)
+	require.NoError(t, err)
+	require.Equal(t, newerJWT, fromStore)
+
+	// should fail
+	err = dirStore.saveIfNewer(pubKey, olderJWT)
+	require.NoError(t, err)
+	fromStore, err = dirStore.Load(pubKey)
+	require.NoError(t, err)
+	require.Equal(t, newerJWT, fromStore)
 }

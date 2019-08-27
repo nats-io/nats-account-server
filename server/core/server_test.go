@@ -226,6 +226,14 @@ func (ts *TestSetup) CreateReplica(dir string) (*AccountServer, error) {
 	return replica, replica.Start()
 }
 
+func (ts *TestSetup) CreateReplicaWithMaxPack(dir string, maxReplicationPack int) (*AccountServer, error) {
+	config := ts.CreateReplicaConfig(dir)
+	config.MaxReplicationPack = maxReplicationPack
+	replica := NewAccountServer()
+	replica.InitializeFromConfig(config)
+	return replica, replica.Start()
+}
+
 var port = uint64(14222)
 
 // SetupTestServer creates an operator, gnatsd, context, config and test http server with a router
