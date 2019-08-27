@@ -139,4 +139,10 @@ func TestMemStorePackMerge(t *testing.T) {
 	got, err = inc.Load("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
+
+	err = limitedP.Merge("foo")
+	require.Error(t, err)
+
+	err = limitedP.Merge("") // will skip it
+	require.NoError(t, err)
 }

@@ -57,11 +57,13 @@ func NewNSCJWTStore(dirPath string, changeNotification JWTChanged, errorNotifica
 		errorOccurred: errorNotification,
 	}
 
-	err = theStore.startWatching()
+	if changeNotification != nil && errorNotification != nil {
+		err = theStore.startWatching()
 
-	if err != nil {
-		theStore.Close()
-		return nil, err
+		if err != nil {
+			theStore.Close()
+			return nil, err
+		}
 	}
 
 	return theStore, nil

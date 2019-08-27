@@ -490,6 +490,15 @@ func TestShardedToUnsharedDirStorePackMerge(t *testing.T) {
 	got, err = inc.Load("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
+
+	err = packable.Merge("foo")
+	require.Error(t, err)
+
+	err = packable.Merge("") // will skip it
+	require.NoError(t, err)
+
+	err = packable.Merge("a|something") // should fail on a for sharding
+	require.Error(t, err)
 }
 
 func TestMergeOnlyOnNewer(t *testing.T) {
