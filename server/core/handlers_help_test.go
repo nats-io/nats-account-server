@@ -27,8 +27,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHealthZ(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/healthz")
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+}
+
+func TestHealthZTLS(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), true, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/healthz")
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+}
+
 func TestJWTHelp(t *testing.T) {
-	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
@@ -64,7 +90,7 @@ func TestJWTHelpTLS(t *testing.T) {
 }
 
 func TestOperatorJWT(t *testing.T) {
-	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 

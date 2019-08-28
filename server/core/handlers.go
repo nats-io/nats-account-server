@@ -49,6 +49,12 @@ func (server *AccountServer) JWTHelp(w http.ResponseWriter, r *http.Request, par
 	w.Write([]byte(jwtAPIHelp))
 }
 
+// HealthZ returns a status OK
+func (server *AccountServer) HealthZ(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+	w.WriteHeader(http.StatusOK)
+}
+
 // GetOperatorJWT returns the known operator JWT
 func (server *AccountServer) GetOperatorJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())

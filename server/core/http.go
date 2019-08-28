@@ -171,6 +171,7 @@ func (server *AccountServer) buildRouter() *httprouter.Router {
 	r := httprouter.New()
 
 	r.GET("/jwt/v1/help", server.JWTHelp)
+	r.GET("/healthz", server.HealthZ)
 
 	if server.operatorJWT != "" {
 		r.GET("/jwt/v1/operator", server.GetOperatorJWT)
