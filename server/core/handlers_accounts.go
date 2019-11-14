@@ -32,6 +32,7 @@ import (
 // Sends a nats notification
 func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+	paramPubKey := string(params.ByName("pubkey"))
 	theJWT, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
@@ -50,6 +51,11 @@ func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Req
 
 	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
 		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer in request", claim.Issuer, err, w)
+		return
+	}
+
+	if claim.Subject != paramPubKey {
+		server.sendErrorResponse(http.StatusBadRequest, "pub keys don't match", paramPubKey, err, w)
 		return
 	}
 

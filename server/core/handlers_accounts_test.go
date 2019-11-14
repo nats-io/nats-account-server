@@ -132,7 +132,12 @@ func TestUploadGetAccountJWT(t *testing.T) {
 
 	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
 	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusOK)
+	require.Equal(t, resp.StatusCode, http.StatusOK)
+
+	// check that url has to match account
+	resp, err = testEnv.HTTP.Post(url+"x", "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.Equal(t, resp.StatusCode, http.StatusBadRequest)
 
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
