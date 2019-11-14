@@ -105,7 +105,7 @@ func TestNSCFileNotifications(t *testing.T) {
 
 	select {
 	case <-notified:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
 	require.Equal(t, 1, jwtChanges)
 	require.Equal(t, 0, errors)
@@ -118,7 +118,7 @@ func TestNSCFileNotifications(t *testing.T) {
 
 	select {
 	case <-notified:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
 	require.Equal(t, 2, jwtChanges)
 	require.Equal(t, 0, errors)

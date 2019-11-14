@@ -445,8 +445,14 @@ func (server *AccountServer) initializeFromPrimary() error {
 	resp, err := server.httpClient.Get(url)
 
 	// if we can't contact the primary, fallback to what we have on disk
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		server.logger.Noticef("unable to initialize from primary, %s, will use what is on disk", err.Error())
+		return nil
+	} else if resp != nil && resp.StatusCode != http.StatusOK {
+		server.logger.Noticef("unable to initialize from primary, server returned status %q, will use what is on disk", resp.Status)
+		return nil
+	} else if resp == nil {
+		server.logger.Noticef("unable to initialize from primary, http call didn't return a response, will use what is on disk")
 		return nil
 	}
 

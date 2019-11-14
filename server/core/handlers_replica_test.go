@@ -18,6 +18,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -375,4 +376,33 @@ func TestGetReplicatedActivationJWT(t *testing.T) {
 	forcedReload := string(body)
 
 	require.Equal(t, savedJWT, forcedReload)
+}
+
+// Test that we don't panic if the primary is down or bad
+func TestReplicatedStartup(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	testEnv.Server.Stop()
+
+	// Start up the replica with no server
+	replica, err := testEnv.CreateReplica("")
+	require.NoError(t, err)
+	replica.Stop()
+
+	server := http.Server{
+		Addr: testEnv.Server.hostPort,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+		}),
+	}
+
+	go server.ListenAndServe()
+	defer server.Shutdown(context.Background())
+
+	// Start up the replica with a bad server
+	replica, err = testEnv.CreateReplica("")
+	require.NoError(t, err)
+	replica.Stop()
 }
