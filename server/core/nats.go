@@ -120,6 +120,8 @@ func (server *AccountServer) connectToNATS() error {
 		return nil // we will retry, don't stop server running
 	}
 
+	server.logger.Noticef("connected to NATS for account and activation notifications")
+
 	if server.primary != "" {
 		subject := strings.Replace(accountNotificationFormat, "%s", "*", -1)
 		nc.Subscribe(subject, server.handleAccountNotification)
