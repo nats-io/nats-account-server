@@ -23,6 +23,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -405,4 +406,72 @@ func TestReplicatedStartup(t *testing.T) {
 	replica, err = testEnv.CreateReplica("")
 	require.NoError(t, err)
 	replica.Stop()
+}
+
+func TestPrimaryURLSlash(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	// Put an account on the main server
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	account.Expires = time.Now().Add(24 * time.Hour).Unix()
+	acctJWT, err := account.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	// Get the URL from the main server
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	savedJWT := string(body)
+
+	// Now start up the replica
+	replica, err := testEnv.CreateReplica("")
+	require.NoError(t, err)
+	defer replica.Stop()
+
+	// Try to get the account from the replica, without a slash
+	if strings.HasSuffix(replica.config.Primary, "/") {
+		replica.config.Primary = replica.config.Primary[:len(replica.config.Primary)-1]
+	}
+
+	url = fmt.Sprintf("%s://%s%s", replica.protocol, replica.hostPort, path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	replicatedJWT := string(body)
+
+	require.Equal(t, savedJWT, replicatedJWT)
+
+	replica.config.Primary = replica.config.Primary + "/"
+
+	url = fmt.Sprintf("%s://%s%s", replica.protocol, replica.hostPort, path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	replicatedJWT = string(body)
+
+	require.Equal(t, savedJWT, replicatedJWT)
 }
