@@ -6,6 +6,7 @@
 [![ReportCard][ReportCard-Image]][ReportCard-Url]
 [![Build][Build-Status-Image]][Build-Status-Url]
 [![Coverage][Coverage-Image]][Coverage-Url]
+[![Version](https://d25lcipzij17d.cloudfront.net/badge.svg?id=go&type=5&v=0.8.4)](https://github.com/nats-io/nats-account-server/releases/tag/v0.8.4)
 
 A simple HTTP server to host account JWTs for [nats-server 2.0](https://nats.io) account authentication.
 
