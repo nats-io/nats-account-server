@@ -17,7 +17,6 @@
 package core
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -36,7 +35,7 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-const version = "0.8.3"
+const version = "0.8.4"
 
 // AccountServer is the core structure for the server.
 type AccountServer struct {
@@ -366,10 +365,6 @@ func (server *AccountServer) initializeSystemAccount() error {
 }
 
 func (server *AccountServer) createHTTPClient() *http.Client {
-	config := server.config.HTTP
-
-	tlsConf := config.TLS
-
 	timeout := time.Duration(time.Duration(server.config.ReplicationTimeout) * time.Millisecond)
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: 1,
