@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -v -a -tags netgo -installsuffix netgo -o /nats-accou
 
 FROM alpine:3.9
 
-RUN mkdir -p /nats/bin && mkdir /nats/conf
+RUN apk add --update ca-certificates && mkdir -p /nats/bin && mkdir /nats/conf
 
 COPY --from=builder /nats-account-server /nats/bin/nats-account-server
 
