@@ -375,12 +375,6 @@ func (server *AccountServer) createHTTPClient() *http.Client {
 		MaxIdleConnsPerHost: 1,
 	}
 
-	if tlsConf.Cert != "" {
-		tr.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
-		}
-	}
-
 	client := http.Client{
 		Transport: tr,
 		Timeout:   timeout,
