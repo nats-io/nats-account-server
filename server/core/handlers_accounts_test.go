@@ -38,13 +38,13 @@ func TestAccountAndAccounts(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/accounts")
+	path := "/jwt/v1/accounts"
 	url := testEnv.URLForPath(path)
 	resp, err := http.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 
-	path = fmt.Sprintf("/jwt/v1/accounts/")
+	path = "/jwt/v1/accounts/"
 	url = testEnv.URLForPath(path)
 	resp, err = http.Get(url)
 	require.NoError(t, err)
@@ -58,13 +58,13 @@ func TestAccountAndAccountsNewPort(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/accounts")
+	path := "/jwt/v1/accounts"
 	url := testEnv.URLForPath(path)
 	resp, err := http.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 
-	path = fmt.Sprintf("/jwt/v1/accounts/")
+	path = "/jwt/v1/accounts/"
 	url = testEnv.URLForPath(path)
 	resp, err = http.Get(url)
 	require.NoError(t, err)
@@ -208,13 +208,13 @@ func TestUnknownURL(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/biz")
+	path := "/jwt/v1/biz"
 	url := testEnv.URLForPath(path)
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusNotFound)
 
-	path = fmt.Sprintf("/biz/v1/accounts/")
+	path = "/biz/v1/accounts/"
 	url = testEnv.URLForPath(path)
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)

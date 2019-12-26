@@ -19,7 +19,6 @@ package core
 import (
 	"bytes"
 	"fmt"
-	"github.com/nats-io/nats-account-server/server/store"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
+	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )

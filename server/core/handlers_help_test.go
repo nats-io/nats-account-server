@@ -17,7 +17,6 @@
 package core
 
 import (
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -32,7 +31,7 @@ func TestHealthZ(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/healthz")
+	path := "/healthz"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)
@@ -45,7 +44,7 @@ func TestHealthZTLS(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/healthz")
+	path := "/healthz"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)
@@ -58,7 +57,7 @@ func TestJWTHelp(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/help")
+	path := "/jwt/v1/help"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)
@@ -76,7 +75,7 @@ func TestJWTHelpTLS(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/help")
+	path := "/jwt/v1/help"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)
@@ -94,7 +93,7 @@ func TestOperatorJWT(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/operator")
+	path := "/jwt/v1/operator"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)
@@ -106,7 +105,7 @@ func TestOperatorJWT(t *testing.T) {
 	operator := string(body)
 	require.Equal(t, testEnv.Server.operatorJWT, operator)
 
-	path = fmt.Sprintf("/jwt/v1/operator?text=true")
+	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
@@ -116,7 +115,7 @@ func TestOperatorJWT(t *testing.T) {
 	operator = string(body)
 	require.Equal(t, testEnv.Server.operatorJWT, operator)
 
-	path = fmt.Sprintf("/jwt/v1/operator?decode=true")
+	path = "/jwt/v1/operator?decode=true"
 	url = testEnv.URLForPath(path)
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
@@ -132,7 +131,7 @@ func TestOperatorJWTTLS(t *testing.T) {
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/operator")
+	path := "/jwt/v1/operator"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Get(url)

@@ -18,7 +18,6 @@ package store
 
 import (
 	"fmt"
-	"github.com/nats-io/jwt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -26,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
 )
 

@@ -18,12 +18,12 @@ package core
 
 import (
 	"fmt"
-	"github.com/nats-io/nats-account-server/server/store"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/julienschmidt/httprouter"
+	"github.com/nats-io/nats-account-server/server/store"
 )
 
 // PackJWTs the JWTS and return

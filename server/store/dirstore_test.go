@@ -17,8 +17,6 @@
 package store
 
 import (
-	"github.com/nats-io/jwt"
-	"github.com/nats-io/nkeys"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -26,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/jwt"
+	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )
 

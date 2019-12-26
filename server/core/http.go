@@ -21,7 +21,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"github.com/nats-io/nats-account-server/server/store"
 	"net"
 	"net/http"
 	"strings"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/nats-io/nats-account-server/server/conf"
+	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/rs/cors"
 )
 
