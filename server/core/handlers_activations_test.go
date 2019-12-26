@@ -231,7 +231,7 @@ func TestInvalidActivationPost(t *testing.T) {
 	hash, err := act.HashID()
 	require.NoError(t, err)
 
-	path := fmt.Sprintf("/jwt/v1/activations")
+	path := "/jwt/v1/activations"
 	url := testEnv.URLForPath(path)
 
 	resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte("hello world")))
