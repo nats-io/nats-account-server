@@ -85,7 +85,7 @@ func NewAccountServer() *AccountServer {
 func (server *AccountServer) ConfigureLogger() natsserver.Logger {
 	opts := server.config.Logging
 	if isWindowsService() {
-		srvlogger.SetSyslogName("nats-account-server")
+		srvlogger.SetSyslogName("NatsAccountServer")
 		return srvlogger.NewSysLogger(opts.Debug, opts.Trace)
 	} else {
 		return srvlogger.NewStdLogger(opts.Time, opts.Debug, opts.Trace, opts.Colors, opts.PID)
