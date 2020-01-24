@@ -167,187 +167,119 @@ func TestCreateMakesDir(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestShardedDirStoreNotifications(t *testing.T) {
+func TestDirStoreNotifications(t *testing.T) {
 
 	// Skip the file notification test on travis
 	if os.Getenv("TRAVIS_GO_VERSION") != "" {
 		return
 	}
 
-	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
-	require.NoError(t, err)
+	for _, test := range []struct {
+		name    string
+		sharded bool
+	}{
+		{"sharded", true},
+		{"unsharded", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+			require.NoError(t, err)
+			defer os.RemoveAll(dir)
 
-	notified := make(chan bool)
-	jwtChanges := int32(0)
-	errors := int32(0)
+			notified := make(chan bool, 1)
+			errors := make(chan error, 10)
+			wStoreState := int32(0)
 
-	store, err := NewDirJWTStore(dir, true, false, func(pubKey string) {
-		atomic.AddInt32(&jwtChanges, 1)
-		notified <- true
-	}, func(err error) {
-		atomic.AddInt32(&errors, 1)
-		notified <- true
-	})
-	require.NoError(t, err)
+			store, err := NewDirJWTStore(dir, test.sharded, false, func(pubKey string) {
+				n := atomic.LoadInt32(&wStoreState)
+				switch n {
+				case 0:
+					return
+				case 1:
+					if pubKey == "one" {
+						notified <- true
+						atomic.StoreInt32(&wStoreState, 0)
+					}
+				case 2:
+					if pubKey == "two" {
+						notified <- true
+						atomic.StoreInt32(&wStoreState, 0)
+					}
+				}
+			}, func(err error) {
+				errors <- err
+			})
+			require.NoError(t, err)
+			defer store.Close()
+			require.False(t, store.IsReadOnly())
 
-	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
+			expected := map[string]string{
+				"one":   "alpha",
+				"two":   "beta",
+				"three": "gamma",
+				"four":  "delta",
+			}
+
+			for k, v := range expected {
+				store.Save(k, v)
+			}
+
+			time.Sleep(time.Second)
+
+			for k, v := range expected {
+				got, err := store.Load(k)
+				require.NoError(t, err)
+				require.Equal(t, v, got)
+			}
+
+			atomic.StoreInt32(&wStoreState, 1)
+			store.Save("one", "zip")
+
+			check := func() {
+				t.Helper()
+				select {
+				case <-notified:
+				case e := <-errors:
+					t.Fatal(e.Error())
+				case <-time.After(5 * time.Second):
+					t.Fatalf("Did not get notified")
+				}
+			}
+			check()
+
+			// re-use the folder for readonly mode
+			roStoreState := int32(0)
+			readOnlyStore, err := NewImmutableDirJWTStore(dir, test.sharded, func(pubKey string) {
+				n := atomic.LoadInt32(&roStoreState)
+				switch n {
+				case 0:
+					return
+				case 1:
+					if pubKey == "two" {
+						notified <- true
+						atomic.StoreInt32(&roStoreState, 0)
+					}
+				}
+			}, func(err error) {
+				errors <- err
+			})
+			require.NoError(t, err)
+			defer readOnlyStore.Close()
+			require.True(t, readOnlyStore.IsReadOnly())
+
+			got, err := readOnlyStore.Load("one")
+			require.NoError(t, err)
+			require.Equal(t, "zip", got)
+
+			atomic.StoreInt32(&roStoreState, 1)
+			atomic.StoreInt32(&wStoreState, 2)
+			store.Save("two", "zap")
+
+			for i := 0; i < 2; i++ {
+				check()
+			}
+		})
 	}
-
-	require.False(t, store.IsReadOnly())
-
-	for k, v := range expected {
-		store.Save(k, v)
-	}
-
-	time.Sleep(time.Second)
-
-	for k, v := range expected {
-		got, err := store.Load(k)
-		require.NoError(t, err)
-		require.Equal(t, v, got)
-	}
-
-	store.Save("one", "zip")
-
-	select {
-	case <-notified:
-	case <-time.After(3 * time.Second):
-	}
-	require.Equal(t, int32(1), atomic.LoadInt32(&jwtChanges))
-	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
-
-	// re-use the folder for readonly mode
-	roNotified := make(chan bool)
-	roJWTChanges := int32(0)
-	roErrors := int32(0)
-
-	readOnlyStore, err := NewImmutableDirJWTStore(dir, true, func(pubKey string) {
-		atomic.AddInt32(&roJWTChanges, 1)
-		roNotified <- true
-	}, func(err error) {
-		atomic.AddInt32(&roErrors, 1)
-		roNotified <- true
-	})
-	require.NoError(t, err)
-	require.True(t, readOnlyStore.IsReadOnly())
-
-	got, err := readOnlyStore.Load("one")
-	require.NoError(t, err)
-	require.Equal(t, "zip", got)
-
-	store.Save("two", "zap")
-
-	select {
-	case <-roNotified:
-	case <-time.After(3 * time.Second):
-	}
-	require.Equal(t, int32(1), atomic.LoadInt32(&roJWTChanges))
-	require.Equal(t, int32(0), atomic.LoadInt32(&roErrors))
-
-	select {
-	case <-notified:
-	case <-time.After(3 * time.Second):
-	}
-	require.Equal(t, int32(2), atomic.LoadInt32(&jwtChanges)) // still have the changes from before
-	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
-
-	store.Close()
-	readOnlyStore.Close()
-}
-
-func TestUnShardedDirStoreNotifications(t *testing.T) {
-
-	// Skip the file notification test on travis
-	if os.Getenv("TRAVIS_GO_VERSION") != "" {
-		return
-	}
-
-	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
-	require.NoError(t, err)
-
-	notified := make(chan bool)
-	jwtChanges := int32(0)
-	errors := int32(0)
-
-	store, err := NewDirJWTStore(dir, false, false, func(pubKey string) {
-		atomic.AddInt32(&jwtChanges, 1)
-		notified <- true
-	}, func(err error) {
-		atomic.AddInt32(&errors, 1)
-		notified <- true
-	})
-	require.NoError(t, err)
-	require.False(t, store.IsReadOnly())
-
-	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
-	}
-
-	for k, v := range expected {
-		store.Save(k, v)
-	}
-
-	time.Sleep(time.Second)
-
-	for k, v := range expected {
-		got, err := store.Load(k)
-		require.NoError(t, err)
-		require.Equal(t, v, got)
-	}
-
-	store.Save("one", "zip")
-
-	select {
-	case <-notified:
-	case <-time.After(5 * time.Second):
-	}
-	require.Equal(t, int32(1), atomic.LoadInt32(&jwtChanges))
-	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
-
-	// re-use the folder for readonly mode
-	roNotified := make(chan bool)
-	roJWTChanges := int32(0)
-	roErrors := int32(0)
-
-	readOnlyStore, err := NewImmutableDirJWTStore(dir, false, func(pubKey string) {
-		atomic.AddInt32(&roJWTChanges, 1)
-		roNotified <- true
-	}, func(err error) {
-		atomic.AddInt32(&roErrors, 1)
-		roNotified <- true
-	})
-	require.NoError(t, err)
-	require.True(t, readOnlyStore.IsReadOnly())
-
-	got, err := readOnlyStore.Load("one")
-	require.NoError(t, err)
-	require.Equal(t, "zip", got)
-
-	store.Save("two", "zap")
-
-	select {
-	case <-roNotified:
-	case <-time.After(5 * time.Second):
-	}
-	require.Equal(t, int32(1), atomic.LoadInt32(&roJWTChanges))
-	require.Equal(t, int32(0), atomic.LoadInt32(&roErrors))
-
-	select {
-	case <-notified:
-	case <-time.After(5 * time.Second):
-	}
-	require.Equal(t, int32(2), atomic.LoadInt32(&jwtChanges))
-	require.Equal(t, int32(0), atomic.LoadInt32(&errors))
-
-	store.Close()
-	readOnlyStore.Close()
 }
 
 func TestShardedDirStorePackMerge(t *testing.T) {

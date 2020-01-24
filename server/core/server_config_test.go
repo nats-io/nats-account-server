@@ -45,6 +45,7 @@ func TestStartWithDirFlag(t *testing.T) {
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
+	server.config.Logging.Custom = NewNilLogger()
 	server.config.HTTP.Port = 0 // reset port so we don't conflict
 	err = server.Start()
 	require.NoError(t, err)
@@ -55,7 +56,7 @@ func TestStartWithDirFlag(t *testing.T) {
 	httpClient, err := testHTTPClient(false)
 	require.NoError(t, err)
 
-	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/jwt/v1/help", server.port))
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/help", server.port))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 	body, err := ioutil.ReadAll(resp.Body)
@@ -137,11 +138,12 @@ func TestStartWithNSCFlag(t *testing.T) {
 	flags := Flags{
 		DebugAndVerbose: true,
 		NSCFolder:       filepath.Join(path, "x"),
-		HostPort:        "localhost:0",
+		HostPort:        "127.0.0.1:0",
 	}
 
 	server := NewAccountServer()
 	server.InitializeFromFlags(flags)
+	server.config.Logging.Custom = NewNilLogger()
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -149,7 +151,7 @@ func TestStartWithNSCFlag(t *testing.T) {
 	httpClient, err := testHTTPClient(false)
 	require.NoError(t, err)
 
-	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/jwt/v1/accounts/%s", server.port, apub))
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/accounts/%s", server.port, apub))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 	body, err := ioutil.ReadAll(resp.Body)
@@ -169,7 +171,7 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 	configString := `
 	{
 		store: {
-			Dir: %s,
+			Dir: '%s',
 		},
 		http: {
 			ReadTimeout: 2000,
@@ -188,12 +190,13 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 
 	flags := Flags{
 		ConfigFile: fullPath,
-		HostPort:   "localhost:0",
+		HostPort:   "127.0.0.1:0",
 	}
 
 	server := NewAccountServer()
 	err = server.InitializeFromFlags(flags)
 	require.NoError(t, err)
+	server.config.Logging.Custom = NewNilLogger()
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -204,7 +207,7 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 	httpClient, err := testHTTPClient(false)
 	require.NoError(t, err)
 
-	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/jwt/v1/help", server.port))
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/help", server.port))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 	body, err := ioutil.ReadAll(resp.Body)
@@ -317,7 +320,7 @@ func TestNATSFlags(t *testing.T) {
 	flags := Flags{
 		DebugAndVerbose: true,
 		NSCFolder:       filepath.Join(path, "x"),
-		HostPort:        "localhost:0",
+		HostPort:        "127.0.0.1:0",
 		NATSURL:         testEnv.NC.ConnectedUrl(),
 		Creds:           testEnv.SystemUserCredsFile,
 	}
@@ -325,6 +328,7 @@ func TestNATSFlags(t *testing.T) {
 	server := NewAccountServer()
 	err = server.InitializeFromFlags(flags)
 	require.NoError(t, err)
+	server.config.Logging.Custom = NewNilLogger()
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()
@@ -341,7 +345,7 @@ func TestNATSFlags(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp, err := httpClient.Get(fmt.Sprintf("http://localhost:%d/jwt/v1/accounts/%s?notify=true", server.port, apub))
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/accounts/%s?notify=true", server.port, apub))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
 	body, err := ioutil.ReadAll(resp.Body)
@@ -365,7 +369,7 @@ func TestStartWithBadHostPortFlag(t *testing.T) {
 	flags := Flags{
 		DebugAndVerbose: true,
 		NSCFolder:       filepath.Join(path, "x"),
-		HostPort:        "localhost",
+		HostPort:        "127.0.0.1",
 	}
 
 	server := NewAccountServer()
@@ -375,7 +379,7 @@ func TestStartWithBadHostPortFlag(t *testing.T) {
 	flags = Flags{
 		DebugAndVerbose: true,
 		NSCFolder:       filepath.Join(path, "x"),
-		HostPort:        "localhost:blam",
+		HostPort:        "127.0.0.1:blam",
 	}
 
 	err = server.InitializeFromFlags(flags)
@@ -392,7 +396,7 @@ func TestFlagOverridesConfig(t *testing.T) {
 	configString := `
 	{
 		store: {
-			Dir: %s,
+			Dir: '%s',
 			ReadOnly: false,
 		},
 		http: {
@@ -418,6 +422,7 @@ func TestFlagOverridesConfig(t *testing.T) {
 	server := NewAccountServer()
 	err = server.InitializeFromFlags(flags)
 	require.NoError(t, err)
+	server.config.Logging.Custom = NewNilLogger()
 	err = server.Start()
 	require.NoError(t, err)
 	defer server.Stop()

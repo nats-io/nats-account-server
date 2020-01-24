@@ -35,7 +35,7 @@ func validatePathExists(path string, dir bool) (string, error) {
 	}
 
 	var finfo os.FileInfo
-	if finfo, err = os.Stat(abs); os.IsNotExist(err) {
+	if finfo, err = os.Stat(abs); finfo == nil || os.IsNotExist(err) {
 		return "", fmt.Errorf("the path [%s] doesn't exist", abs)
 	}
 

@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,6 +33,30 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )
+
+// Used when running on Windows. This is to speed up test when the library
+// tries to reach the primary that has been stopped. The http.Get() will fail
+// as expected, but take 2sec to do so. This would make the tests using replicas
+// very slow. So as soon as the primary is stopped, this function is invoked
+// prior to start the replica. This function simply accepts a connection and
+// closes it right away.
+func acceptAndClose(t *testing.T, hostport string) net.Listener {
+	t.Helper()
+	l, err := net.Listen("tcp", hostport)
+	if err != nil {
+		t.Fatalf("Unable to start listen: %v", err)
+	}
+	go func() {
+		for {
+			n, err := l.Accept()
+			if err != nil {
+				return
+			}
+			n.Close()
+		}
+	}()
+	return l
+}
 
 func TestPackJWTs(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
@@ -189,6 +215,10 @@ func TestReplicatedInit(t *testing.T) {
 
 	// Turn off the main server, so we only get local content from the replica
 	testEnv.Server.Stop()
+	if runtime.GOOS == "windows" {
+		l := acceptAndClose(t, testEnv.Server.hostPort)
+		defer l.Close()
+	}
 
 	// Replica should have initialized
 	for pubkey, jwt := range pubKeys {
@@ -243,6 +273,10 @@ func TestReplicatedInitWithMax(t *testing.T) {
 
 	// Turn off the main server, so we only get local content from the replica
 	testEnv.Server.Stop()
+	if runtime.GOOS == "windows" {
+		l := acceptAndClose(t, testEnv.Server.hostPort)
+		defer l.Close()
+	}
 
 	count := 0
 
@@ -304,6 +338,10 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 
 	// Turn off the main server, so we only get local content from the replica
 	testEnv.Server.Stop()
+	if runtime.GOOS == "windows" {
+		l := acceptAndClose(t, testEnv.Server.hostPort)
+		defer l.Close()
+	}
 
 	count := 0
 
@@ -385,6 +423,10 @@ func TestReplicatedInitPrimaryDown(t *testing.T) {
 
 	// Turn off the main server, so we only get local content from the replica
 	testEnv.Server.Stop()
+	if runtime.GOOS == "windows" {
+		l := acceptAndClose(t, testEnv.Server.hostPort)
+		defer l.Close()
+	}
 
 	replica, err := testEnv.CreateReplica(tempDir)
 	require.NoError(t, err)

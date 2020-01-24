@@ -82,14 +82,17 @@ func NewAccountServer() *AccountServer {
 	return ac
 }
 
+// ConfigureLogger configures the logger for this account server
 func (server *AccountServer) ConfigureLogger() natsserver.Logger {
 	opts := server.config.Logging
+	if opts.Custom != nil {
+		return opts.Custom
+	}
 	if isWindowsService() {
 		srvlogger.SetSyslogName("NatsAccountServer")
 		return srvlogger.NewSysLogger(opts.Debug, opts.Trace)
-	} else {
-		return srvlogger.NewStdLogger(opts.Time, opts.Debug, opts.Trace, opts.Colors, opts.PID)
 	}
+	return srvlogger.NewStdLogger(opts.Time, opts.Debug, opts.Trace, opts.Colors, opts.PID)
 }
 
 // Logger hosts a shared logger

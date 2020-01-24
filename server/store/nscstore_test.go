@@ -77,18 +77,16 @@ func TestNSCFileNotifications(t *testing.T) {
 	_, apub, _ := CreateAccountKey(t)
 	s := CreateTestStoreForOperator(t, "x", kp)
 
-	notified := make(chan bool)
-	jwtChanges := 0
-	errors := 0
+	notified := make(chan bool, 1)
+	errors := make(chan error, 10)
 
 	store, err := NewNSCJWTStore(s.Dir, func(pubKey string) {
-		jwtChanges++
 		notified <- true
 	}, func(err error) {
-		errors++
-		notified <- true
+		errors <- err
 	})
 	require.NoError(t, err)
+	defer store.Close()
 
 	c := jwt.NewAccountClaims(apub)
 	c.Name = "foo"
@@ -103,12 +101,28 @@ func TestNSCFileNotifications(t *testing.T) {
 	err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
-	select {
-	case <-notified:
-	case <-time.After(5 * time.Second):
+	// On Windows, we get notifications due to create and update,
+	// but sometimes more than once. So the test will be really
+	// checking at we get at least 1 notification when we modify.
+	check := func() {
+		t.Helper()
+		var ok bool
+		var done bool
+		for !done {
+			select {
+			case <-notified:
+				ok = true
+			case e := <-errors:
+				t.Fatal(e.Error())
+			case <-time.After(500 * time.Millisecond):
+				done = true
+			}
+		}
+		if !ok {
+			t.Fatalf("Did not get any notification")
+		}
 	}
-	require.Equal(t, 1, jwtChanges)
-	require.Equal(t, 0, errors)
+	check()
 
 	c.Tags.Add("blue")
 	cd, err = c.Encode(kp)
@@ -116,19 +130,15 @@ func TestNSCFileNotifications(t *testing.T) {
 	err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
-	select {
-	case <-notified:
-	case <-time.After(5 * time.Second):
-	}
-	require.Equal(t, 2, jwtChanges)
-	require.Equal(t, 0, errors)
+	check()
 
 	theJWT, err := store.Load(c.Subject)
 	require.NoError(t, err)
 	require.Equal(t, cd, theJWT)
 
-	require.Equal(t, 2, jwtChanges)
-	require.Equal(t, 0, errors)
-
-	store.Close()
+	select {
+	case <-notified:
+		t.Fatal("Should not have been notified")
+	default:
+	}
 }

@@ -16,12 +16,18 @@
 
 package conf
 
+import (
+	natsserver "github.com/nats-io/nats-server/v2/server"
+)
+
+// LogConfig allows configuration of the logging details
 type LogConfig struct {
 	Time   bool
 	Debug  bool
 	Trace  bool
 	Colors bool
 	PID    bool
+	Custom natsserver.Logger
 }
 
 // AccountServerConfig is the root structure for an account server configuration file.
