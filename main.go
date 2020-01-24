@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The NATS Authors
+ * Copyright 2019-2020 The NATS Authors
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -131,9 +131,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = server.Start()
-
-	if err != nil {
+	if err := core.Run(server); err != nil {
 		if server.Logger() != nil {
 			server.Logger().Errorf("%s", err.Error())
 		} else {

@@ -211,11 +211,13 @@ func (ts *TestSetup) CreateReplicaConfig(dir string) *conf.AccountServerConfig {
 	config := conf.DefaultServerConfig()
 	config.Primary = ts.URLForPath("/")
 	config.NATS = ts.Server.config.NATS
+	config.HTTP.Host = "127.0.0.1"
 	config.HTTP.Port = int(atomic.AddUint64(&port, 1))
 	config.OperatorJWTPath = ts.OperatorJWTFile
 	config.SystemAccountJWTPath = ts.SystemAccountJWTFile
 	config.Logging.Trace = true
 	config.Logging.Debug = true
+	config.Logging.Custom = NewNilLogger()
 	config.Store.Dir = dir
 	config.HTTP.TLS = ts.Server.config.HTTP.TLS
 	return config
@@ -247,7 +249,7 @@ func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats b
 	testSetup.initKeys()
 
 	natsPort := atomic.AddUint64(&port, 1)
-	natsURL := fmt.Sprintf("nats://localhost:%d", natsPort)
+	natsURL := fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
 
 	config.HTTP.Port = int(atomic.AddUint64(&port, 1))
 
@@ -256,6 +258,7 @@ func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats b
 
 	config.Logging.Trace = true
 	config.Logging.Debug = true
+	config.Logging.Custom = NewNilLogger()
 
 	config.NATS = conf.NATSConfig{
 		Servers:         []string{natsURL},
@@ -315,7 +318,7 @@ func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats b
 		testSetup.GNATSD = gnatsd.RunServer(&opts)
 
 		if useTLS {
-			natsURL = fmt.Sprintf("tls://localhost:%d", opts.Port)
+			natsURL = fmt.Sprintf("tls://127.0.0.1:%d", opts.Port)
 		}
 
 		var nc *nats.Conn

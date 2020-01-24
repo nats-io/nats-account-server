@@ -12,7 +12,7 @@ require (
 	github.com/rs/cors v1.6.0
 	github.com/stretchr/testify v1.3.0
 	golang.org/x/crypto v0.0.0-20190820162420-60c769a6c586 // indirect
-	golang.org/x/net v0.0.0-20190827160401-ba9fcec4b297 // indirect
-	golang.org/x/sys v0.0.0-20190826190057-c7b8b68b1456 // indirect
-	golang.org/x/tools v0.0.0-20190827205025-b29f5f60c37a // indirect
+	golang.org/x/sys v0.0.0-20190826190057-c7b8b68b1456
 )
+
+go 1.13

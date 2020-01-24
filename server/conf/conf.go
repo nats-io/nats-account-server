@@ -17,12 +17,22 @@
 package conf
 
 import (
-	"github.com/nats-io/nats-account-server/server/logging"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 )
+
+// LogConfig allows configuration of the logging details
+type LogConfig struct {
+	Time   bool
+	Debug  bool
+	Trace  bool
+	Colors bool
+	PID    bool
+	Custom natsserver.Logger
+}
 
 // AccountServerConfig is the root structure for an account server configuration file.
 type AccountServerConfig struct {
-	Logging logging.Config
+	Logging LogConfig
 	NATS    NATSConfig
 	HTTP    HTTPConfig
 	Store   StoreConfig
@@ -79,7 +89,7 @@ type StoreConfig struct {
 // logging set to colors, time, debug and trace
 func DefaultServerConfig() *AccountServerConfig {
 	return &AccountServerConfig{
-		Logging: logging.Config{
+		Logging: LogConfig{
 			Colors: true,
 			Time:   true,
 			Debug:  false,

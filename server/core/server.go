@@ -18,6 +18,7 @@ package core
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -29,13 +30,14 @@ import (
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nats-account-server/server/conf"
-	"github.com/nats-io/nats-account-server/server/logging"
 	"github.com/nats-io/nats-account-server/server/store"
-	nats "github.com/nats-io/nats.go"
+	srvlogger "github.com/nats-io/nats-server/v2/logger"
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
 
-const version = "0.8.4"
+const version = "0.8.6"
 
 // AccountServer is the core structure for the server.
 type AccountServer struct {
@@ -44,7 +46,7 @@ type AccountServer struct {
 
 	startTime time.Time
 
-	logger logging.Logger
+	logger natsserver.Logger
 	config *conf.AccountServerConfig
 
 	nats      *nats.Conn
@@ -74,18 +76,27 @@ type AccountServer struct {
 
 // NewAccountServer creates a new account server with a default logger
 func NewAccountServer() *AccountServer {
-	return &AccountServer{
-		logger: logging.NewNATSLogger(logging.Config{
-			Colors: true,
-			Time:   true,
-			Debug:  true,
-			Trace:  true,
-		}),
+	ac := &AccountServer{
+		logger: NewNilLogger(),
 	}
+	return ac
+}
+
+// ConfigureLogger configures the logger for this account server
+func (server *AccountServer) ConfigureLogger() natsserver.Logger {
+	opts := server.config.Logging
+	if opts.Custom != nil {
+		return opts.Custom
+	}
+	if isWindowsService() {
+		srvlogger.SetSyslogName("NatsAccountServer")
+		return srvlogger.NewSysLogger(opts.Debug, opts.Trace)
+	}
+	return srvlogger.NewStdLogger(opts.Time, opts.Debug, opts.Trace, opts.Colors, opts.PID)
 }
 
 // Logger hosts a shared logger
-func (server *AccountServer) Logger() logging.Logger {
+func (server *AccountServer) Logger() natsserver.Logger {
 	return server.logger
 }
 
@@ -106,6 +117,7 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 			return err
 		}
 	}
+	server.ConfigureLogger()
 
 	if flags.NSCFolder != "" {
 		server.config.Store = conf.StoreConfig{
@@ -186,12 +198,16 @@ func (server *AccountServer) Start() error {
 	defer server.Unlock()
 
 	if server.logger != nil {
-		server.logger.Close()
+		if l, ok := server.logger.(io.Closer); ok {
+			if err := l.Close(); err != nil {
+				server.logger.Errorf("Error closing logger: %v", err)
+			}
+		}
 	}
 
 	server.running = true
 	server.startTime = time.Now()
-	server.logger = logging.NewNATSLogger(server.config.Logging)
+	server.logger = server.ConfigureLogger()
 	server.validUntil = map[string]time.Time{}
 
 	server.logger.Noticef("starting NATS Account server, version %s", version)
@@ -455,4 +471,18 @@ func (server *AccountServer) initializeFromPrimary() error {
 	}
 
 	return nil
+}
+
+func (server *AccountServer) ReadyForConnections(dur time.Duration) bool {
+	end := time.Now().Add(dur)
+	for time.Now().Before(end) {
+		server.Lock()
+		ok := server.listener != nil
+		server.Unlock()
+		if ok {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
 }
