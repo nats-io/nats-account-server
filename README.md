@@ -233,6 +233,8 @@ Both account and activation tokens are replicated.
 
 A replication timeout can be used to tune HTTP/network delays between the replica and the primary server.
 
+Currently, replica mode only works if the primary nats-account-server is running in Directory Mode.
+
 Replicas will try to download an initial set of JWTs from the master on startup. You can configure the maximum number to get with MaxReplicationPack, the default is 10,000, use 0 to disable this feature. JWTs are downloaded in no particular order, so if you have 100 and set max to 50 you will get a random set of 50. Also, if a directory store is used, the JWTs will only be saved if they were issued after the one the replica currently knows about.
 
 ## Configuration
