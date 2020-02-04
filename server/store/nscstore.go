@@ -118,11 +118,11 @@ func (store *NSCJWTStore) startWatching() error {
 					if strings.HasSuffix(event.Name, ".jwt") {
 						fileName := filepath.Base(event.Name)
 						accountName := strings.Replace(fileName, ".jwt", "", -1)
-						c, err := store.nsc.LoadClaim(nsc.Accounts, accountName, nsc.JwtName(accountName))
+						c, err := store.nsc.Load(nsc.Accounts, accountName, nsc.JwtName(accountName))
 						if err != nil {
 							store.errorOccurred(err)
 						}
-						store.changed(c.Subject)
+						store.changed(c.Claims().Subject)
 					}
 				} else if event.Op&fsnotify.Create == fsnotify.Create {
 					if filepath.Dir(event.Name) == filepath.Join(store.nsc.Dir, nsc.Accounts) {
@@ -160,13 +160,13 @@ func (store *NSCJWTStore) Load(publicKey string) (string, error) {
 
 	for _, i := range infos {
 		if i.IsDir() {
-			c, err := store.nsc.LoadClaim(nsc.Accounts, i.Name(), nsc.JwtName(i.Name()))
+			c, err := store.nsc.Load(nsc.Accounts, i.Name(), nsc.JwtName(i.Name()))
 			if err != nil {
 				return "", err
 			}
 
 			if c != nil {
-				if c.Subject == publicKey {
+				if c.Claims().Subject == publicKey {
 
 					data, err := store.nsc.Read(nsc.Accounts, i.Name(), nsc.JwtName(i.Name()))
 					if err != nil {

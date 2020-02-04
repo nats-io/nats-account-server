@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
@@ -48,7 +48,7 @@ func TestServerFileWatchNotification(t *testing.T) {
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	config := conf.DefaultServerConfig()
@@ -81,7 +81,7 @@ func TestServerFileWatchNotification(t *testing.T) {
 	c.Tags.Add("red")
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	resp, err = testEnv.HTTP.Get(url)
