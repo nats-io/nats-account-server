@@ -4,7 +4,7 @@ require (
 	github.com/fsnotify/fsnotify v1.4.7
 	github.com/julienschmidt/httprouter v1.2.0
 	github.com/mitchellh/go-homedir v1.1.0
-	github.com/nats-io/jwt/v2 v2.0.0-20200204143300-1476a208a3fe
+	github.com/nats-io/jwt/v2 v2.0.0-20200221225433-79b67ebebe7a
 	github.com/nats-io/nats-server/v2 v2.0.2
 	github.com/nats-io/nats.go v1.8.1
 	github.com/nats-io/nkeys v0.1.3

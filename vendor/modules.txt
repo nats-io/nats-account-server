@@ -24,7 +24,7 @@ github.com/mitchellh/go-wordwrap
 github.com/nats-io/cliprompts/v2
 # github.com/nats-io/jwt v0.3.2
 github.com/nats-io/jwt
-# github.com/nats-io/jwt/v2 v2.0.0-20200204143300-1476a208a3fe
+# github.com/nats-io/jwt/v2 v2.0.0-20200221225433-79b67ebebe7a
 github.com/nats-io/jwt/v2
 # github.com/nats-io/nats-server/v2 v2.0.2
 github.com/nats-io/nats-server/v2/conf
