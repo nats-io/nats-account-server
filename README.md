@@ -388,8 +388,8 @@ A memory store is created if `nsc` and `dir` are not set.
 This project uses go modules and provides a make file. You should be able to simply:
 
 ```bash
-% git clone https://github.com/nats-io/account-server.git
-% cd account-server
+% git clone https://github.com/nats-io/nats-account-server.git
+% cd nats-account-server
 % make
 ```
 
