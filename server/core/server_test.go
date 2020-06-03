@@ -48,17 +48,14 @@ type TestSetup struct {
 
 	OperatorKey     nkeys.KeyPair
 	OperatorPubKey  string
-	OperatorClaims  *jwt.OperatorClaims
 	OperatorJWTFile string
 
 	SystemAccount        nkeys.KeyPair
 	SystemAccountPubKey  string
-	SystemAccountClaims  *jwt.AccountClaims
 	SystemAccountJWTFile string
 
 	SystemUser          nkeys.KeyPair
 	SystemUserPubKey    string
-	SystemUserClaims    *jwt.UserClaims
 	SystemUserCredsFile string
 
 	HTTP *http.Client
@@ -113,14 +110,14 @@ func (ts *TestSetup) initKeys() error {
 
 	ts.OperatorKey = operatorKey
 	ts.OperatorPubKey = opk
-	ts.OperatorClaims = jwt.NewOperatorClaims(opk)
+	operatorClaims := jwt.NewOperatorClaims(opk)
 
 	file, err := ioutil.TempFile(os.TempDir(), "operator")
 	if err != nil {
 		return err
 	}
 
-	opJWT, err := ts.OperatorClaims.Encode(operatorKey)
+	opJWT, err := operatorClaims.Encode(operatorKey)
 	if err != nil {
 		return err
 	}
@@ -144,14 +141,14 @@ func (ts *TestSetup) initKeys() error {
 
 	ts.SystemAccount = accountKey
 	ts.SystemAccountPubKey = apk
-	ts.SystemAccountClaims = jwt.NewAccountClaims(apk)
+	systemAccountClaims := jwt.NewAccountClaims(apk)
 
 	file, err = ioutil.TempFile(os.TempDir(), "sysacct")
 	if err != nil {
 		return err
 	}
 
-	sysAcctJWT, err := ts.SystemAccountClaims.Encode(operatorKey)
+	sysAcctJWT, err := systemAccountClaims.Encode(operatorKey)
 	if err != nil {
 		return err
 	}
@@ -175,14 +172,14 @@ func (ts *TestSetup) initKeys() error {
 
 	ts.SystemUser = userKey
 	ts.SystemUserPubKey = upk
-	ts.SystemUserClaims = jwt.NewUserClaims(upk)
+	systemUserClaims := jwt.NewUserClaims(upk)
 
 	file, err = ioutil.TempFile(os.TempDir(), "sysuser")
 	if err != nil {
 		return err
 	}
 
-	userJWT, err := ts.SystemUserClaims.Encode(accountKey)
+	userJWT, err := systemUserClaims.Encode(accountKey)
 	if err != nil {
 		return err
 	}

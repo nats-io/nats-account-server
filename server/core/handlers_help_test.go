@@ -104,6 +104,7 @@ func TestOperatorJWT(t *testing.T) {
 
 	operator := string(body)
 	require.Equal(t, testEnv.Server.operatorJWT, operator)
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)
@@ -123,7 +124,46 @@ func TestOperatorJWT(t *testing.T) {
 	body, err = ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
-	require.True(t, strings.Contains(operator, `"alg": "ed25519"`)) // header prefix doesn't change
+	require.True(t, strings.Contains(operator, `"alg": "ed25519-nkey"`)) // header prefix doesn't change
+}
+
+func TestOperatorJWTV1(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	path := "/jwt/v1/operator"
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	operator := string(body)
+	require.Equal(t, testEnv.Server.operatorJWT, operator)
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+
+	path = "/jwt/v1/operator?text=true"
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	operator = string(body)
+	require.Equal(t, testEnv.Server.operatorJWT, operator)
+
+	path = "/jwt/v1/operator?decode=true"
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	operator = string(body)
+	require.True(t, strings.Contains(operator, `"alg": "ed25519-nkey"`)) // header prefix doesn't change
 }
 
 func TestOperatorJWTTLS(t *testing.T) {
