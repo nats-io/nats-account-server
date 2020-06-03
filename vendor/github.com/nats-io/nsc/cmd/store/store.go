@@ -1,35 +1,38 @@
 /*
+ * Copyright 2018-2019 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *  * Copyright 2018-2019 The NATS Authors
- *  * Licensed under the Apache License, Version 2.0 (the "License");
- *  * you may not use this file except in compliance with the License.
- *  * You may obtain a copy of the License at
- *  *
- *  * http://www.apache.org/licenses/LICENSE-2.0
- *  *
- *  * Unless required by applicable law or agreed to in writing, software
- *  * distributed under the License is distributed on an "AS IS" BASIS,
- *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  * See the License for the specific language governing permissions and
- *  * limitations under the License.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/nats-io/jwt"
+	cli "github.com/nats-io/cliprompts/v2"
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
-	"github.com/nats-io/nsc/cli"
 )
 
 const Version = "1"
@@ -37,10 +40,10 @@ const NSCFile = ".nsc"
 
 const Users = "users"
 const Accounts = "accounts"
-const Clusters = "clusters"
-const Servers = "servers"
 
 var standardDirs = []string{Accounts}
+
+var ErrNotExist = errors.New("resource does not exist")
 
 // Store is a directory that contains nsc assets
 type Store struct {
@@ -51,12 +54,55 @@ type Store struct {
 }
 
 type Info struct {
-	Managed         bool   `json:"managed"`
-	EntityName      string `json:"name"`
-	EnvironmentName string `json:"env"`
-	Kind            string `json:"kind"`
-	Version         string `json:"version"`
-	LastUpdateCheck int64  `json:"last_update_check"`
+	Managed bool   `json:"managed"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Version string `json:"version"`
+}
+
+func underlyingError(err error) error {
+	switch err := err.(type) {
+	case *ResourceErr:
+		return err.Err
+	}
+	return err
+}
+
+type ResourceErr struct {
+	Kind     string
+	Resource string
+	Err      error
+}
+
+func NewResourceNotExistErr(kind string, name string) error {
+	return &ResourceErr{Kind: kind, Resource: name, Err: ErrNotExist}
+}
+
+func NewAccountNotExistErr(name string) error {
+	return NewResourceNotExistErr("account", name)
+}
+
+func NewUserNotExistErr(name string) error {
+	return NewResourceNotExistErr("user", name)
+}
+
+func NewOperatorNotExistErr(name string) error {
+	return NewResourceNotExistErr("operator", name)
+}
+
+func (e *ResourceErr) Error() string {
+	extra := ""
+	switch e.Kind {
+	case "account":
+		extra = " in the current operator"
+	case "user":
+		extra = " in the current account"
+	}
+	return fmt.Sprintf("%s %s does not exist%s", e.Kind, e.Resource, extra)
+}
+
+func IsNotExist(err error) bool {
+	return underlyingError(err) == ErrNotExist
 }
 
 func (i *Info) String() string {
@@ -81,9 +127,9 @@ func CreateStore(env string, operatorsDir string, operator *NamedKey) (*Store, e
 	s := &Store{
 		Dir: root,
 		Info: Info{
-			EntityName:      operator.Name,
-			EnvironmentName: operator.Name,
-			Version:         Version,
+			Name:    operator.Name,
+			Version: Version,
+			Kind:    jwt.OperatorClaim,
 		},
 	}
 
@@ -107,7 +153,8 @@ func CreateStore(env string, operatorsDir string, operator *NamedKey) (*Store, e
 		if err != nil {
 			return nil, err
 		}
-		if err := s.StoreClaim([]byte(token)); err != nil {
+		// this is a local operator - so just write it
+		if err := s.StoreRaw([]byte(token)); err != nil {
 			return nil, fmt.Errorf("error writing operator jwt: %v", err)
 		}
 	} else {
@@ -137,16 +184,13 @@ func (s *Store) createOperatorToken(operator *NamedKey) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error reading public key: %v", err)
 	}
-
-	var v = jwt.NewGenericClaims(string(pub))
-	v.Name = operator.Name
-
-	if nkeys.IsValidPublicOperatorKey(pub) {
-		s.Info.Kind = jwt.OperatorClaim
-		v.Type = jwt.OperatorClaim
-	} else {
+	if !nkeys.IsValidPublicOperatorKey(pub) {
 		return "", fmt.Errorf("unsupported key type %q - stores require operator nkeys", pub)
 	}
+
+	var v = jwt.NewOperatorClaims(pub)
+	s.Info.Kind = jwt.OperatorClaim
+	v.Name = operator.Name
 
 	token, err := v.Encode(operator.KP)
 	if err != nil {
@@ -183,6 +227,10 @@ func (s *Store) resolve(name ...string) string {
 func (s *Store) Has(name ...string) bool {
 	fp := s.resolve(name...)
 	return s.has(fp)
+}
+
+func (s *Store) HasAccount(name string) bool {
+	return s.Has(Accounts, name, JwtName(name))
 }
 
 func (s *Store) has(fp string) bool {
@@ -226,7 +274,7 @@ func (s *Store) List(path ...string) ([]os.FileInfo, error) {
 	return ioutil.ReadDir(fp)
 }
 
-// Read reads the specified file name or subpath from the store
+// Delete the specified file name or subpath from the store
 func (s *Store) Delete(name ...string) error {
 	s.Lock()
 	defer s.Unlock()
@@ -270,19 +318,135 @@ func (s *Store) ListEntries(name ...string) ([]string, error) {
 	return entries, nil
 }
 
-func (s *Store) StoreClaim(data []byte) error {
+func (s *Store) ClaimType(data []byte) (*jwt.ClaimType, error) {
 	// Decode the jwt to figure out where it goes
-	gc, err := jwt.DecodeGeneric(string(data))
+	c, err := jwt.Decode(string(data))
 	if err != nil {
-		return fmt.Errorf("invalid jwt: %v", err)
+		return nil, fmt.Errorf("invalid jwt: %v", err)
 	}
-	if gc.Name == "" {
-		return errors.New("jwt claim doesn't have a name")
+	if c.Claims().Name == "" {
+		return nil, errors.New("jwt claim doesn't have a name")
+	}
+	kind := c.ClaimType()
+	return &kind, nil
+}
+
+func PullAccount(u string) (Status, error) {
+	c := &http.Client{Timeout: time.Second * 5}
+	r, err := c.Get(u)
+	if err != nil {
+		return nil, fmt.Errorf("error pulling %q: %v", u, err)
+	}
+	defer r.Body.Close()
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response from %q: %v", u, err)
+	}
+	return PullReport(r.StatusCode, buf.Bytes()), nil
+}
+
+func PushAccount(u string, data []byte) (Status, error) {
+	resp, err := http.Post(u, "application/jwt", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	message, err := ioutil.ReadAll(resp.Body)
+	return PushReport(resp.StatusCode, message), err
+}
+
+func (s *Store) handleManagedAccount(data []byte) (*Report, error) {
+	ac, err := jwt.DecodeAccountClaims(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("error decoding account claim")
+	}
+
+	oc, err := s.ReadOperatorClaim()
+	if err != nil {
+		return nil, fmt.Errorf("unable to push to the operator - failed to read operator claim: %v", err)
+	}
+	if oc.AccountServerURL == "" {
+		return nil, fmt.Errorf("unable to push to %q - operator doesn't set an account server url", oc.Name)
+	}
+
+	u, err := url.Parse(oc.AccountServerURL)
+	if err != nil {
+		return nil, fmt.Errorf("unable to push to the %q - failed to parse account server url (%q): %v", oc.Name, oc.AccountServerURL, err)
+	}
+
+	r := NewDetailedReport(false)
+	r.Label = "synchronized account jwt with account server"
+	u.Path = filepath.Join(u.Path, "accounts", ac.Subject)
+	push, err := PushAccount(u.String(), data)
+	if err != nil {
+		r.AddError("error pushing account %q: %v", ac.Name, err)
+		return r, nil
+	}
+	r.Add(push)
+	if push.Code() == OK {
+		pull, err := PullAccount(u.String())
+		if err != nil {
+			r.AddError("error pulling account %q: %v", ac.Name, err)
+		}
+		r.Add(pull)
+	}
+	return r, nil
+}
+
+func (s *Store) StoreClaim(data []byte) (Status, error) {
+	ct, err := s.ClaimType(data)
+	if err != nil {
+		return nil, err
+	}
+	if *ct == jwt.AccountClaim && s.IsManaged() {
+		var pull Report
+		var push Report
+		pp, err := s.handleManagedAccount(data)
+		if pp != nil {
+			if len(pp.Details) >= 1 {
+				push = *pp.Details[0].(*Report)
+			}
+			if len(pp.Details) >= 2 {
+				pull = *pp.Details[1].(*Report)
+			}
+		}
+		if err != nil {
+			return pp, err
+		}
+
+		if pull.Code() == OK {
+			// the pull succeeded so we have a JWT
+			if err := s.StoreRaw(pull.Data); err != nil {
+				pp.AddError("failed to store jwt: %v", err)
+				return pp, err
+			}
+		} else if push.Code() == OK || push.Code() == WARN {
+			// Push OK but failed pull, store self-signed
+			if err := s.StoreRaw(data); err != nil {
+				pp.AddError("failed to store self-signed jwt: %v", err)
+				return pp, err
+			}
+		}
+		return pp, nil
+	} else {
+		return nil, s.StoreRaw(data)
+	}
+}
+
+func (s *Store) StoreRaw(data []byte) error {
+	ct, err := s.ClaimType(data)
+	if err != nil {
+		return err
 	}
 	var path string
-	switch gc.Type {
+	switch *ct {
 	case jwt.AccountClaim:
-		path = filepath.Join(Accounts, gc.Name, JwtName(gc.Name))
+		ac, err := jwt.DecodeAccountClaims(string(data))
+		if err != nil {
+			return err
+		}
+		path = filepath.Join(Accounts, ac.Name, JwtName(ac.Name))
 	case jwt.UserClaim:
 		uc, err := jwt.DecodeUserClaims(string(data))
 		if err != nil {
@@ -303,7 +467,7 @@ func (s *Store) StoreClaim(data []byte) error {
 				if err != nil {
 					return err
 				}
-				if c != nil && c.DidSign(uc) {
+				if c.DidSign(uc) {
 					account = i.Name()
 					break
 				}
@@ -312,45 +476,22 @@ func (s *Store) StoreClaim(data []byte) error {
 		if account == "" {
 			return fmt.Errorf("account with public key %q is not in the store", issuer)
 		}
-		path = filepath.Join(Accounts, account, Users, JwtName(gc.Name))
-	case jwt.ServerClaim:
-		issuer := gc.Issuer
-		var cluster string
-		infos, err := s.List(Clusters)
+		path = filepath.Join(Accounts, account, Users, JwtName(uc.Name))
+	case jwt.OperatorClaim:
+		_, err := jwt.DecodeOperatorClaims(string(data))
 		if err != nil {
 			return err
 		}
-		for _, i := range infos {
-			if i.IsDir() {
-				c, err := s.LoadClaim(Clusters, i.Name(), JwtName(i.Name()))
-				if err != nil {
-					return err
-				}
-				if c != nil {
-					if c.Subject == issuer {
-						cluster = i.Name()
-						break
-					}
-				}
-			}
-		}
-		if cluster == "" {
-			return fmt.Errorf("cluster with public key %q is not in the store", issuer)
-		}
-		path = filepath.Join(Clusters, cluster, Servers, JwtName(gc.Name))
-	case jwt.ClusterClaim:
-		path = filepath.Join(Clusters, gc.Name, JwtName(gc.Name))
-	case jwt.OperatorClaim:
-		path = JwtName(gc.Name)
+		path = JwtName(s.GetName())
 	default:
-		return fmt.Errorf("unsuported store claim type: %s", gc.Type)
+		return fmt.Errorf("unsuported store claim type: %s", *ct)
 	}
 
 	return s.Write(data, path)
 }
 
 func (s *Store) GetName() string {
-	return s.Info.EntityName
+	return s.Info.Name
 }
 
 func (s *Store) operatorJwtName() (string, error) {
@@ -360,7 +501,7 @@ func (s *Store) operatorJwtName() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return JwtName(t.EntityName), nil
+		return JwtName(t.Name), nil
 	}
 	return "", fmt.Errorf("'.nsc' file was not found")
 }
@@ -395,6 +536,18 @@ func (s *Store) loadJson(v interface{}, name ...string) error {
 	return nil
 }
 
+func (s *Store) Load(name ...string) (jwt.Claims, error) {
+	if s.Has(name...) {
+		d, err := s.Read(name...)
+		if err != nil {
+			return nil, err
+		}
+		return jwt.Decode(string(d))
+	}
+	return nil, nil
+}
+
+// Deprecated: use Load
 func (s *Store) LoadClaim(name ...string) (*jwt.GenericClaims, error) {
 	if s.Has(name...) {
 		d, err := s.Read(name...)
@@ -411,81 +564,84 @@ func (s *Store) LoadClaim(name ...string) (*jwt.GenericClaims, error) {
 }
 
 func (s *Store) ReadOperatorClaim() (*jwt.OperatorClaims, error) {
+	d, err := s.ReadRawOperatorClaim()
+	if err != nil {
+		return nil, err
+	}
+	c, err := jwt.DecodeOperatorClaims(string(d))
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *Store) ReadRawOperatorClaim() ([]byte, error) {
 	fn := JwtName(s.GetName())
 	if s.Has(fn) {
 		d, err := s.Read(fn)
 		if err != nil {
 			return nil, err
 		}
-		c, err := jwt.DecodeOperatorClaims(string(d))
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
+		return d, nil
 	}
-	return nil, nil
+	return nil, NewOperatorNotExistErr(s.GetName())
 }
 
 func (s *Store) ReadAccountClaim(name string) (*jwt.AccountClaims, error) {
+	d, err := s.ReadRawAccountClaim(name)
+	if err != nil {
+		return nil, err
+	}
+	c, err := jwt.DecodeAccountClaims(string(d))
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *Store) ReadRawAccountClaim(name string) ([]byte, error) {
 	if s.Has(Accounts, name, JwtName(name)) {
 		d, err := s.Read(Accounts, name, JwtName(name))
 		if err != nil {
 			return nil, err
 		}
-		c, err := jwt.DecodeAccountClaims(string(d))
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
+		return d, nil
 	}
-	return nil, nil
+	return nil, NewAccountNotExistErr(name)
 }
 
 func (s *Store) ReadUserClaim(accountName string, name string) (*jwt.UserClaims, error) {
+	d, err := s.ReadRawUserClaim(accountName, name)
+	if err != nil {
+		return nil, err
+	}
+	c, err := jwt.DecodeUserClaims(string(d))
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *Store) ReadRawUserClaim(accountName string, name string) ([]byte, error) {
 	if s.Has(Accounts, accountName, Users, JwtName(name)) {
 		d, err := s.Read(Accounts, accountName, Users, JwtName(name))
 		if err != nil {
 			return nil, err
 		}
-		c, err := jwt.DecodeUserClaims(string(d))
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
+		return d, nil
+	}
+	return nil, NewUserNotExistErr(name)
+}
+
+func (s *Store) LoadOperator() (jwt.Claims, error) {
+	fn := JwtName(s.GetName())
+	if s.Has(fn) {
+		return s.Load(fn)
 	}
 	return nil, nil
 }
 
-func (s *Store) ReadClusterClaim(name string) (*jwt.ClusterClaims, error) {
-	if s.Has(Clusters, name, JwtName(name)) {
-		d, err := s.Read(Clusters, name, JwtName(name))
-		if err != nil {
-			return nil, err
-		}
-		c, err := jwt.DecodeClusterClaims(string(d))
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
-	}
-	return nil, nil
-}
-
-func (s *Store) ReadServerClaim(clusterName string, name string) (*jwt.ServerClaims, error) {
-	if s.Has(Clusters, clusterName, Servers, JwtName(name)) {
-		d, err := s.Read(Clusters, clusterName, Servers, JwtName(name))
-		if err != nil {
-			return nil, err
-		}
-		c, err := jwt.DecodeServerClaims(string(d))
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
-	}
-	return nil, nil
-}
-
+// Deprecated: use LoadOperator()
 func (s *Store) LoadRootClaim() (*jwt.GenericClaims, error) {
 	fn := JwtName(s.GetName())
 	if s.Has(fn) {
@@ -494,6 +650,34 @@ func (s *Store) LoadRootClaim() (*jwt.GenericClaims, error) {
 	return nil, nil
 }
 
+func (s *Store) LoadDefault(kind string) (jwt.Claims, error) {
+	dirs, err := s.ListSubContainers(kind)
+	if err != nil {
+		return nil, fmt.Errorf("error listing %s: %v", kind, err)
+	}
+	if len(dirs) == 1 {
+		return s.Load(kind, dirs[0], JwtName(dirs[0]))
+	}
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get pwd: %v", err)
+	}
+
+	for _, n := range dirs {
+		tp := filepath.Join(s.Dir, kind, n)
+		if strings.HasPrefix(pwd, tp) {
+			if s.Has(kind, filepath.Base(pwd), JwtName(filepath.Base(pwd))) {
+				return s.Load(kind, filepath.Base(pwd), JwtName(filepath.Base(pwd)))
+			} else {
+				continue
+			}
+		}
+	}
+	return nil, nil
+}
+
+// Deprecated: use LoadDefault
 func (s *Store) LoadDefaultEntity(kind string) (*jwt.GenericClaims, error) {
 	dirs, err := s.ListSubContainers(kind)
 	if err != nil {
@@ -548,7 +732,6 @@ type Entity struct {
 type Context struct {
 	Operator Entity
 	Account  Entity
-	Cluster  Entity
 	KeyStore KeyStore
 	Store    *Store
 }
@@ -567,8 +750,6 @@ func (ctx *Context) SetContext(name string, pub string) error {
 	switch pre {
 	case nkeys.PrefixByteOperator:
 		e = &ctx.Operator
-	case nkeys.PrefixByteCluster:
-		e = &ctx.Cluster
 	case nkeys.PrefixByteAccount:
 		e = &ctx.Account
 	}
@@ -583,8 +764,10 @@ func (ctx *Context) SetContext(name string, pub string) error {
 
 func (s *Store) GetContext() (*Context, error) {
 	var c Context
+	var err error
+
 	c.Store = s
-	c.KeyStore = NewKeyStore(s.Info.EnvironmentName)
+	c.KeyStore = NewKeyStore(s.Info.Name)
 
 	root, err := s.LoadRootClaim()
 	if err != nil {
@@ -598,30 +781,20 @@ func (s *Store) GetContext() (*Context, error) {
 	}
 
 	// try to set a default account
-	var ac *jwt.GenericClaims
+	var ac jwt.Claims
 
 	if s.DefaultAccount != "" {
-		ac, err = s.LoadClaim(Accounts, s.DefaultAccount, JwtName(s.DefaultAccount))
+		ac, err = s.Load(Accounts, s.DefaultAccount, JwtName(s.DefaultAccount))
 	} else {
-		ac, err = s.LoadDefaultEntity(Accounts)
+		ac, err = s.LoadDefault(Accounts)
 	}
 
 	if err != nil {
 		return nil, err
 	}
 	if ac != nil {
-		c.SetContext(ac.Name, ac.Subject)
+		c.SetContext(ac.Claims().Name, ac.Claims().Subject)
 	}
-
-	// try to set a default cluster
-	cc, err := s.LoadDefaultEntity(Clusters)
-	if err != nil {
-		return nil, err
-	}
-	if cc != nil {
-		c.SetContext(cc.Name, cc.Subject)
-	}
-
 	return &c, nil
 }
 
@@ -631,26 +804,22 @@ func (ctx *Context) ResolveKey(kind nkeys.PrefixByte, flagValue string) (nkeys.K
 		return nil, err
 	}
 	if kp == nil {
+		var pk string
 		switch kind {
 		case nkeys.PrefixByteAccount:
-			kp, err = ctx.KeyStore.GetAccountKey(ctx.Account.Name)
-			if err != nil {
-				return nil, err
-			}
-		case nkeys.PrefixByteCluster:
-			kp, err = ctx.KeyStore.GetClusterKey(ctx.Cluster.Name)
-			if err != nil {
-				return nil, err
-			}
+			pk = ctx.Account.PublicKey
 		case nkeys.PrefixByteOperator:
-			kp, err = ctx.KeyStore.GetOperatorKey(ctx.Operator.Name)
-			if err != nil {
-				return nil, err
-			}
+			pk = ctx.Operator.PublicKey
 		default:
 			return nil, fmt.Errorf("unsupported key %d resolution", kind)
 		}
-
+		// don't try to resolve empty
+		if pk != "" {
+			kp, err = ctx.KeyStore.GetKeyPair(pk)
+			if err != nil {
+				return nil, err
+			}
+		}
 		// not found
 		if kp == nil {
 			return nil, nil
@@ -678,7 +847,7 @@ func (ctx *Context) PickAccount(name string) (string, error) {
 		name = accounts[0]
 	}
 	if len(accounts) > 1 {
-		i, err := cli.PromptChoices("select account", name, accounts)
+		i, err := cli.Select("select account", name, accounts)
 		if err != nil {
 			return "", err
 		}
@@ -729,7 +898,7 @@ func (ctx *Context) PickUser(accountName string) (string, error) {
 		return users[0], nil
 	}
 	if len(users) > 1 {
-		i, err := cli.PromptChoices("select user", "", users)
+		i, err := cli.Select("select user", "", users)
 		if err != nil {
 			return "", err
 		}
@@ -738,78 +907,36 @@ func (ctx *Context) PickUser(accountName string) (string, error) {
 	return "", nil
 }
 
-// Returns a server name for the cluster if there's only one user
-func (ctx *Context) DefaultServer(cluster string) *string {
-	servers, err := ctx.Store.ListEntries(Clusters, cluster, Servers)
-	if err != nil {
-		return nil
+// GetAccountKeys returns the public keys for the named account followed
+// by its signing keys
+func (ctx *Context) GetAccountKeys(name string) ([]string, error) {
+	var keys []string
+	ac, err := ctx.Store.ReadAccountClaim(name)
+	if err != nil && !IsNotExist(err) {
+		return nil, err
 	}
-	if len(servers) == 1 {
-		return &servers[0]
+	if ac == nil {
+		// not found
+		return nil, nil
 	}
-	return nil
+	keys = append(keys, ac.Subject)
+	keys = append(keys, ac.SigningKeys...)
+	return keys, nil
 }
 
-func (ctx *Context) PickServer(clusterName string) (string, error) {
-	var err error
-	if clusterName == "" {
-		clusterName = ctx.Cluster.Name
-	}
-
-	if clusterName == "" {
-		clusterName, err = ctx.PickCluster(clusterName)
-		if err != nil {
-			return "", err
-		}
-	}
-	// allow downstream use of context to have cluster
-	ctx.Cluster.Name = clusterName
-
-	servers, err := ctx.Store.ListEntries(Clusters, clusterName, Servers)
+// GetOperatorKeys returns the public keys for the operator
+// followed by its signing keys
+func (ctx *Context) GetOperatorKeys() ([]string, error) {
+	var keys []string
+	oc, err := ctx.Store.ReadOperatorClaim()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(servers) == 0 {
-		return "", fmt.Errorf("cluster %q doesn't have any servers - add one first", clusterName)
+	if oc == nil {
+		// not found
+		return nil, nil
 	}
-	if len(servers) == 1 {
-		return servers[0], nil
-	}
-	if len(servers) > 1 {
-		i, err := cli.PromptChoices("select server", "", servers)
-		if err != nil {
-			return "", err
-		}
-		return servers[i], nil
-	}
-	return "", nil
-}
-
-func (ctx *Context) PickCluster(name string) (string, error) {
-	if name == "" {
-		name = ctx.Cluster.Name
-	}
-
-	clusters, err := ctx.Store.ListSubContainers(Clusters)
-	if err != nil {
-		return "", err
-	}
-	if len(clusters) == 0 {
-		return "", fmt.Errorf("no clusters defined - add one first")
-	}
-	if len(clusters) == 1 {
-		name = clusters[0]
-	}
-	if len(clusters) > 1 {
-		i, err := cli.PromptChoices("select cluster", "", clusters)
-		if err != nil {
-			return "", err
-		}
-		name = clusters[i]
-	}
-
-	// allow downstream use of context to have cluster
-	ctx.Cluster.Name = name
-
-	return name, nil
+	keys = append(keys, oc.Subject)
+	keys = append(keys, oc.SigningKeys...)
+	return keys, nil
 }

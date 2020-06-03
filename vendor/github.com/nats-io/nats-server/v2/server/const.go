@@ -1,4 +1,4 @@
-// Copyright 2012-2019 The NATS Authors
+// Copyright 2012-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.0.2"
+	VERSION = "2.2.0-beta.13"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -97,6 +97,9 @@ const (
 	// DEFAULT_HTTP_PORT is the default monitoring port.
 	DEFAULT_HTTP_PORT = 8222
 
+	// DEFAULT_HTTP_BASE_PATH is the default base path for monitoring.
+	DEFAULT_HTTP_BASE_PATH = "/"
+
 	// ACCEPT_MIN_SLEEP is the minimum acceptable sleep times on temporary errors.
 	ACCEPT_MIN_SLEEP = 10 * time.Millisecond
 
@@ -124,17 +127,20 @@ const (
 	// MAX_MSG_ARGS Maximum possible number of arguments from MSG proto.
 	MAX_MSG_ARGS = 4
 
+	// MAX_RMSG_ARGS Maximum possible number of arguments from RMSG proto.
+	MAX_RMSG_ARGS = 6
+
+	// MAX_HMSG_ARGS Maximum possible number of arguments from HMSG proto.
+	MAX_HMSG_ARGS = 7
+
 	// MAX_PUB_ARGS Maximum possible number of arguments from PUB proto.
 	MAX_PUB_ARGS = 3
 
+	// MAX_HPUB_ARGS Maximum possible number of arguments from HPUB proto.
+	MAX_HPUB_ARGS = 4
+
 	// DEFAULT_MAX_CLOSED_CLIENTS is the maximum number of closed connections we hold onto.
 	DEFAULT_MAX_CLOSED_CLIENTS = 10000
-
-	// DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS is for auto-expire response maps for imports.
-	DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS = 100000
-
-	// DEFAULT_TTL_AE_RESPONSE_MAP is the default time to expire auto-response map entries.
-	DEFAULT_TTL_AE_RESPONSE_MAP = 10 * time.Minute
 
 	// DEFAULT_LAME_DUCK_DURATION is the time in which the server spreads
 	// the closing of clients when signaled to go in lame duck mode.
@@ -163,4 +169,27 @@ const (
 	// DEFAULT_RTT_MEASUREMENT_INTERVAL is how often we want to measure RTT from
 	// this server to clients, routes, gateways or leafnode connections.
 	DEFAULT_RTT_MEASUREMENT_INTERVAL = time.Hour
+
+	// DEFAULT_ALLOW_RESPONSE_MAX_MSGS is the default number of responses allowed
+	// for a reply subject.
+	DEFAULT_ALLOW_RESPONSE_MAX_MSGS = 1
+
+	// DEFAULT_ALLOW_RESPONSE_EXPIRATION is the default time allowed for a given
+	// dynamic response permission.
+	DEFAULT_ALLOW_RESPONSE_EXPIRATION = 2 * time.Minute
+
+	// DEFAULT_SERVICE_EXPORT_RESPONSE_THRESHOLD is the default time that the system will
+	// expect a service export response to be delivered. This is used in corner cases for
+	// time based cleanup of reverse mapping structures.
+	DEFAULT_SERVICE_EXPORT_RESPONSE_THRESHOLD = 2 * time.Minute
+
+	// DEFAULT_SERVICE_LATENCY_SAMPLING is the default sampling rate for service
+	// latency metrics
+	DEFAULT_SERVICE_LATENCY_SAMPLING = 100
+
+	// DEFAULT_SYSTEM_ACCOUNT
+	DEFAULT_SYSTEM_ACCOUNT = "$SYS"
+
+	// DEFAULT GLOBAL_ACCOUNT
+	DEFAULT_GLOBAL_ACCOUNT = "$G"
 )

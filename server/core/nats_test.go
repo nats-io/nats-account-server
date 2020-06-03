@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nats-account-server/server/store"
 	nats "github.com/nats-io/nats.go"

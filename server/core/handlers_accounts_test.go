@@ -26,7 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/jwt"
+	jwtv1 "github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
@@ -110,6 +111,138 @@ func TestUploadGetAccountJWT(t *testing.T) {
 
 	expireAt := time.Now().Add(24 * time.Hour).Unix()
 	account := jwt.NewAccountClaims(pubKey)
+	account.Imports = append(account.Imports, &imp)
+	account.Expires = expireAt
+	acctJWT, err := account.Encode(operatorKey)
+	require.NoError(t, err)
+	notificationJWT := ""
+	subject := fmt.Sprintf(accountNotificationFormat, pubKey)
+	_, err = testEnv.NC.Subscribe(subject, func(m *nats.Msg) {
+		lock.Lock()
+		notificationJWT = string(m.Data)
+		lock.Unlock()
+	})
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.False(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.Equal(t, resp.StatusCode, http.StatusOK)
+
+	// check that url has to match account
+	resp, err = testEnv.HTTP.Post(url+"x", "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.Equal(t, resp.StatusCode, http.StatusBadRequest)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	savedJWT := string(body)
+
+	testEnv.Server.nats.Flush()
+	testEnv.NC.Flush()
+
+	lock.Lock()
+	require.Equal(t, notificationJWT, string(savedJWT))
+	lock.Unlock()
+
+	savedClaims, err := jwt.DecodeAccountClaims(string(savedJWT))
+	require.NoError(t, err)
+
+	require.Equal(t, account.Subject, savedClaims.Subject)
+	require.Equal(t, opk, savedClaims.Issuer)
+
+	path = fmt.Sprintf("/jwt/v1/accounts/%s?check=true", pubKey)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	path = fmt.Sprintf("/jwt/v1/accounts/%s?text=true", pubKey)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+
+	path = fmt.Sprintf("/jwt/v1/accounts/%s?decode=true", pubKey)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	decoded := string(body)
+	require.True(t, strings.Contains(decoded, `"alg": "ed25519-nkey"`))     // header prefix doesn't change
+	require.True(t, strings.Contains(decoded, UnixToDate(int64(expireAt)))) // expires are resolved to readable form
+	require.True(t, strings.Contains(decoded, "times.*"))                   // activation token is decoded
+
+	notificationJWT = ""
+
+	path = fmt.Sprintf("/jwt/v1/accounts/%s?notify=true", pubKey)
+	url = testEnv.URLForPath(path)
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	testEnv.Server.nats.Flush()
+	testEnv.NC.Flush()
+
+	lock.Lock()
+	require.Equal(t, notificationJWT, string(savedJWT))
+	lock.Unlock()
+}
+
+func TestUploadGetAccountJWTV1(t *testing.T) {
+	lock := sync.Mutex{}
+
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	operatorKey := testEnv.OperatorKey
+	opk := testEnv.OperatorPubKey
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	accountKey2, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey2, err := accountKey2.PublicKey()
+	require.NoError(t, err)
+
+	act := jwtv1.NewActivationClaims(pubKey)
+	act.ImportType = jwtv1.Stream
+	act.Name = "times"
+	act.ImportSubject = "times.*"
+	activeJWT, err := act.Encode(accountKey2)
+	require.NoError(t, err)
+
+	imp := jwtv1.Import{
+		Name:    "times",
+		Subject: "times.*",
+		Account: pubKey2,
+		Token:   activeJWT,
+		Type:    jwtv1.Stream,
+	}
+
+	expireAt := time.Now().Add(24 * time.Hour).Unix()
+	account := jwtv1.NewAccountClaims(pubKey)
 	account.Imports = append(account.Imports, &imp)
 	account.Expires = expireAt
 	acctJWT, err := account.Encode(operatorKey)

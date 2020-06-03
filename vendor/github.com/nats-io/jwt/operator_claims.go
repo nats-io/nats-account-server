@@ -26,10 +26,22 @@ import (
 
 // Operator specific claims
 type Operator struct {
-	Identities          []Identity `json:"identity,omitempty"`
-	SigningKeys         StringList `json:"signing_keys,omitempty"`
-	AccountServerURL    string     `json:"account_server_url,omitempty"`
+	// Slice of real identities (like websites) that can be used to identify the operator.
+	Identities []Identity `json:"identity,omitempty"`
+	// Slice of other operator NKeys that can be used to sign on behalf of the main
+	// operator identity.
+	SigningKeys StringList `json:"signing_keys,omitempty"`
+	// AccountServerURL is a partial URL like "https://host.domain.org:<port>/jwt/v1"
+	// tools will use the prefix and build queries by appending /accounts/<account_id>
+	// or /operator to the path provided. Note this assumes that the account server
+	// can handle requests in a nats-account-server compatible way. See
+	// https://github.com/nats-io/nats-account-server.
+	AccountServerURL string `json:"account_server_url,omitempty"`
+	// A list of NATS urls (tls://host:port) where tools can connect to the server
+	// using proper credentials.
 	OperatorServiceURLs StringList `json:"operator_service_urls,omitempty"`
+	// Identity of the system account
+	SystemAccount string `json:"system_account,omitempty"`
 }
 
 // Validate checks the validity of the operators contents
@@ -51,6 +63,11 @@ func (o *Operator) Validate(vr *ValidationResults) {
 	for _, k := range o.SigningKeys {
 		if !nkeys.IsValidPublicOperatorKey(k) {
 			vr.AddError("%s is not an operator public key", k)
+		}
+	}
+	if o.SystemAccount != "" {
+		if !nkeys.IsValidPublicAccountKey(o.SystemAccount) {
+			vr.AddError("%s is not an account public key", o.SystemAccount)
 		}
 	}
 }
@@ -102,15 +119,15 @@ func ValidateOperatorServiceURL(v string) error {
 }
 
 func (o *Operator) validateOperatorServiceURLs() []error {
-	var errors []error
+	var errs []error
 	for _, v := range o.OperatorServiceURLs {
 		if v != "" {
 			if err := ValidateOperatorServiceURL(v); err != nil {
-				errors = append(errors, err)
+				errs = append(errs, err)
 			}
 		}
 	}
-	return errors
+	return errs
 }
 
 // OperatorClaims define the data for an operator JWT

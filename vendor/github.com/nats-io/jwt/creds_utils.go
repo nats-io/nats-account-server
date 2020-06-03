@@ -1,3 +1,18 @@
+/*
+ * Copyright 2019-2020 The NATS Authors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package jwt
 
 import (
@@ -23,6 +38,7 @@ func formatJwt(kind string, jwtString string) ([]byte, error) {
 	templ := `-----BEGIN NATS %s JWT-----
 %s
 ------END NATS %s JWT------
+
 `
 	w := bytes.NewBuffer(nil)
 	kind = strings.ToUpper(kind)
@@ -60,6 +76,7 @@ func DecorateSeed(seed []byte) ([]byte, error) {
 	header := `************************* IMPORTANT *************************
 NKEY Seed printed below can be used to sign and prove identity.
 NKEYs are sensitive and should be treated as secrets.
+
 -----BEGIN %s NKEY SEED-----
 `
 	_, err := fmt.Fprintf(w, header, kind)
@@ -70,6 +87,7 @@ NKEYs are sensitive and should be treated as secrets.
 
 	footer := `
 ------END %s NKEY SEED------
+
 *************************************************************
 `
 	_, err = fmt.Fprintf(w, footer, kind)
@@ -132,8 +150,6 @@ func FormatUserConfig(jwtString string, seed []byte) ([]byte, error) {
 
 // ParseDecoratedJWT takes a creds file and returns the JWT portion.
 func ParseDecoratedJWT(contents []byte) (string, error) {
-	defer wipeSlice(contents)
-
 	items := userConfigRE.FindAllSubmatch(contents, -1)
 	if len(items) == 0 {
 		return string(contents), nil
@@ -150,7 +166,6 @@ func ParseDecoratedJWT(contents []byte) (string, error) {
 // key pair from it.
 func ParseDecoratedNKey(contents []byte) (nkeys.KeyPair, error) {
 	var seed []byte
-	defer wipeSlice(contents)
 
 	items := userConfigRE.FindAllSubmatch(contents, -1)
 	if len(items) > 1 {
@@ -200,11 +215,4 @@ func ParseDecoratedUserNKey(contents []byte) (nkeys.KeyPair, error) {
 		return nil, err
 	}
 	return kp, nil
-}
-
-// Just wipe slice with 'x', for clearing contents of nkey seed file.
-func wipeSlice(buf []byte) {
-	for i := range buf {
-		buf[i] = 'x'
-	}
 }

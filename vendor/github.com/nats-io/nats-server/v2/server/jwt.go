@@ -19,7 +19,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 )
 
@@ -88,6 +88,40 @@ func validateTrustedOperators(o *Options) error {
 	}
 	if len(o.TrustedOperators) > 0 && len(o.TrustedKeys) > 0 {
 		return fmt.Errorf("conflicting options for 'TrustedKeys' and 'TrustedOperators'")
+	}
+	if o.SystemAccount != "" {
+		foundSys := false
+		foundNonEmpty := false
+		for _, op := range o.TrustedOperators {
+			if op.SystemAccount != "" {
+				foundNonEmpty = true
+			}
+			if op.SystemAccount == o.SystemAccount {
+				foundSys = true
+				break
+			}
+		}
+		if foundNonEmpty && !foundSys {
+			return fmt.Errorf("system_account in config and operator JWT must be identical")
+		}
+	}
+	srvMajor, srvMinor, srvUpdate, _ := jwt.ParseServerVersion(strings.Split(VERSION, "-")[0])
+	for _, opc := range o.TrustedOperators {
+		if major, minor, update, err := jwt.ParseServerVersion(opc.AssertServerVersion); err != nil {
+			return fmt.Errorf("operator %s expects version %s got error instead: %s",
+				opc.Subject, opc.AssertServerVersion, err)
+		} else if major > srvMajor {
+			return fmt.Errorf("operator %s expected major version %d > server major version %d",
+				opc.Subject, major, srvMajor)
+		} else if srvMajor > major {
+		} else if minor > srvMinor {
+			return fmt.Errorf("operator %s expected minor version %d > server minor version %d",
+				opc.Subject, minor, srvMinor)
+		} else if srvMinor > minor {
+		} else if update > srvUpdate {
+			return fmt.Errorf("operator %s expected update version %d > server update version %d",
+				opc.Subject, update, srvUpdate)
+		}
 	}
 	// If we have operators, fill in the trusted keys.
 	// FIXME(dlc) - We had TrustedKeys before TrustedOperators. The jwt.OperatorClaims

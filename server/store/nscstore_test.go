@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,7 +34,7 @@ func TestValidNSCStore(t *testing.T) {
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	store, err := NewNSCJWTStore(s.Dir, func(pubKey string) {}, func(err error) {})
@@ -92,13 +92,13 @@ func TestNSCFileNotifications(t *testing.T) {
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	c.Tags.Add("red")
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	// On Windows, we get notifications due to create and update,
@@ -127,7 +127,7 @@ func TestNSCFileNotifications(t *testing.T) {
 	c.Tags.Add("blue")
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
-	err = s.StoreClaim([]byte(cd))
+	_, err = s.StoreClaim([]byte(cd))
 	require.NoError(t, err)
 
 	check()
