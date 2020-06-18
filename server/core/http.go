@@ -179,7 +179,7 @@ func (server *AccountServer) buildRouter() *httprouter.Router {
 
 	// replicas and readonly stores cannot accept post requests
 	// replicas use a writable store, thus the extra check
-	if !server.jwtStore.IsReadOnly() && server.primary == "" {
+	if !server.jwtStore.IsReadOnly() {
 		r.POST("/jwt/v1/accounts/:pubkey", server.UpdateAccountJWT)
 		r.POST("/jwt/v1/activations", server.UpdateActivationJWT)
 	}

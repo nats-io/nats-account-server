@@ -47,11 +47,9 @@ func expandPath(p string) string {
 
 func main() {
 	var server *core.AccountServer
-	var err error
 
 	flags := core.Flags{}
 	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
-	flag.StringVar(&flags.NSCFolder, "nsc", "", "the nsc folder to host accounts from, mutually exclusive from dir, and makes the server read-only")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
 	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
 	flag.StringVar(&flags.Creds, "creds", "", "the creds file for connecting to NATS")
@@ -67,7 +65,17 @@ func main() {
 	flags.ConfigFile = expandPath(flags.ConfigFile)
 	flags.Creds = expandPath(flags.Creds)
 	flags.Directory = expandPath(flags.Directory)
-	flags.NSCFolder = expandPath(flags.NSCFolder)
+
+	server = core.NewAccountServer()
+	if err := server.InitializeFromFlags(flags); err != nil {
+		if server.Logger() != nil {
+			server.Logger().Errorf("%s", err.Error())
+		} else {
+			log.Printf("%s", err.Error())
+		}
+		server.Stop()
+		os.Exit(1)
+	}
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
@@ -91,9 +99,8 @@ func main() {
 				}
 				server.Stop()
 				server := core.NewAccountServer()
-				err = server.InitializeFromFlags(flags)
 
-				if err != nil {
+				if err := server.InitializeFromFlags(flags); err != nil {
 					if server.Logger() != nil {
 						server.Logger().Errorf("%s", err.Error())
 					} else {
@@ -103,9 +110,7 @@ func main() {
 					os.Exit(1)
 				}
 
-				err = server.Start()
-
-				if err != nil {
+				if err := server.Start(); err != nil {
 					if server.Logger() != nil {
 						server.Logger().Errorf("%s", err.Error())
 					} else {
@@ -117,19 +122,6 @@ func main() {
 			}
 		}
 	}()
-
-	server = core.NewAccountServer()
-	err = server.InitializeFromFlags(flags)
-
-	if err != nil {
-		if server.Logger() != nil {
-			server.Logger().Errorf("%s", err.Error())
-		} else {
-			log.Printf("%s", err.Error())
-		}
-		server.Stop()
-		os.Exit(1)
-	}
 
 	if err := core.Run(server); err != nil {
 		if server.Logger() != nil {

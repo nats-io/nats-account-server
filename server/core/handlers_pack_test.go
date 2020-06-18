@@ -29,7 +29,6 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
-	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )
@@ -361,30 +360,6 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 	}
 
 	require.Equal(t, 0, count)
-}
-
-func TestPackFailsWithWrongStore(t *testing.T) {
-	_, _, kp := store.CreateOperatorKey(t)
-	_, apub, _ := store.CreateAccountKey(t)
-	s := store.CreateTestStoreForOperator(t, "x", kp)
-
-	c := jwt.NewAccountClaims(apub)
-	c.Name = "foo"
-	cd, err := c.Encode(kp)
-	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
-
-	config := conf.DefaultServerConfig()
-	config.Store.Dir = ""
-	config.Store.NSC = s.Dir
-	testEnv, err := SetupTestServer(config, false, false)
-	defer testEnv.Cleanup()
-	require.NoError(t, err)
-
-	resp, err := testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack"))
-	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusNotFound)
 }
 
 func TestReplicatedInitPrimaryDown(t *testing.T) {

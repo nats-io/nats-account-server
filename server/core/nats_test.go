@@ -29,6 +29,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ErrJWTStore returns errors when possible
+type ErrJWTStore struct {
+	Loads  int
+	Saves  int
+	Closes int
+}
+
+// NewErrJWTStore returns an empty, mutable in-memory JWT store
+func NewErrJWTStore() store.JWTStore {
+	return &ErrJWTStore{}
+}
+
+// Load checks the memory store and returns the matching JWT or an error
+func (store *ErrJWTStore) Load(publicKey string) (string, error) {
+	store.Loads++
+	return "", fmt.Errorf("always error")
+}
+
+// Save puts the JWT in a map by public key, no checks are performed
+func (store *ErrJWTStore) Save(publicKey string, theJWT string) error {
+	store.Saves++
+	return fmt.Errorf("always error")
+}
+
+// IsReadOnly returns a flag determined at creation time
+func (store *ErrJWTStore) IsReadOnly() bool {
+	return false
+}
+
+// Close is a no-op for a mem store
+func (store *ErrJWTStore) Close() {
+	store.Closes++
+}
+
 func TestCoverageForPrintOnlyCallbacks(t *testing.T) {
 	config := conf.DefaultServerConfig()
 	testEnv, err := SetupTestServer(config, false, true)
@@ -67,8 +101,8 @@ func TestBadAccountNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = store.NewErrJWTStore()
-	errStore := server.jwtStore.(*store.ErrJWTStore)
+	server.jwtStore = NewErrJWTStore()
+	errStore := server.jwtStore.(*ErrJWTStore)
 
 	server.handleAccountNotification(&nats.Msg{
 		Data:    []byte("hello"),
@@ -85,8 +119,8 @@ func TestErrorCoverageOnAccountNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = store.NewErrJWTStore()
-	errStore := server.jwtStore.(*store.ErrJWTStore)
+	server.jwtStore = NewErrJWTStore()
+	errStore := server.jwtStore.(*ErrJWTStore)
 
 	operatorKey := testEnv.OperatorKey
 	accountKey, err := nkeys.CreateAccount()
@@ -139,8 +173,8 @@ func TestBadActivationNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = store.NewErrJWTStore()
-	errStore := server.jwtStore.(*store.ErrJWTStore)
+	server.jwtStore = NewErrJWTStore()
+	errStore := server.jwtStore.(*ErrJWTStore)
 
 	server.handleActivationNotification(&nats.Msg{
 		Data:    []byte("hello"),
@@ -213,8 +247,8 @@ func TestStoreErrorCoverageOnActivationNotification(t *testing.T) {
 	actJWT, err := act.Encode(accountKey)
 	require.NoError(t, err)
 
-	server.jwtStore = store.NewErrJWTStore()
-	errStore := server.jwtStore.(*store.ErrJWTStore)
+	server.jwtStore = NewErrJWTStore()
+	errStore := server.jwtStore.(*ErrJWTStore)
 
 	server.handleActivationNotification(&nats.Msg{
 		Data:    []byte(actJWT),

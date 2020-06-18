@@ -1,29 +1,13 @@
-# github.com/AlecAivazis/survey/v2 v2.0.4
-github.com/AlecAivazis/survey/v2
-github.com/AlecAivazis/survey/v2/core
-github.com/AlecAivazis/survey/v2/terminal
 # github.com/davecgh/go-spew v1.1.1
 github.com/davecgh/go-spew/spew
 # github.com/fsnotify/fsnotify v1.4.7
 github.com/fsnotify/fsnotify
 # github.com/julienschmidt/httprouter v1.2.0
 github.com/julienschmidt/httprouter
-# github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
-github.com/kballard/go-shellquote
-# github.com/mattn/go-colorable v0.1.2
-github.com/mattn/go-colorable
-# github.com/mattn/go-isatty v0.0.8
-github.com/mattn/go-isatty
-# github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b
-github.com/mgutz/ansi
 # github.com/minio/highwayhash v1.0.0
 github.com/minio/highwayhash
 # github.com/mitchellh/go-homedir v1.1.0
 github.com/mitchellh/go-homedir
-# github.com/mitchellh/go-wordwrap v1.0.0
-github.com/mitchellh/go-wordwrap
-# github.com/nats-io/cliprompts/v2 v2.0.0-20191226174129-372d79b36768
-github.com/nats-io/cliprompts/v2
 # github.com/nats-io/jwt v1.0.2-0.20200602193336-473d698956ed
 github.com/nats-io/jwt
 # github.com/nats-io/jwt/v2 v2.0.0-20200602193336-473d698956ed
@@ -41,8 +25,6 @@ github.com/nats-io/nats.go/encoders/builtin
 github.com/nats-io/nats.go/util
 # github.com/nats-io/nkeys v0.2.0
 github.com/nats-io/nkeys
-# github.com/nats-io/nsc v0.0.0-20200204170818-4a662d2d7641
-github.com/nats-io/nsc/cmd/store
 # github.com/nats-io/nuid v1.0.1
 github.com/nats-io/nuid
 # github.com/pmezard/go-difflib v1.0.0

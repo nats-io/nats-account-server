@@ -40,3 +40,9 @@ type PackableJWTStore interface {
 	Pack(maxJWTs int) (string, error)
 	Merge(pack string) error
 }
+
+// JWTChanged functions are called when the NSC store notices a JWT changed
+type JWTChanged func(publicKey string)
+
+// JWTError functions are called when the NSC store file watcher has an error
+type JWTError func(err error)

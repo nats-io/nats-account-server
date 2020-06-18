@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -42,17 +41,17 @@ func TestServerFileWatchNotification(t *testing.T) {
 
 	_, _, kp := CreateOperatorKey(t)
 	_, apub, _ := CreateAccountKey(t)
-	s, path := CreateTestStoreForOperator(t, "x", kp)
+	path, store := CreateTestStoreForOperator(t, "x")
 
 	c := jwt.NewAccountClaims(apub)
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
+	store(apub, cd)
 
 	config := conf.DefaultServerConfig()
-	config.Store.NSC = filepath.Join(path, "x")
+	config.Store.Dir = path
+	config.Store.ReadOnly = true
 
 	testEnv, err := SetupTestServer(config, false, true)
 	defer testEnv.Cleanup()
@@ -81,8 +80,7 @@ func TestServerFileWatchNotification(t *testing.T) {
 	c.Tags.Add("red")
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
+	store(apub, cd)
 
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)

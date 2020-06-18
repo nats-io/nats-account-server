@@ -44,7 +44,7 @@ type DirJWTStore struct {
 	changed       JWTChanged
 	errorOccurred JWTError
 	watcher       *fsnotify.Watcher
-	done          chan bool
+	done          chan struct{}
 }
 
 // NewDirJWTStore returns an empty, mutable directory-based JWT store
@@ -122,7 +122,6 @@ func (store *DirJWTStore) startWatching() error {
 	defer store.Unlock()
 
 	watcher, err := fsnotify.NewWatcher()
-	done := make(chan bool, 1)
 
 	if err != nil {
 		return err
@@ -153,19 +152,16 @@ func (store *DirJWTStore) startWatching() error {
 		watcher.Add(file)
 	}
 
+	done := make(chan struct{})
 	store.done = done
 
 	go func() {
-		running := true
-		store.Lock()
-		watcher := store.watcher
-		store.Unlock()
-
-		for running && watcher != nil {
+	WATCHLOOP:
+		for {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
-					return
+					break WATCHLOOP
 				}
 
 				if event.Op&fsnotify.Write == fsnotify.Write {
@@ -206,13 +202,12 @@ func (store *DirJWTStore) startWatching() error {
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
-					return
+					break WATCHLOOP
 				}
 				store.errorOccurred(err)
-			case <-done:
-				running = false
 			}
 		}
+		close(done)
 	}()
 
 	return nil
@@ -293,12 +288,11 @@ func (store *DirJWTStore) pathForKey(publicKey string) string {
 func (store *DirJWTStore) Close() {
 	store.Lock()
 	defer store.Unlock()
-
-	if store.done != nil {
-		store.done <- true
-	}
 	if store.watcher != nil {
 		store.watcher.Close()
+	}
+	if store.done != nil {
+		<-store.done
 	}
 	store.watcher = nil
 	store.done = nil

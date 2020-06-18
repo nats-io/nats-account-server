@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -276,84 +275,10 @@ func (server *AccountServer) cacheControlForExpiration(pubKey string, expires in
 	now := time.Now().UTC()
 	maxAge := int64(time.Unix(expires, 0).Sub(now).Seconds())
 	stale := int64(60 * 60) // One hour
-
-	if server.primary != "" && maxAge > 0 {
-		staleAt, ok := server.validUntil[pubKey]
-
-		if ok {
-			stale = int64(staleAt.Sub(now).Seconds())
-		} else {
-			return ""
-		}
-	}
 	return fmt.Sprintf("max-age=%d, stale-while-revalidate=%d, stale-if-error=%d", maxAge, stale, stale)
 }
 
-func (server *AccountServer) loadReplicatedJWT(pubKey string, path string) (string, error) {
-	now := time.Now().UTC()
-	server.cacheLock.Lock()
-	staleAt, ok := server.validUntil[pubKey]
-	server.cacheLock.Unlock()
-	stale := true // no valid until -> stale
-
-	if ok {
-		stale = int64(staleAt.Sub(now).Seconds()) < 0
-	}
-
-	// if we aren't stale and we have the jwt, return it
-	if !stale {
-		theJWT, err := server.jwtStore.Load(pubKey)
-
-		if err == nil && theJWT != "" {
-			return theJWT, nil
-		}
-	}
-
-	primary := server.primary
-
-	if strings.HasSuffix(primary, "/") {
-		primary = primary[:len(primary)-1]
-	}
-
-	url := fmt.Sprintf("%s/%s/%s", primary, path, pubKey)
-
-	resp, err := server.httpClient.Get(url)
-
-	// if we can't contact the primary, fallback to what we have on disk
-	if err != nil {
-		theJWT, err := server.jwtStore.Load(pubKey)
-		return theJWT, err
-	}
-
-	// but if the primary wasn't happy with the request, return an error
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("primary did not return with status OK")
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	theJWT := string(body)
-
-	err = server.jwtStore.Save(pubKey, theJWT)
-	if err != nil {
-		return "", err
-	}
-
-	// Default cache time is 1 hour (see cacheControl)
-	server.cacheLock.Lock()
-	server.validUntil[pubKey] = time.Now().Add(time.Hour)
-	server.cacheLock.Unlock()
-
-	return theJWT, nil
-}
-
 func (server *AccountServer) loadJWT(pubKey string, path string) (string, error) {
-	if server.primary != "" {
-		return server.loadReplicatedJWT(pubKey, path)
-	}
-
+	server.logger.Noticef("%s:%s", pubKey, path)
 	return server.jwtStore.Load(pubKey)
 }

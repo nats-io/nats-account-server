@@ -84,6 +84,7 @@ func (server *AccountServer) connectToNATS() error {
 		nats.DisconnectHandler(server.natsDisconnected),
 		nats.ReconnectHandler(server.natsReconnected),
 		nats.ClosedHandler(server.natsClosed),
+		nats.NoEcho(),
 	}
 
 	if config.TLS.Root != "" {
@@ -122,13 +123,11 @@ func (server *AccountServer) connectToNATS() error {
 
 	server.logger.Noticef("connected to NATS for account and activation notifications")
 
-	if server.primary != "" {
-		subject := strings.Replace(accountNotificationFormat, "%s", "*", -1)
-		nc.Subscribe(subject, server.handleAccountNotification)
+	subject := strings.Replace(accountNotificationFormat, "%s", "*", -1)
+	nc.Subscribe(subject, server.handleAccountNotification)
 
-		subject = strings.Replace(activationNotificationFormat, "%s", "*", -1)
-		nc.Subscribe(subject, server.handleActivationNotification)
-	}
+	subject = strings.Replace(activationNotificationFormat, "%s", "*", -1)
+	nc.Subscribe(subject, server.handleActivationNotification)
 
 	server.nats = nc
 	return nil
@@ -163,15 +162,16 @@ func (server *AccountServer) handleAccountNotification(msg *nats.Msg) {
 	}
 
 	pubKey := claim.Subject
-	err = server.jwtStore.Save(pubKey, theJWT)
-	if err != nil {
-		return
-	}
+	server.Lock()
+	jwtStore := server.jwtStore
+	server.Unlock()
 
-	// Default cache time is 1 hour (see cacheControl)
-	server.cacheLock.Lock()
-	server.validUntil[pubKey] = time.Now().Add(time.Hour)
-	server.cacheLock.Unlock()
+	if jwtStore != nil {
+		if err = jwtStore.Save(pubKey, theJWT); err != nil {
+			server.logger.Warnf("Received error when saving jwt: %s", err)
+			return
+		}
+	}
 }
 
 func (server *AccountServer) sendActivationNotification(hash string, account string, theJWT []byte) error {
@@ -204,9 +204,4 @@ func (server *AccountServer) handleActivationNotification(msg *nats.Msg) {
 		server.logger.Errorf("unable to save activation token in notification, %s", hash)
 		return
 	}
-
-	// Default cache time is 1 hour (see cacheControl)
-	server.cacheLock.Lock()
-	server.validUntil[hash] = time.Now().Add(time.Hour)
-	server.cacheLock.Unlock()
 }
