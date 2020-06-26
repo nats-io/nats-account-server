@@ -25,7 +25,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/jwt/v2" // only used to decode, not for storage
 	"github.com/nats-io/nats-account-server/server/conf"
 )
 
@@ -214,7 +214,7 @@ func (store *DirJWTStore) startWatching() error {
 }
 
 // Load checks the memory store and returns the matching JWT or an error
-func (store *DirJWTStore) Load(publicKey string) (string, error) {
+func (store *DirJWTStore) load(publicKey string) (string, error) {
 	store.Lock()
 	defer store.Unlock()
 
@@ -234,7 +234,7 @@ func (store *DirJWTStore) Load(publicKey string) (string, error) {
 }
 
 // Save puts the JWT in a map by public key, no checks are performed
-func (store *DirJWTStore) Save(publicKey string, theJWT string) error {
+func (store *DirJWTStore) save(publicKey string, theJWT string) error {
 	store.Lock()
 	defer store.Unlock()
 
@@ -258,6 +258,22 @@ func (store *DirJWTStore) Save(publicKey string, theJWT string) error {
 	}
 
 	return ioutil.WriteFile(path, []byte(theJWT), 0644)
+}
+
+func (store *DirJWTStore) LoadAcc(publicKey string) (string, error) {
+	return store.load(publicKey)
+}
+
+func (store *DirJWTStore) SaveAcc(publicKey string, theJWT string) error {
+	return store.save(publicKey, theJWT)
+}
+
+func (store *DirJWTStore) LoadAct(hash string) (string, error) {
+	return store.load(hash)
+}
+
+func (store *DirJWTStore) SaveAct(hash string, theJWT string) error {
+	return store.save(hash, theJWT)
 }
 
 // IsReadOnly returns a flag determined at creation time

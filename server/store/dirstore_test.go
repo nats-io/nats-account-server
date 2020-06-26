@@ -46,24 +46,24 @@ func TestShardedDirStoreWriteAndReadonly(t *testing.T) {
 	require.False(t, store.IsReadOnly())
 
 	for k, v := range expected {
-		store.Save(k, v)
+		store.SaveAcc(k, v)
 	}
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err := store.Load("random")
+	got, err := store.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
-	got, err = store.Load("")
+	got, err = store.LoadAcc("")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
-	err = store.Save("", "onetwothree")
+	err = store.SaveAcc("", "onetwothree")
 	require.Error(t, err)
 	store.Close()
 
@@ -73,11 +73,11 @@ func TestShardedDirStoreWriteAndReadonly(t *testing.T) {
 
 	require.True(t, store.IsReadOnly())
 
-	err = store.Save("five", "omega")
+	err = store.SaveAcc("five", "omega")
 	require.Error(t, err)
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
@@ -101,24 +101,24 @@ func TestUnshardedDirStoreWriteAndReadonly(t *testing.T) {
 	require.False(t, store.IsReadOnly())
 
 	for k, v := range expected {
-		store.Save(k, v)
+		store.SaveAcc(k, v)
 	}
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err := store.Load("random")
+	got, err := store.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
-	got, err = store.Load("")
+	got, err = store.LoadAcc("")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
-	err = store.Save("", "onetwothree")
+	err = store.SaveAcc("", "onetwothree")
 	require.Error(t, err)
 	store.Close()
 
@@ -128,11 +128,11 @@ func TestUnshardedDirStoreWriteAndReadonly(t *testing.T) {
 
 	require.True(t, store.IsReadOnly())
 
-	err = store.Save("five", "omega")
+	err = store.SaveAcc("five", "omega")
 	require.Error(t, err)
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
@@ -221,19 +221,19 @@ func TestDirStoreNotifications(t *testing.T) {
 			}
 
 			for k, v := range expected {
-				store.Save(k, v)
+				store.SaveAcc(k, v)
 			}
 
 			time.Sleep(time.Second)
 
 			for k, v := range expected {
-				got, err := store.Load(k)
+				got, err := store.LoadAcc(k)
 				require.NoError(t, err)
 				require.Equal(t, v, got)
 			}
 
 			atomic.StoreInt32(&wStoreState, 1)
-			store.Save("one", "zip")
+			store.SaveAcc("one", "zip")
 
 			check := func() {
 				t.Helper()
@@ -267,13 +267,13 @@ func TestDirStoreNotifications(t *testing.T) {
 			defer readOnlyStore.Close()
 			require.True(t, readOnlyStore.IsReadOnly())
 
-			got, err := readOnlyStore.Load("one")
+			got, err := readOnlyStore.LoadAcc("one")
 			require.NoError(t, err)
 			require.Equal(t, "zip", got)
 
 			atomic.StoreInt32(&roStoreState, 1)
 			atomic.StoreInt32(&wStoreState, 2)
-			store.Save("two", "zap")
+			store.SaveAcc("two", "zap")
 
 			for i := 0; i < 2; i++ {
 				check()
@@ -303,16 +303,16 @@ func TestShardedDirStorePackMerge(t *testing.T) {
 	require.False(t, store.IsReadOnly())
 
 	for k, v := range expected {
-		store.Save(k, v)
+		store.SaveAcc(k, v)
 	}
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err := store.Load("random")
+	got, err := store.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
@@ -331,12 +331,12 @@ func TestShardedDirStorePackMerge(t *testing.T) {
 	incP.Merge(pack)
 
 	for k, v := range expected {
-		got, err := inc.Load(k)
+		got, err := inc.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err = inc.Load("random")
+	got, err = inc.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
@@ -353,7 +353,7 @@ func TestShardedDirStorePackMerge(t *testing.T) {
 
 	count := 0
 	for k, v := range expected {
-		got, err := limited.Load(k)
+		got, err := limited.LoadAcc(k)
 		if err == nil {
 			count++
 			require.Equal(t, v, got)
@@ -362,7 +362,7 @@ func TestShardedDirStorePackMerge(t *testing.T) {
 
 	require.Equal(t, 1, count)
 
-	got, err = inc.Load("random")
+	got, err = inc.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 }
@@ -386,16 +386,16 @@ func TestShardedToUnsharedDirStorePackMerge(t *testing.T) {
 	require.False(t, store.IsReadOnly())
 
 	for k, v := range expected {
-		store.Save(k, v)
+		store.SaveAcc(k, v)
 	}
 
 	for k, v := range expected {
-		got, err := store.Load(k)
+		got, err := store.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err := store.Load("random")
+	got, err := store.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
@@ -414,12 +414,12 @@ func TestShardedToUnsharedDirStorePackMerge(t *testing.T) {
 	incP.Merge(pack)
 
 	for k, v := range expected {
-		got, err := inc.Load(k)
+		got, err := inc.LoadAcc(k)
 		require.NoError(t, err)
 		require.Equal(t, v, got)
 	}
 
-	got, err = inc.Load("random")
+	got, err = inc.LoadAcc("random")
 	require.Error(t, err)
 	require.Equal(t, "", got)
 
@@ -460,23 +460,23 @@ func TestMergeOnlyOnNewer(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should work
-	err = dirStore.Save(pubKey, olderJWT)
+	err = dirStore.SaveAcc(pubKey, olderJWT)
 	require.NoError(t, err)
-	fromStore, err := dirStore.Load(pubKey)
+	fromStore, err := dirStore.LoadAcc(pubKey)
 	require.NoError(t, err)
 	require.Equal(t, olderJWT, fromStore)
 
 	// should replace
 	err = dirStore.saveIfNewer(pubKey, newerJWT)
 	require.NoError(t, err)
-	fromStore, err = dirStore.Load(pubKey)
+	fromStore, err = dirStore.LoadAcc(pubKey)
 	require.NoError(t, err)
 	require.Equal(t, newerJWT, fromStore)
 
 	// should fail
 	err = dirStore.saveIfNewer(pubKey, olderJWT)
 	require.NoError(t, err)
-	fromStore, err = dirStore.Load(pubKey)
+	fromStore, err = dirStore.LoadAcc(pubKey)
 	require.NoError(t, err)
 	require.Equal(t, newerJWT, fromStore)
 }

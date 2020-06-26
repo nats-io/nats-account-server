@@ -42,15 +42,25 @@ func NewErrJWTStore() store.JWTStore {
 }
 
 // Load checks the memory store and returns the matching JWT or an error
-func (store *ErrJWTStore) Load(publicKey string) (string, error) {
+func (store *ErrJWTStore) LoadAcc(publicKey string) (string, error) {
 	store.Loads++
 	return "", fmt.Errorf("always error")
 }
 
 // Save puts the JWT in a map by public key, no checks are performed
-func (store *ErrJWTStore) Save(publicKey string, theJWT string) error {
+func (store *ErrJWTStore) SaveAcc(publicKey string, theJWT string) error {
 	store.Saves++
 	return fmt.Errorf("always error")
+}
+
+// Load checks the memory store and returns the matching JWT or an error
+func (store *ErrJWTStore) LoadAct(publicKey string) (string, error) {
+	return store.LoadAcc(publicKey)
+}
+
+// Save puts the JWT in a map by public key, no checks are performed
+func (store *ErrJWTStore) SaveAct(publicKey string, theJWT string) error {
+	return store.SaveAcc(publicKey, theJWT)
 }
 
 // IsReadOnly returns a flag determined at creation time
@@ -161,7 +171,7 @@ func TestAccountNotifyWithoutNatsOK(t *testing.T) {
 	acctJWT, err := account.Encode(operatorKey)
 	require.NoError(t, err)
 
-	err = server.sendAccountNotification(account, []byte(acctJWT))
+	err = server.sendAccountNotification(account.Subject, []byte(acctJWT))
 	require.NoError(t, err)
 }
 

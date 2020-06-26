@@ -451,6 +451,208 @@ func TestUploadGetAccountJWTTLS(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusOK)
 }
 
+func TestSignAccountNotConfigured(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	acctJWT, err := account.Encode(accountKey) // self signed
+	require.NoError(t, err)
+
+	path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
+	url := testEnv.URLForPath(path)
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusBadRequest)
+}
+
+func selfSignAccount(t *testing.T, accountKey nkeys.KeyPair, tag string) []byte {
+	pubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+	account := jwt.NewAccountClaims(pubKey)
+	account.Tags.Add(tag)
+	account.Expires = time.Now().Unix() + 10000
+	jwt, err := account.Encode(accountKey) // self signed
+	require.NoError(t, err)
+	return []byte(jwt)
+}
+
+func selfSignedAcctJWT(t *testing.T) (pubKey string, key nkeys.KeyPair, acctJWT []byte) {
+	// create self signed account jwt
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	pubKey, err = accountKey.PublicKey()
+	require.NoError(t, err)
+	return pubKey, accountKey, selfSignAccount(t, accountKey, "tag")
+}
+
+func TestSignAccount(t *testing.T) {
+	cfg := conf.DefaultServerConfig()
+	cfg.SignRequestSubject = "foo"
+	testEnv, err := SetupTestServer(cfg, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	_, err = testEnv.NC.Subscribe("foo", func(msg *nats.Msg) {
+		claim, err := jwt.DecodeAccountClaims(string(msg.Data))
+		require.NoError(t, err)
+		jwt, err := claim.Encode(testEnv.OperatorKey)
+		require.NoError(t, err)
+		msg.Respond([]byte(jwt))
+	})
+	require.NoError(t, err)
+
+	pubKey, _, acctJWT := selfSignedAcctJWT(t)
+
+	// check for non existence, upload, check for existence
+	url := testEnv.URLForPath(fmt.Sprintf("/jwt/v1/accounts/%s", pubKey))
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer(acctJWT))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	// check if retrieved jwt is what was signed
+	msg, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	t.Log(string(msg))
+
+	claim, err := jwt.DecodeAccountClaims(string(msg))
+	require.NoError(t, err)
+	require.True(t, claim.Issuer == testEnv.OperatorPubKey)
+}
+
+func TestSignAccountMultiple(t *testing.T) {
+	cfg := conf.DefaultServerConfig()
+	cfg.SignRequestSubject = "foo"
+	testEnv, err := SetupTestServer(cfg, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	_, err = testEnv.NC.Subscribe("foo", func(msg *nats.Msg) {
+		claim, err := jwt.DecodeAccountClaims(string(msg.Data))
+		require.NoError(t, err)
+		jwt, err := claim.Encode(testEnv.OperatorKey)
+		require.NoError(t, err)
+		msg.Respond([]byte(jwt))
+	})
+	require.NoError(t, err)
+
+	pubKey, key, acctJWT := selfSignedAcctJWT(t)
+
+	// check for non existence, upload, check for existence
+	url := testEnv.URLForPath(fmt.Sprintf("/jwt/v1/accounts/%s", pubKey))
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	upload := func(pubKey string, acctJWT []byte) {
+		resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer(acctJWT))
+		require.NoError(t, err)
+		require.True(t, resp.StatusCode == http.StatusOK)
+
+		resp, err = testEnv.HTTP.Get(url)
+		require.NoError(t, err)
+		require.True(t, resp.StatusCode == http.StatusOK)
+
+		// check if retrieved jwt is what was signed
+		msg, err := ioutil.ReadAll(resp.Body)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		t.Log(string(msg))
+
+		claim, err := jwt.DecodeAccountClaims(string(msg))
+		require.NoError(t, err)
+		require.True(t, claim.Issuer == testEnv.OperatorPubKey)
+	}
+
+	upload(pubKey, acctJWT)
+	upload(pubKey, selfSignAccount(t, key, "1"))
+	upload(pubKey, selfSignAccount(t, key, "2"))
+	upload(pubKey, selfSignAccount(t, key, "3"))
+}
+
+func TestSignAccountDelayed(t *testing.T) {
+	cfg := conf.DefaultServerConfig()
+	cfg.SignRequestSubject = "foo"
+	testEnv, err := SetupTestServer(cfg, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	toSignLaterChan := make(chan string, 1)
+	defer close(toSignLaterChan)
+	inProgess := "Your request will be audited, check /jwt/v1/accounts/<key>"
+	_, err = testEnv.NC.Subscribe("foo", func(msg *nats.Msg) {
+		// Instead of signing the jwt, we return a message
+		msg.Respond([]byte(inProgess))
+
+		toSignLaterChan <- string(msg.Data)
+	})
+	require.NoError(t, err)
+
+	pubKey, _, acctJWT := selfSignedAcctJWT(t)
+
+	// check for non existence, upload, check for existence
+	url := testEnv.URLForPath(fmt.Sprintf("/jwt/v1/accounts/%s", pubKey))
+
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer(acctJWT))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusAccepted)
+
+	// check if retrieved jwt is what was signed
+	msg, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	t.Log(string(msg))
+	require.True(t, string(msg) == inProgess)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	// this is to be done by the logic of the signing process
+	jwtToSign := <-toSignLaterChan
+	require.True(t, jwtToSign != "")
+	claim, err := jwt.DecodeAccountClaims(jwtToSign)
+	require.NoError(t, err)
+	signedJWT, err := claim.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+
+	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(signedJWT)))
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+
+	// at a later time the user can check if the account exists
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+}
+
 func TestInvalidJWTPost(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
 	defer testEnv.Cleanup()

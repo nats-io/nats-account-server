@@ -28,33 +28,33 @@ import (
 
 // PackJWTs the JWTS and return
 // takes a parameter for max
-func (server *AccountServer) PackJWTs(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-
-	maxStr := strings.ToLower(r.URL.Query().Get("max"))
-
-	if maxStr == "" {
-		maxStr = "-1"
+func (h *JwtHandler) PackJWTs(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	h.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+	max := h.packLimit
+	if maxStr := strings.ToLower(r.URL.Query().Get("max")); maxStr != "" {
+		if packLimit, err := strconv.Atoi(maxStr); err != nil {
+			h.sendErrorResponse(http.StatusBadRequest, fmt.Sprintf("bad max parameter %q", maxStr), "", err, w)
+			return
+		} else if h.packLimit >= 0 && packLimit > h.packLimit {
+			h.sendErrorResponse(http.StatusBadRequest,
+				fmt.Sprintf("bad max parameter %q, no more than %d are allowed", maxStr, h.packLimit), "", err, w)
+			return
+		} else {
+			max = packLimit
+		}
 	}
 
-	max, err := strconv.Atoi(maxStr)
+	h.logger.Tracef("request for JWT Pack - max=%d", max)
 
-	if err != nil {
-		server.sendErrorResponse(http.StatusBadRequest, fmt.Sprintf("bad max parameter %q", maxStr), "", err, w)
-		return
-	}
-
-	server.logger.Tracef("request for JWT Pack - max=%d", max)
-
-	packer, ok := server.jwtStore.(store.PackableJWTStore)
+	packer, ok := h.jwtStore.(store.PackableJWTStore)
 	if !ok {
-		server.sendErrorResponse(http.StatusBadRequest, "pack isn't supported", "", nil, w)
+		h.sendErrorResponse(http.StatusBadRequest, "pack isn't supported", "", nil, w)
 		return
 	}
 
 	pack, err := packer.Pack(max)
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error packing JWTs", "", err, w)
+		h.sendErrorResponse(http.StatusInternalServerError, "error packing JWTs", "", err, w)
 		return
 	}
 
@@ -63,8 +63,8 @@ func (server *AccountServer) PackJWTs(w http.ResponseWriter, r *http.Request, pa
 	_, err = w.Write([]byte(pack))
 
 	if err != nil {
-		server.logger.Errorf("error writing JWT Pack - %s", err.Error())
+		h.logger.Errorf("error writing JWT Pack - %s", err.Error())
 	} else {
-		server.logger.Tracef("returning JWT Pack")
+		h.logger.Tracef("returning JWT Pack")
 	}
 }

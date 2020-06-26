@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/jwt/v2" // only used to decode jwt subjects
 	"github.com/nats-io/nats-account-server/server/conf"
 	"github.com/nats-io/nats-account-server/server/store"
 	srvlogger "github.com/nats-io/nats-server/v2/logger"
@@ -57,11 +57,8 @@ type AccountServer struct {
 	port     int
 	hostPort string
 
-	jwtStore            store.JWTStore
-	trustedKeys         []string
-	operatorJWT         string
-	systemAccountClaims *jwt.AccountClaims
-	systemAccountJWT    string
+	jwtStore store.JWTStore
+	jwt      JwtHandler
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -87,6 +84,8 @@ func (server *AccountServer) ConfigureLogger() natsserver.Logger {
 
 // Logger hosts a shared logger
 func (server *AccountServer) Logger() natsserver.Logger {
+	server.Lock()
+	defer server.Unlock()
 	return server.logger
 }
 
@@ -118,6 +117,8 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 
 	if flags.NATSURL != "" {
 		server.config.NATS.Servers = []string{flags.NATSURL}
+	} else if server.config.SignRequestSubject != "" {
+		return fmt.Errorf("nats configuration is required in order to issue signature requests")
 	}
 
 	if flags.Creds != "" {
@@ -193,12 +194,6 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
-	if err := server.initializeTrustedKeys(); err != nil {
-		return err
-	}
-	if err := server.initializeSystemAccount(); err != nil {
-		return err
-	}
 	if store, err := server.createStore(); err != nil {
 		return err
 	} else {
@@ -208,6 +203,19 @@ func (server *AccountServer) Start() error {
 		return err
 	}
 	if err := server.connectToNATS(); err != nil {
+		return err
+	}
+
+	var sign accountSignup
+	if server.config.SignRequestSubject != "" {
+		sign = server.accountSignatureRequest
+	}
+	if opJWT, err := server.readJWT(server.config.OperatorJWTPath, "operator"); err != nil {
+		return err
+	} else if sysJWT, err := server.readJWT(server.config.SystemAccountJWTPath, "system account"); err != nil {
+		return err
+	} else if err := server.jwt.Initialize(server.logger, opJWT, sysJWT, server.jwtStore, server.config.MaxReplicationPack,
+		server.sendAccountNotification, server.sendActivationNotification, sign); err != nil {
 		return err
 	}
 
@@ -227,7 +235,7 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 		server.Lock()
 		jwtStore := server.jwtStore
 		server.Unlock()
-		theJWT, err := jwtStore.Load(pubKey)
+		theJWT, err := jwtStore.LoadAcc(pubKey)
 		if err != nil {
 			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
 			return
@@ -239,8 +247,7 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 			return
 		}
 
-		err = server.sendAccountNotification(decoded, []byte(theJWT))
-		if err != nil {
+		if err = server.sendAccountNotification(decoded.Subject, []byte(theJWT)); err != nil {
 			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
 			return
 		}
@@ -254,73 +261,29 @@ func (server *AccountServer) storeErrorCallback(err error) {
 
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
-
-	if config.Dir != "" {
-		if config.ReadOnly {
-			server.logger.Noticef("creating a read-only store at %s", config.Dir)
-			return store.NewImmutableDirJWTStore(config.Dir, config.Shard, server.jwtChangedCallback, server.storeErrorCallback)
-		}
-
-		server.logger.Noticef("creating a store at %s", config.Dir)
-		return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
-	} else {
-		return nil, fmt.Errorf("replica mode cannot be used in read-only mode, but will not allow POST operations")
+	if config.Dir == "" {
+		return nil, fmt.Errorf("store directory is required")
 	}
+	if config.ReadOnly {
+		server.logger.Noticef("creating a read-only store at %s", config.Dir)
+		return store.NewImmutableDirJWTStore(config.Dir, config.Shard, server.jwtChangedCallback, server.storeErrorCallback)
+	}
+	server.logger.Noticef("creating a store at %s", config.Dir)
+	return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
 }
 
-func (server *AccountServer) initializeTrustedKeys() error {
-	opPath := server.config.OperatorJWTPath
-
+func (server *AccountServer) readJWT(opPath string, jwtType string) ([]byte, error) {
 	if opPath == "" {
-		return nil
+		return nil, nil
 	}
 
-	server.logger.Noticef("loading operator from %s", opPath)
+	server.logger.Noticef("loading %s from %s", jwtType, opPath)
 
-	data, err := ioutil.ReadFile(opPath)
-	if err != nil {
-		return err
+	if data, err := ioutil.ReadFile(opPath); err != nil {
+		return nil, err
+	} else {
+		return data, nil
 	}
-
-	operatorJWT, err := jwt.DecodeOperatorClaims(string(data))
-	if err != nil {
-		return err
-	}
-
-	keys := []string{}
-
-	keys = append(keys, operatorJWT.Subject)
-	keys = append(keys, operatorJWT.SigningKeys...)
-
-	server.trustedKeys = keys
-	server.operatorJWT = string(data)
-
-	return nil
-}
-
-func (server *AccountServer) initializeSystemAccount() error {
-	jwtPath := server.config.SystemAccountJWTPath
-
-	if jwtPath == "" {
-		return nil
-	}
-
-	server.logger.Noticef("loading system account from %s", jwtPath)
-
-	data, err := ioutil.ReadFile(jwtPath)
-	if err != nil {
-		return err
-	}
-
-	systemAccount, err := jwt.DecodeAccountClaims(string(data))
-	if err != nil {
-		return err
-	}
-
-	server.systemAccountClaims = systemAccount
-	server.systemAccountJWT = string(data)
-
-	return nil
 }
 
 // Stop the account server
@@ -341,6 +304,11 @@ func (server *AccountServer) Stop() {
 	}
 
 	if server.nats != nil {
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		if server.nats.Barrier(func() { wg.Done() }) == nil {
+			wg.Wait()
+		}
 		server.nats.Close()
 		server.nats = nil
 		server.logger.Noticef("disconnected from NATS")
@@ -350,9 +318,9 @@ func (server *AccountServer) Stop() {
 
 	if server.jwtStore != nil {
 		server.jwtStore.Close()
-		server.jwtStore = nil
 		server.logger.Noticef("closed JWT store")
 	}
+	server.jwt = JwtHandler{}
 }
 
 // this functionality is only used to initialize the server from an old server

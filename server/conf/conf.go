@@ -39,6 +39,8 @@ type AccountServerConfig struct {
 
 	OperatorJWTPath      string
 	SystemAccountJWTPath string
+	SignRequestSubject   string
+	SignRequestTimeout   int //milliseconds
 
 	// Below options are only to copy jwt from an old account server for initialization
 	Primary            string
@@ -111,5 +113,6 @@ func DefaultServerConfig() *AccountServerConfig {
 		}, // in memory store
 		ReplicationTimeout: 5000,
 		MaxReplicationPack: 10000,
+		SignRequestTimeout: 1000,
 	}
 }

@@ -66,15 +66,19 @@ func main() {
 	flags.Creds = expandPath(flags.Creds)
 	flags.Directory = expandPath(flags.Directory)
 
-	server = core.NewAccountServer()
-	if err := server.InitializeFromFlags(flags); err != nil {
-		if server.Logger() != nil {
+	logStopExit := func(server *core.AccountServer, err error) {
+		if _, ok := server.Logger().(*core.NilLogger); !ok {
 			server.Logger().Errorf("%s", err.Error())
 		} else {
 			log.Printf("%s", err.Error())
 		}
 		server.Stop()
 		os.Exit(1)
+	}
+
+	server = core.NewAccountServer()
+	if err := server.InitializeFromFlags(flags); err != nil {
+		logStopExit(server, err)
 	}
 
 	go func() {
@@ -85,52 +89,32 @@ func main() {
 			signal := <-sigChan
 
 			if signal == os.Interrupt {
-				if server.Logger() != nil {
+				if _, ok := server.Logger().(*core.NilLogger); !ok {
 					fmt.Println() // clear the line for the control-C
-					server.Logger().Noticef("received sig-interrupt, shutting down")
 				}
+				server.Logger().Noticef("received sig-interrupt, shutting down")
 				server.Stop()
 				os.Exit(0)
 			}
 
 			if signal == syscall.SIGHUP {
-				if server.Logger() != nil {
-					server.Logger().Errorf("received sig-hup, restarting")
-				}
+				server.Logger().Errorf("received sig-hup, restarting")
 				server.Stop()
 				server := core.NewAccountServer()
 
 				if err := server.InitializeFromFlags(flags); err != nil {
-					if server.Logger() != nil {
-						server.Logger().Errorf("%s", err.Error())
-					} else {
-						log.Printf("%s", err.Error())
-					}
-					server.Stop()
-					os.Exit(1)
+					logStopExit(server, err)
 				}
 
 				if err := server.Start(); err != nil {
-					if server.Logger() != nil {
-						server.Logger().Errorf("%s", err.Error())
-					} else {
-						log.Printf("%s", err.Error())
-					}
-					server.Stop()
-					os.Exit(1)
+					logStopExit(server, err)
 				}
 			}
 		}
 	}()
 
 	if err := core.Run(server); err != nil {
-		if server.Logger() != nil {
-			server.Logger().Errorf("%s", err.Error())
-		} else {
-			log.Printf("%s", err.Error())
-		}
-		server.Stop()
-		os.Exit(1)
+		logStopExit(server, err)
 	}
 
 	// exit main but keep running goroutines

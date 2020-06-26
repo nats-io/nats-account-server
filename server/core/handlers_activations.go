@@ -21,61 +21,78 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/nats-io/nats-account-server/server/store"
+
 	"github.com/julienschmidt/httprouter"
-	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/jwt/v2" // only used to decode, not for storage
 	"github.com/nats-io/nkeys"
 )
 
 // UpdateActivationJWT is the handler for POST requests that update an activation JWT
-func (server *AccountServer) UpdateActivationJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+func (h *JwtHandler) UpdateActivationJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	actStore, ok := h.jwtStore.(store.JWTActivationStore)
+	if !ok {
+		h.sendErrorResponse(http.StatusBadRequest, "activations are not supported", "", nil, w)
+		return
+	}
+
 	theJWT, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad activation JWT in request", "", err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad activation JWT in request", "", err, w)
 		return
 	}
 
 	claim, err := jwt.DecodeActivationClaims(string(theJWT))
 
 	if err != nil || claim == nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad activation JWT in request", "", err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad activation JWT in request", "", err, w)
 		return
 	}
 
 	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) && !nkeys.IsValidPublicAccountKey(claim.Issuer) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad activation JWT Issuer in request", claim.Issuer, err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad activation JWT Issuer in request", claim.Issuer, err, w)
 		return
 	}
 
 	if !nkeys.IsValidPublicAccountKey(claim.Subject) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad activation JWT Subject in request", claim.Subject, err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad activation JWT Subject in request", claim.Subject, err, w)
 		return
 	}
 
 	hash, err := claim.HashID()
 
 	if err != nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad activation hash in request", claim.Issuer, err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad activation hash in request", claim.Issuer, err, w)
 		return
 	}
 
-	if err := server.jwtStore.Save(hash, string(theJWT)); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error saving activation JWT", claim.Issuer, err, w)
+	if err := actStore.SaveAct(hash, string(theJWT)); err != nil {
+		h.sendErrorResponse(http.StatusInternalServerError, "error saving activation JWT", claim.Issuer, err, w)
 		return
 	}
 
-	if err := server.sendActivationNotification(hash, claim.Issuer, theJWT); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error saving activation JWT", claim.Issuer, err, w)
-		return
+	if h.sendActivationNotification != nil {
+		if err := h.sendActivationNotification(hash, claim.Issuer, theJWT); err != nil {
+			h.sendErrorResponse(http.StatusInternalServerError, "error saving activation JWT", claim.Issuer, err, w)
+			return
+		}
 	}
 
 	// hash insures that exports has len > 0
-	server.logger.Noticef("updated activation JWT - %s-%s - %q", ShortKey(claim.Issuer), ShortKey(claim.Subject), claim.ImportSubject)
+	h.logger.Noticef("updated activation JWT - %s-%s - %q",
+		ShortKey(claim.Issuer), ShortKey(claim.Subject), claim.ImportSubject)
 	w.WriteHeader(http.StatusOK)
 }
 
 // GetActivationJWT looks for an activation token by hash
-func (server *AccountServer) GetActivationJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+func (h *JwtHandler) GetActivationJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	actStore, ok := h.jwtStore.(store.JWTActivationStore)
+	if !ok {
+		h.sendErrorResponse(http.StatusBadRequest, "activations are not supported", "", nil, w)
+		return
+	}
+
 	hash := string(params.ByName("hash"))
 	shortCode := ShortKey(hash)
 
@@ -83,28 +100,28 @@ func (server *AccountServer) GetActivationJWT(w http.ResponseWriter, r *http.Req
 	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
 	notify := strings.ToLower(r.URL.Query().Get("notify")) == "true"
 
-	theJWT, err := server.loadJWT(hash, "jwt/v1/activations")
+	theJWT, err := actStore.LoadAct(hash)
 
 	if err != nil {
-		server.logger.Errorf("unable to find requested activation JWT for %s - %s", hash, err.Error())
+		h.logger.Errorf("unable to find requested activation JWT for %s - %s", hash, err.Error())
 		http.Error(w, "No Matching JWT", http.StatusNotFound)
 		return
 	}
 
 	if text {
-		server.writeJWTAsText(w, hash, theJWT)
+		h.writeJWTAsText(w, hash, theJWT)
 		return
 	}
 
 	if decode {
-		server.writeDecodedJWT(w, hash, theJWT)
+		h.writeDecodedJWT(w, hash, theJWT)
 		return
 	}
 
 	decoded, err := jwt.DecodeActivationClaims(theJWT)
 
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
+		h.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
 		return
 	}
 
@@ -120,16 +137,16 @@ func (server *AccountServer) GetActivationJWT(w http.ResponseWriter, r *http.Req
 
 	// send notification if requested, even though this is a GET request
 	if notify {
-		server.logger.Tracef("trying to send notification for - %s", shortCode)
-		if err := server.sendActivationNotification(hash, decoded.Issuer, []byte(theJWT)); err != nil {
-			server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
+		h.logger.Tracef("trying to send notification for - %s", shortCode)
+		if err := h.sendActivationNotification(hash, decoded.Issuer, []byte(theJWT)); err != nil {
+			h.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
 			return
 		}
 	}
 
 	w.Header().Set("Etag", e)
 
-	cacheControl := server.cacheControlForExpiration(hash, decoded.Expires)
+	cacheControl := cacheControlForExpiration(hash, decoded.Expires)
 
 	if cacheControl != "" {
 		w.Header().Set("Cache-Control", cacheControl)
@@ -140,8 +157,8 @@ func (server *AccountServer) GetActivationJWT(w http.ResponseWriter, r *http.Req
 	_, err = w.Write([]byte(theJWT))
 
 	if err != nil {
-		server.logger.Errorf("error writing JWT for %s - %s", shortCode, err.Error())
+		h.logger.Errorf("error writing JWT for %s - %s", shortCode, err.Error())
 	} else {
-		server.logger.Tracef("returning JWT for - %s", shortCode)
+		h.logger.Tracef("returning JWT for - %s", shortCode)
 	}
 }

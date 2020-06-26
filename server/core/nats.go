@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/jwt/v2"
-	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/jwt/v2" // only used to decode
+	"github.com/nats-io/nats.go"
 )
 
 const (
@@ -140,8 +140,10 @@ func (server *AccountServer) getNatsConnection() *nats.Conn {
 	return conn
 }
 
-func (server *AccountServer) sendAccountNotification(claim *jwt.AccountClaims, theJWT []byte) error {
-	pubKey := claim.Subject
+func (server *AccountServer) sendAccountNotification(pubKey string, theJWT []byte) error {
+	if pubKey == "" {
+		return nil
+	}
 
 	if server.nats == nil {
 		server.logger.Noticef("skipping notification for %s, no NATS configured", ShortKey(pubKey))
@@ -162,12 +164,10 @@ func (server *AccountServer) handleAccountNotification(msg *nats.Msg) {
 	}
 
 	pubKey := claim.Subject
-	server.Lock()
 	jwtStore := server.jwtStore
-	server.Unlock()
 
 	if jwtStore != nil {
-		if err = jwtStore.Save(pubKey, theJWT); err != nil {
+		if err = jwtStore.SaveAcc(pubKey, theJWT); err != nil {
 			server.logger.Warnf("Received error when saving jwt: %s", err)
 			return
 		}
@@ -199,9 +199,26 @@ func (server *AccountServer) handleActivationNotification(msg *nats.Msg) {
 		return
 	}
 
-	err = server.jwtStore.Save(hash, theJWT)
+	err = server.jwtStore.SaveAcc(hash, theJWT)
 	if err != nil {
 		server.logger.Errorf("unable to save activation token in notification, %s", hash)
 		return
+	}
+}
+
+func (server *AccountServer) accountSignatureRequest(pubKey string, theJWT []byte) (theJwt []byte, msg string, err error) {
+	to := time.Duration(server.config.SignRequestTimeout) * time.Millisecond
+	if msg, err := server.getNatsConnection().Request(server.config.SignRequestSubject, theJWT, to); err != nil {
+		if err == nats.ErrInvalidConnection {
+			return nil, "Failure during signature request. nats-server unavailable.", err
+		} else if err == nats.ErrTimeout {
+			return nil, "Failure during signature request. signing service unavailable.", err
+		} else {
+			return nil, "Failure during signature request. Try again at a later time. Error: " + err.Error(), err
+		}
+	} else if _, err := jwt.DecodeAccountClaims(string(msg.Data)); err != nil {
+		return nil, string(msg.Data), nil // body is
+	} else {
+		return msg.Data, "", nil
 	}
 }
