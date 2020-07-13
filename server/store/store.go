@@ -16,10 +16,6 @@
 
 package store
 
-import (
-	"fmt"
-)
-
 // JWTStore is the interface for all store implementations in the account server
 // The store provides a handful of methods for setting and getting a JWT.
 // The data doesn't really have to be a JWT, no validation is expected at this level
@@ -49,27 +45,4 @@ type PackableJWTStore interface {
 	// Pack the jwts, up to maxJWTs. If maxJWTs is negative, do not limit.
 	Pack(maxJWTs int) (string, error)
 	Merge(pack string) error
-}
-
-// JWTChanged functions are called when the store file watcher notices a JWT changed
-type JWTChanged func(publicKey string)
-
-// JWTError functions are called when the store file watcher has an error
-type JWTError func(err error)
-
-type StorageError struct {
-	msg string
-	err error
-}
-
-func NewError(msg string, wrappedErr error) error {
-	return &StorageError{msg, wrappedErr}
-}
-func (e *StorageError) Unwrap() error { return e.err }
-func (e *StorageError) Error() string { return e.msg }
-func (e *StorageError) FullError() string {
-	if e.err != nil {
-		return fmt.Sprintf("%s %s", e.msg, e.err.Error())
-	}
-	return e.msg
 }
