@@ -17,6 +17,7 @@
 package store
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ func TestShardedDirStoreWriteAndReadonly(t *testing.T) {
 	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
 	require.NoError(t, err)
 
-	store, err := NewDirJWTStore(dir, true, false, func(pubKey string) {}, func(err error) {})
+	store, err := NewDirJWTStore(dir, true, false, nil, nil)
 	require.NoError(t, err)
 
 	expected := map[string]string{
@@ -88,7 +89,7 @@ func TestUnshardedDirStoreWriteAndReadonly(t *testing.T) {
 	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
 	require.NoError(t, err)
 
-	store, err := NewDirJWTStore(dir, false, false, func(pubKey string) {}, func(err error) {})
+	store, err := NewDirJWTStore(dir, false, false, nil, nil)
 	require.NoError(t, err)
 
 	expected := map[string]string{
@@ -211,7 +212,7 @@ func TestDirStoreNotifications(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer store.Close()
-			require.False(t, store.IsReadOnly())
+			require.True(t, store.IsReadOnly())
 
 			expected := map[string]string{
 				"one":   "alpha",
@@ -221,7 +222,13 @@ func TestDirStoreNotifications(t *testing.T) {
 			}
 
 			for k, v := range expected {
-				store.SaveAcc(k, v)
+				require.Error(t, store.SaveAcc(k, v))
+				if test.sharded {
+					require.NoError(t, os.MkdirAll(fmt.Sprintf("%s/%s/", dir, k[len(k)-2:]), 0755))
+					require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/%s/%s.jwt", dir, k[len(k)-2:], k), []byte(v), 0644))
+				} else {
+					require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/%s.jwt", dir, k), []byte(v), 0644))
+				}
 			}
 
 			time.Sleep(time.Second)
@@ -233,7 +240,12 @@ func TestDirStoreNotifications(t *testing.T) {
 			}
 
 			atomic.StoreInt32(&wStoreState, 1)
-			store.SaveAcc("one", "zip")
+			require.Error(t, store.SaveAcc("one", "zip"))
+			if test.sharded {
+				require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/ne/%s.jwt", dir, "one"), []byte("zip"), 0644))
+			} else {
+				require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/%s.jwt", dir, "one"), []byte("zip"), 0644))
+			}
 
 			check := func() {
 				t.Helper()
@@ -273,7 +285,12 @@ func TestDirStoreNotifications(t *testing.T) {
 
 			atomic.StoreInt32(&roStoreState, 1)
 			atomic.StoreInt32(&wStoreState, 2)
-			store.SaveAcc("two", "zap")
+
+			if test.sharded {
+				require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/wo/%s.jwt", dir, "two"), []byte("zap"), 0644))
+			} else {
+				require.NoError(t, ioutil.WriteFile(fmt.Sprintf("%s/%s.jwt", dir, "two"), []byte("zap"), 0644))
+			}
 
 			for i := 0; i < 2; i++ {
 				check()
@@ -437,7 +454,7 @@ func TestMergeOnlyOnNewer(t *testing.T) {
 	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
 	require.NoError(t, err)
 
-	store, err := NewDirJWTStore(dir, true, false, func(pubKey string) {}, func(err error) {})
+	store, err := NewDirJWTStore(dir, true, false, nil, nil)
 	require.NoError(t, err)
 
 	dirStore := store.(*DirJWTStore)
@@ -479,4 +496,221 @@ func TestMergeOnlyOnNewer(t *testing.T) {
 	fromStore, err = dirStore.LoadAcc(pubKey)
 	require.NoError(t, err)
 	require.Equal(t, newerJWT, fromStore)
+}
+
+func createAccount(t *testing.T, dirStore *DirJWTStore, expSec int, accKey nkeys.KeyPair) {
+	pubKey, err := accKey.PublicKey()
+	require.NoError(t, err)
+
+	account := jwt.NewAccountClaims(pubKey)
+	if expSec > 0 {
+		account.Expires = time.Now().Add(time.Second * time.Duration(expSec)).Unix()
+	}
+	olderJWT, err := account.Encode(accKey)
+	require.NoError(t, err)
+	dirStore.SaveAcc(pubKey, olderJWT)
+
+}
+
+func assertStoreSize(t *testing.T, dirStore *DirJWTStore, length int) {
+	f, err := ioutil.ReadDir(dirStore.directory)
+	require.NoError(t, err)
+	require.Len(t, f, length)
+	dirStore.Lock()
+	require.Len(t, dirStore.expiration.idx, length)
+	require.Equal(t, dirStore.expiration.lru.Len(), length)
+	require.Len(t, dirStore.expiration.heap, length)
+	dirStore.Unlock()
+}
+
+func TestExpiration(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewExpiringDirJWTStore(dir, false, false, time.Millisecond*100, 10)
+	require.NoError(t, err)
+	defer store.Close()
+
+	dirStore := store.(*DirJWTStore)
+
+	account := func(expSec int) {
+		accountKey, err := nkeys.CreateAccount()
+		require.NoError(t, err)
+		createAccount(t, dirStore, expSec, accountKey)
+	}
+
+	h := dirStore.Hash()
+
+	for i := 1; i <= 5; i++ {
+		account(i * 2)
+		nh := dirStore.Hash()
+		require.NotEqual(t, h, nh)
+		h = nh
+	}
+	time.Sleep(1 * time.Second)
+	for i := 5; i > 0; i-- {
+		f, err := ioutil.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, f, i)
+		assertStoreSize(t, dirStore, i)
+
+		time.Sleep(2 * time.Second)
+
+		nh := dirStore.Hash()
+		require.NotEqual(t, h, nh)
+		h = nh
+	}
+	assertStoreSize(t, dirStore, 0)
+}
+
+func TestLimit(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewExpiringDirJWTStore(dir, false, false, time.Millisecond*100, 5)
+	require.NoError(t, err)
+	defer store.Close()
+
+	dirStore := store.(*DirJWTStore)
+
+	account := func(expSec int) {
+		accountKey, err := nkeys.CreateAccount()
+		require.NoError(t, err)
+		createAccount(t, dirStore, expSec, accountKey)
+	}
+
+	h := dirStore.Hash()
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	// update first account
+	for i := 0; i < 10; i++ {
+		createAccount(t, dirStore, 50, accountKey)
+		assertStoreSize(t, dirStore, 1)
+	}
+	// new accounts
+	for i := 0; i < 10; i++ {
+		account(i)
+		nh := dirStore.Hash()
+		require.NotEqual(t, h, nh)
+		h = nh
+	}
+	// first account should be gone now accountKey.PublicKey()
+	key, _ := accountKey.PublicKey()
+	_, err = os.Stat(fmt.Sprintf("%s/%s.jwt", dir, key))
+	require.True(t, os.IsNotExist(err))
+
+	// update first account
+	for i := 0; i < 10; i++ {
+		createAccount(t, dirStore, 50, accountKey)
+		assertStoreSize(t, dirStore, 5)
+	}
+}
+
+func TestLru(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewExpiringDirJWTStore(dir, false, false, time.Millisecond*100, 2)
+	require.NoError(t, err)
+	defer store.Close()
+
+	dirStore := store.(*DirJWTStore)
+
+	accountKey1, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	pKey1, err := accountKey1.PublicKey()
+	require.NoError(t, err)
+	accountKey2, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	accountKey3, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	pKey3, err := accountKey3.PublicKey()
+	require.NoError(t, err)
+
+	createAccount(t, dirStore, 10, accountKey1)
+	assertStoreSize(t, dirStore, 1)
+	createAccount(t, dirStore, 10, accountKey2)
+	assertStoreSize(t, dirStore, 2)
+	createAccount(t, dirStore, 10, accountKey3)
+	assertStoreSize(t, dirStore, 2)
+	_, err = os.Stat(fmt.Sprintf("%s/%s.jwt", dir, pKey1))
+	require.True(t, os.IsNotExist(err))
+
+	// update
+	createAccount(t, dirStore, 10, accountKey2)
+	assertStoreSize(t, dirStore, 2)
+	// recreate
+	createAccount(t, dirStore, 1, accountKey1)
+	assertStoreSize(t, dirStore, 2)
+	_, err = os.Stat(fmt.Sprintf("%s/%s.jwt", dir, pKey3))
+	require.True(t, os.IsNotExist(err))
+	// let key1 expire
+	time.Sleep(2 * time.Second)
+	assertStoreSize(t, dirStore, 1)
+	_, err = os.Stat(fmt.Sprintf("%s/%s.jwt", dir, pKey1))
+	require.True(t, os.IsNotExist(err))
+	// recreate key3 - no eviction
+	createAccount(t, dirStore, 10, accountKey3)
+	assertStoreSize(t, dirStore, 2)
+}
+
+func TestExpirationUpdate(t *testing.T) {
+	dir, err := ioutil.TempDir(os.TempDir(), "jwtstore_test")
+	require.NoError(t, err)
+
+	store, err := NewExpiringDirJWTStore(dir, false, false, time.Millisecond*100, 10)
+	require.NoError(t, err)
+	defer store.Close()
+
+	dirStore := store.(*DirJWTStore)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+
+	h := dirStore.Hash()
+
+	createAccount(t, dirStore, 0, accountKey)
+	nh := dirStore.Hash()
+	require.NotEqual(t, h, nh)
+	h = nh
+
+	time.Sleep(2 * time.Second)
+	f, err := ioutil.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, f, 1)
+
+	createAccount(t, dirStore, 5, accountKey)
+	nh = dirStore.Hash()
+	require.NotEqual(t, h, nh)
+	h = nh
+
+	time.Sleep(2 * time.Second)
+	f, err = ioutil.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, f, 1)
+
+	createAccount(t, dirStore, 0, accountKey)
+	nh = dirStore.Hash()
+	require.NotEqual(t, h, nh)
+	h = nh
+
+	time.Sleep(2 * time.Second)
+	f, err = ioutil.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, f, 1)
+
+	createAccount(t, dirStore, 1, accountKey)
+	nh = dirStore.Hash()
+	require.NotEqual(t, h, nh)
+	h = nh
+
+	time.Sleep(2 * time.Second)
+	f, err = ioutil.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, f, 0)
+
+	empty := [32]byte{}
+	h = dirStore.Hash()
+	require.Equal(t, h, empty)
 }

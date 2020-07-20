@@ -82,9 +82,10 @@ type NATSConfig struct {
 // if Dir is set a folder store is used, mutability is based on ReadOnly
 // otherwise a memory store is used, mutability is based on ReadOnly (which means the r/o store will be stuck empty)
 type StoreConfig struct {
-	Dir      string // the path to a folder for mutable storage
-	Shard    bool   // optional setting to shard the directory store, avoiding too many files in one folder
-	ReadOnly bool   // flag to indicate read-only status
+	Dir             string // the path to a folder for mutable storage
+	Shard           bool   // optional setting to shard the directory store, avoiding too many files in one folder
+	ReadOnly        bool   // flag to indicate read-only status
+	CleanupInterval int    // interval at which expiration is checked
 }
 
 // DefaultServerConfig generates a default configuration with
@@ -109,7 +110,8 @@ func DefaultServerConfig() *AccountServerConfig {
 			MaxReconnects:  -1,
 		},
 		Store: StoreConfig{
-			Dir: ".",
+			Dir:             ".",
+			CleanupInterval: 0,
 		}, // in memory store
 		ReplicationTimeout: 5000,
 		MaxReplicationPack: 10000,

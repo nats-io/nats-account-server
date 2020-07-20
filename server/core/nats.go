@@ -17,16 +17,21 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/jwt/v2" // only used to decode
+	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/nats-io/nats.go"
 )
 
 const (
+	accountPackRequest           = "$SYS.ACCOUNT.CLAIMS.PACK"
+	accountLookupRequest         = "$SYS.ACCOUNT.%s.CLAIMS.LOOKUP"
 	accountNotificationFormat    = "$SYS.ACCOUNT.%s.CLAIMS.UPDATE"
 	activationNotificationFormat = "$SYS.ACCOUNT.%s.CLAIMS.ACTIVATE.%s"
 )
@@ -84,7 +89,7 @@ func (server *AccountServer) connectToNATS() error {
 		nats.DisconnectHandler(server.natsDisconnected),
 		nats.ReconnectHandler(server.natsReconnected),
 		nats.ClosedHandler(server.natsClosed),
-		nats.NoEcho(),
+		nats.NoEcho(), // important so we don't receive our own update/pack requests
 	}
 
 	if config.TLS.Root != "" {
@@ -130,7 +135,132 @@ func (server *AccountServer) connectToNATS() error {
 	nc.Subscribe(subject, server.handleActivationNotification)
 
 	server.nats = nc
+
+	jwtStore, isDirStore := server.JWTStore.(*store.DirJWTStore)
+	if server.JWTStore.IsReadOnly() || !isDirStore {
+		return nil
+	}
+
+	subject = strings.Replace(accountLookupRequest, "%s", "*", -1)
+	nc.Subscribe(subject, server.handleAccountLookup)
+
+	quitChan := make(chan struct{})
+	resChan := make(chan *nats.Msg)
+	packSub, _ := nc.ChanQueueSubscribe(accountPackRequest, "responder", resChan)
+
+	server.shutdownNats = func() {
+		if packSub != nil {
+			packSub.Unsubscribe()
+		}
+		close(resChan)
+		<-quitChan
+
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		if nc.Barrier(func() { wg.Done() }) == nil {
+			wg.Wait()
+		}
+		nc.Close()
+		server.logger.Noticef("disconnected from NATS")
+	}
+
+	go func() {
+		reconnectWait := config.ReconnectWait
+		dur := time.Duration(reconnectWait) * time.Millisecond
+		t := time.NewTicker(dur)
+		defer t.Stop()
+		defer close(quitChan)
+		skipCheck := false // skip a check when server is in sync
+		for {
+			select {
+			case m := <-resChan: // Received request to sync
+				if m == nil {
+					return
+				}
+				theirHash := m.Data
+				ourHash := jwtStore.Hash()
+				if bytes.Equal(theirHash, ourHash[:]) {
+					m.Respond(nil)
+					server.logger.Debugf("pack request matches")
+					skipCheck = true
+				} else if msg, err := jwtStore.Pack(-1); err != nil {
+					// let them timeout
+					server.logger.Errorf("Error on pack: %v", err)
+				} else if len(msg) == 0 {
+					server.logger.Debugf("pack request prior to data")
+					m.Respond(nil)
+				} else {
+					server.logger.Noticef("pack request %x respond with %x / %d bytes",
+						theirHash, ourHash, len(msg))
+					m.Respond([]byte(msg))
+					m.Respond(nil)
+				}
+			case <-t.C: // periodically check if syncing is needed
+				if skipCheck {
+					skipCheck = false
+					break
+				}
+				ourHash := jwtStore.Hash()
+				server.logger.Debugf("Checking store state: %x", ourHash)
+				ib := nats.NewInbox()
+				sub, err := nc.SubscribeSync(ib)
+				if err != nil {
+					server.logger.Errorf("pack request subscribe error: %v", err)
+					break
+				}
+				if err := nc.PublishRequest(accountPackRequest, ib, ourHash[:]); err != nil {
+					server.logger.Errorf("pack request error: %v", err)
+				} else {
+					// receive until empty message
+					for msgCnt := 0; true; msgCnt++ {
+						if msg, err := sub.NextMsg(dur); err != nil {
+							if err == nats.ErrTimeout {
+								server.logger.Debugf("No responder to pack request")
+							} else {
+								server.logger.Errorf("Pack request resulted in error: %v", err)
+							}
+							break
+						} else if msg == nil || len(msg.Data) == 0 {
+							if msgCnt == 0 {
+								server.logger.Debugf("Store was in sync")
+								skipCheck = true
+							} else {
+								server.logger.Noticef("Store copied %d jwt hash: %x", msgCnt, jwtStore.Hash())
+							}
+							break
+						} else if err := jwtStore.Merge(string(msg.Data)); err != nil {
+							server.logger.Errorf("Merging resulted in error: %v", err)
+							break
+						}
+					}
+				}
+				sub.Unsubscribe()
+			}
+		}
+	}()
+	server.logger.Noticef("connected to NATS for JWT syncing")
 	return nil
+}
+
+func (server *AccountServer) handleAccountLookup(msg *nats.Msg) {
+	account := strings.TrimPrefix(msg.Subject, "$SYS.ACCOUNT.")
+	account = strings.TrimSuffix(account, ".CLAIMS.LOOKUP")
+	if len(account) == len(msg.Subject) || len(account) == 0 {
+		server.logger.Errorf("lookup %s failed parsing", msg.Subject)
+		return
+	} else if len(msg.Reply) == 0 {
+		server.logger.Tracef("lookup is not a request")
+		return
+	}
+	if theJWT, err := server.JWTStore.LoadAcc(account); err != nil {
+		server.logger.Errorf("lookup of account %s - failed %v", account, err)
+		return
+	} else if theJWT == "" {
+		server.logger.Tracef("lookup of account %s - not found", account)
+	} else {
+		server.logger.Tracef("lookup of account %s - respond %d bytes", account, len(theJWT))
+		msg.Respond([]byte(theJWT))
+	}
 }
 
 func (server *AccountServer) getNatsConnection() *nats.Conn {
@@ -164,9 +294,7 @@ func (server *AccountServer) handleAccountNotification(msg *nats.Msg) {
 	}
 
 	pubKey := claim.Subject
-	jwtStore := server.jwtStore
-
-	if jwtStore != nil {
+	if jwtStore := server.JWTStore; jwtStore != nil {
 		if err = jwtStore.SaveAcc(pubKey, theJWT); err != nil {
 			server.logger.Warnf("Received error when saving jwt: %s", err)
 			return
@@ -199,7 +327,7 @@ func (server *AccountServer) handleActivationNotification(msg *nats.Msg) {
 		return
 	}
 
-	err = server.jwtStore.SaveAcc(hash, theJWT)
+	err = server.JWTStore.SaveAcc(hash, theJWT)
 	if err != nil {
 		server.logger.Errorf("unable to save activation token in notification, %s", hash)
 		return
@@ -221,4 +349,33 @@ func (server *AccountServer) accountSignatureRequest(pubKey string, theJWT []byt
 	} else {
 		return msg.Data, "", nil
 	}
+}
+
+// Wrap store with a nats layer, so lookups can be forwarded
+func (server *AccountServer) LoadAcc(publicKey string) (string, error) {
+	if s, error := server.JWTStore.LoadAcc(publicKey); error == nil {
+		return s, nil
+	} else if msg, err := server.getNatsConnection().Request(
+		fmt.Sprintf(accountLookupRequest, publicKey), nil,
+		time.Duration(server.config.SignRequestTimeout)*time.Millisecond); err != nil {
+		return "", err
+	} else {
+		return string(msg.Data), nil
+	}
+}
+
+func (server *AccountServer) LoadAct(hash string) (string, error) {
+	return server.JWTStore.(store.JWTActivationStore).LoadAct(hash)
+}
+
+func (server *AccountServer) SaveAct(hash string, theJWT string) error {
+	return server.JWTStore.(store.JWTActivationStore).SaveAct(hash, theJWT)
+}
+
+func (server *AccountServer) Pack(maxJWTs int) (string, error) {
+	return server.JWTStore.(store.PackableJWTStore).Pack(maxJWTs)
+}
+
+func (server *AccountServer) Merge(pack string) error {
+	return server.JWTStore.(store.PackableJWTStore).Merge(pack)
 }

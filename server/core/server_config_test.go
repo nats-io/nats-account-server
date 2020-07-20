@@ -369,5 +369,5 @@ func TestFlagOverridesConfig(t *testing.T) {
 
 	require.Equal(t, server.config.Store.Dir, path)
 	require.Equal(t, server.config.HTTP.ReadTimeout, 2000)
-	require.True(t, server.jwtStore.IsReadOnly())
+	require.True(t, server.JWTStore.IsReadOnly())
 }

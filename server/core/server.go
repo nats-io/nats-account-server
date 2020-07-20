@@ -48,8 +48,9 @@ type AccountServer struct {
 	logger natsserver.Logger
 	config *conf.AccountServerConfig
 
-	nats      *nats.Conn
-	natsTimer *time.Timer
+	nats         *nats.Conn
+	natsTimer    *time.Timer
+	shutdownNats func()
 
 	listener net.Listener
 	http     *http.Server
@@ -57,8 +58,8 @@ type AccountServer struct {
 	port     int
 	hostPort string
 
-	jwtStore store.JWTStore
-	jwt      JwtHandler
+	store.JWTStore
+	jwt JwtHandler
 }
 
 // NewAccountServer creates a new account server with a default logger
@@ -194,10 +195,14 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
-	if store, err := server.createStore(); err != nil {
+	store, err := server.createStore()
+	if err != nil {
 		return err
 	} else {
-		server.jwtStore = store
+		server.JWTStore = store
+	}
+	if len(server.config.NATS.Servers) > 0 {
+		store = server
 	}
 	if err := server.initializeFromPrimary(); err != nil {
 		return err
@@ -214,7 +219,7 @@ func (server *AccountServer) Start() error {
 		return err
 	} else if sysJWT, err := server.readJWT(server.config.SystemAccountJWTPath, "system account"); err != nil {
 		return err
-	} else if err := server.jwt.Initialize(server.logger, opJWT, sysJWT, server.jwtStore, server.config.MaxReplicationPack,
+	} else if err := server.jwt.Initialize(server.logger, opJWT, sysJWT, store, server.config.MaxReplicationPack,
 		server.sendAccountNotification, server.sendActivationNotification, sign); err != nil {
 		return err
 	}
@@ -233,7 +238,7 @@ func (server *AccountServer) Start() error {
 func (server *AccountServer) jwtChangedCallback(pubKey string) {
 	if nkeys.IsValidPublicAccountKey(pubKey) {
 		server.Lock()
-		jwtStore := server.jwtStore
+		jwtStore := server.JWTStore
 		server.Unlock()
 		theJWT, err := jwtStore.LoadAcc(pubKey)
 		if err != nil {
@@ -266,10 +271,16 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 	}
 	if config.ReadOnly {
 		server.logger.Noticef("creating a read-only store at %s", config.Dir)
-		return store.NewImmutableDirJWTStore(config.Dir, config.Shard, server.jwtChangedCallback, server.storeErrorCallback)
+		return store.NewImmutableDirJWTStore(config.Dir, config.Shard,
+			server.jwtChangedCallback, server.storeErrorCallback)
+	} else if config.CleanupInterval == 0 {
+		server.logger.Noticef("creating a store with cleanup functions at %s", config.Dir)
+		return store.NewExpiringDirJWTStore(config.Dir, config.Shard, true,
+			time.Duration(config.CleanupInterval)*time.Millisecond, 0) // intentionally unlimited
+	} else {
+		server.logger.Noticef("creating a store at %s", config.Dir)
+		return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
 	}
-	server.logger.Noticef("creating a store at %s", config.Dir)
-	return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
 }
 
 func (server *AccountServer) readJWT(opPath string, jwtType string) ([]byte, error) {
@@ -303,21 +314,15 @@ func (server *AccountServer) Stop() {
 		server.natsTimer.Stop()
 	}
 
-	if server.nats != nil {
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		if server.nats.Barrier(func() { wg.Done() }) == nil {
-			wg.Wait()
-		}
-		server.nats.Close()
+	if server.shutdownNats != nil {
+		server.shutdownNats()
 		server.nats = nil
-		server.logger.Noticef("disconnected from NATS")
 	}
 
 	server.stopHTTP()
 
-	if server.jwtStore != nil {
-		server.jwtStore.Close()
+	if server.JWTStore != nil {
+		server.Close()
 		server.logger.Noticef("closed JWT store")
 	}
 	server.jwt = JwtHandler{}
@@ -329,7 +334,7 @@ func (server *AccountServer) initializeFromPrimary() error {
 	if primary == "" {
 		return nil
 	}
-	packer, ok := server.jwtStore.(store.PackableJWTStore)
+	packer, ok := server.JWTStore.(store.PackableJWTStore)
 	if !ok {
 		server.logger.Noticef("skipping initial JWT pack from primary, configured store doesn't support it")
 		return nil

@@ -17,7 +17,12 @@
 package core
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,8 +116,8 @@ func TestBadAccountNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = NewErrJWTStore()
-	errStore := server.jwtStore.(*ErrJWTStore)
+	server.JWTStore = NewErrJWTStore()
+	errStore := server.JWTStore.(*ErrJWTStore)
 
 	server.handleAccountNotification(&nats.Msg{
 		Data:    []byte("hello"),
@@ -129,8 +134,8 @@ func TestErrorCoverageOnAccountNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = NewErrJWTStore()
-	errStore := server.jwtStore.(*ErrJWTStore)
+	server.JWTStore = NewErrJWTStore()
+	errStore := server.JWTStore.(*ErrJWTStore)
 
 	operatorKey := testEnv.OperatorKey
 	accountKey, err := nkeys.CreateAccount()
@@ -183,8 +188,8 @@ func TestBadActivationNotification(t *testing.T) {
 
 	server := testEnv.Server
 
-	server.jwtStore = NewErrJWTStore()
-	errStore := server.jwtStore.(*ErrJWTStore)
+	server.JWTStore = NewErrJWTStore()
+	errStore := server.JWTStore.(*ErrJWTStore)
 
 	server.handleActivationNotification(&nats.Msg{
 		Data:    []byte("hello"),
@@ -257,8 +262,8 @@ func TestStoreErrorCoverageOnActivationNotification(t *testing.T) {
 	actJWT, err := act.Encode(accountKey)
 	require.NoError(t, err)
 
-	server.jwtStore = NewErrJWTStore()
-	errStore := server.jwtStore.(*ErrJWTStore)
+	server.JWTStore = NewErrJWTStore()
+	errStore := server.JWTStore.(*ErrJWTStore)
 
 	server.handleActivationNotification(&nats.Msg{
 		Data:    []byte(actJWT),
@@ -267,4 +272,112 @@ func TestStoreErrorCoverageOnActivationNotification(t *testing.T) {
 	require.Equal(t, 0, errStore.Loads)
 	require.Equal(t, 1, errStore.Saves)
 	require.Equal(t, 0, errStore.Closes)
+}
+
+func TestLookup(t *testing.T) {
+	config := conf.DefaultServerConfig()
+	testEnv, err := SetupTestServer(config, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	acctPubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	act := jwt.NewAccountClaims(acctPubKey)
+	jwt, err := act.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+
+	lock := sync.Mutex{}
+	received := false
+
+	url := testEnv.URLForPath(fmt.Sprintf("/jwt/v1/accounts/%s", acctPubKey))
+
+	// test lookup without responder
+	resp, err := testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusNotFound)
+
+	// test lookup when there is a responder
+	_, err = testEnv.NC.Subscribe("$SYS.ACCOUNT.*.CLAIMS.LOOKUP", func(m *nats.Msg) {
+		lock.Lock()
+		received = true
+		m.Respond([]byte(jwt))
+		lock.Unlock()
+	})
+	require.NoError(t, err)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	lock.Lock()
+	require.True(t, received)
+	lock.Unlock()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, jwt, string(body))
+
+	// test lookup when account is stored, received expected to remain false
+	lock.Lock()
+	received = false
+	lock.Unlock()
+
+	testEnv.Server.JWTStore.(*store.DirJWTStore).SaveAcc(acctPubKey, jwt)
+
+	resp, err = testEnv.HTTP.Get(url)
+	require.NoError(t, err)
+	require.True(t, resp.StatusCode == http.StatusOK)
+	lock.Lock()
+	require.False(t, received)
+	lock.Unlock()
+
+	body, err = ioutil.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, jwt, string(body))
+}
+
+func TestPack(t *testing.T) {
+	config := conf.DefaultServerConfig()
+	testEnv, err := SetupTestServer(config, false, true)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accountKey, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	acctPubKey, err := accountKey.PublicKey()
+	require.NoError(t, err)
+
+	act := jwt.NewAccountClaims(acctPubKey)
+	jwt, err := act.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+	jwtHash := sha256.Sum256([]byte(jwt))
+
+	testEnv.Server.JWTStore.(*store.DirJWTStore).SaveAcc(acctPubKey, jwt)
+
+	respChan := make(chan *nats.Msg, 10)
+
+	// test pack
+	ib := testEnv.NC.NewRespInbox()
+	sub, err := testEnv.NC.ChanSubscribe(ib, respChan)
+	require.NoError(t, err)
+	testEnv.NC.PublishRequest(accountPackRequest, ib, nil)
+	m := <-respChan
+	require.True(t, strings.HasPrefix(string(m.Data), acctPubKey+"|"))
+	require.True(t, strings.HasSuffix(string(m.Data), jwt))
+	m = <-respChan
+	require.Equal(t, m.Data, []byte{})
+	sub.Unsubscribe()
+
+	// test pack while in sync
+	ib = testEnv.NC.NewRespInbox()
+	sub, err = testEnv.NC.ChanSubscribe(ib, respChan)
+	require.NoError(t, err)
+	testEnv.NC.PublishRequest(accountPackRequest, ib, jwtHash[:])
+	m = <-respChan
+	require.Equal(t, m.Data, []byte{})
+	sub.Unsubscribe()
+
+	close(respChan)
 }
