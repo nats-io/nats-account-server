@@ -14,8 +14,11 @@
 package server
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -65,14 +68,15 @@ type Account struct {
 	js           *jsAccount
 	jsLimits     *JetStreamAccountLimits
 	limits
-	expired     bool
-	signingKeys []string
-	srv         *Server // server this account is registered with (possibly nil)
-	lds         string  // loop detection subject for leaf nodes
-	siReply     []byte  // service reply prefix, will form wildcard subscription.
-	prand       *rand.Rand
-	eventIds    *nuid.NUID
-	eventIdsMu  sync.Mutex
+	expired      bool
+	signingKeys  []string
+	srv          *Server // server this account is registered with (possibly nil)
+	lds          string  // loop detection subject for leaf nodes
+	siReply      []byte  // service reply prefix, will form wildcard subscription.
+	prand        *rand.Rand
+	eventIds     *nuid.NUID
+	eventIdsMu   sync.Mutex
+	defaultPerms *Permissions
 }
 
 // Account based limits.
@@ -103,7 +107,7 @@ type serviceImport struct {
 	acc      *Account
 	claim    *jwt.Import
 	se       *serviceExport
-	sub      *subscription
+	sid      []byte
 	from     string
 	to       string
 	exsub    string
@@ -263,7 +267,7 @@ func (a *Account) nextEventID() string {
 
 // Called to track a remote server and connections and leafnodes it
 // has for this account.
-func (a *Account) updateRemoteServer(m *AccountNumConns) {
+func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 	a.mu.Lock()
 	if a.strack == nil {
 		a.strack = make(map[string]sconns)
@@ -307,9 +311,7 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) {
 	a.mu.Unlock()
 
 	// If we have exceeded our max clients this will be populated.
-	for _, c := range clients {
-		c.maxAccountConnExceeded()
-	}
+	return clients
 }
 
 // Removes tracking for a remote server that has shutdown.
@@ -488,15 +490,19 @@ func (a *Account) TotalSubs() int {
 // for the given `subject`. Works only for literal subjects.
 // TODO: Add support for wildcards
 func (a *Account) SubscriptionInterest(subject string) bool {
-	var interest bool
+	return a.Interest(subject) > 0
+}
+
+// Interest returns the number of subscriptions for a given subject that match.
+func (a *Account) Interest(subject string) int {
+	var nms int
 	a.mu.RLock()
 	if a.sl != nil {
-		if res := a.sl.Match(subject); len(res.psubs)+len(res.qsubs) > 0 {
-			interest = true
-		}
+		res := a.sl.Match(subject)
+		nms = len(res.psubs) + len(res.qsubs)
 	}
 	a.mu.RUnlock()
-	return interest
+	return nms
 }
 
 // addClient keeps our accounting of local active clients or leafnodes updated.
@@ -1150,8 +1156,8 @@ func (a *Account) removeServiceImport(subject string) {
 	c := a.ic
 
 	if ok && si != nil {
-		if a.ic != nil && si.sub != nil && si.sub.sid != nil {
-			sid = si.sub.sid
+		if a.ic != nil && si.sid != nil {
+			sid = si.sid
 		}
 	}
 	a.mu.Unlock()
@@ -1340,10 +1346,11 @@ func (a *Account) internalClient() *client {
 }
 
 // Internal account scoped subscriptions.
-func (a *Account) subscribeInternal(c *client, subject string, cb msgHandler) (*subscription, error) {
+func (a *Account) subscribeInternal(subject string, cb msgHandler) (*subscription, error) {
 	a.mu.Lock()
-	sid := strconv.FormatUint(a.isid+1, 10)
+	c := a.internalClient()
 	a.isid++
+	sid := strconv.FormatUint(a.isid, 10)
 	a.mu.Unlock()
 
 	// This will happen in parsing when the account has not been properly setup.
@@ -1351,46 +1358,33 @@ func (a *Account) subscribeInternal(c *client, subject string, cb msgHandler) (*
 		return nil, fmt.Errorf("no internal account client")
 	}
 
-	sub, err := c.processSub([]byte(subject+" "+sid), true)
-	if err != nil {
-		return nil, err
-	}
-
-	sub.icb = cb
-	return sub, nil
+	return c.processSub([]byte(subject), nil, []byte(sid), cb, false)
 }
 
 // This will add an account subscription that matches the "from" from a service import entry.
 func (a *Account) addServiceImportSub(si *serviceImport) error {
 	a.mu.Lock()
 	c := a.internalClient()
-	sid := strconv.FormatUint(a.isid+1, 10)
-	a.mu.Unlock()
-
 	// This will happen in parsing when the account has not been properly setup.
 	if c == nil {
+		a.mu.Unlock()
 		return nil
 	}
-
-	if si.sub != nil {
+	if si.sid != nil {
+		a.mu.Unlock()
 		return fmt.Errorf("duplicate call to create subscription for service import")
 	}
-
-	sub, err := c.processSub([]byte(si.from+" "+sid), true)
-	if err != nil {
-		return err
-	}
-
-	sub.icb = func(sub *subscription, c *client, subject, reply string, msg []byte) {
-		c.processServiceImport(si, a, msg)
-	}
-
-	a.mu.Lock()
 	a.isid++
-	si.sub = sub
+	sid := strconv.FormatUint(a.isid, 10)
+	si.sid = []byte(sid)
+	subject := si.from
 	a.mu.Unlock()
 
-	return nil
+	cb := func(sub *subscription, c *client, subject, reply string, msg []byte) {
+		c.processServiceImport(si, a, msg)
+	}
+	_, err := c.processSub([]byte(subject), nil, []byte(sid), cb, true)
+	return err
 }
 
 // Remove all the subscriptions associated with service imports.
@@ -1398,9 +1392,9 @@ func (a *Account) removeAllServiceImportSubs() {
 	a.mu.RLock()
 	var sids [][]byte
 	for _, si := range a.imports.services {
-		if si.sub != nil && si.sub.sid != nil {
-			sids = append(sids, si.sub.sid)
-			si.sub = nil
+		if si.sid != nil {
+			sids = append(sids, si.sid)
+			si.sid = nil
 		}
 	}
 	c := a.ic
@@ -1482,14 +1476,12 @@ func (a *Account) createRespWildcard() []byte {
 	pre := a.siReply
 	wcsub := append(a.siReply, '>')
 	c := a.internalClient()
-	a.isid += 1
+	a.isid++
 	sid := strconv.FormatUint(a.isid, 10)
 	a.mu.Unlock()
 
 	// Create subscription and internal callback for all the wildcard response subjects.
-	if sub, _ := c.processSub([]byte(string(wcsub)+" "+sid), false); sub != nil {
-		sub.icb = a.processServiceImportResponse
-	}
+	c.processSub(wcsub, nil, []byte(sid), a.processServiceImportResponse, false)
 
 	return pre
 }
@@ -2347,7 +2339,14 @@ func (s *Server) UpdateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 		}
 	}
 	for _, i := range ac.Imports {
-		acc, err := s.lookupAccount(i.Account)
+		// check tmpAccounts with priority
+		var acc *Account
+		var err error
+		if v, ok := s.tmpAccounts.Load(i.Account); ok {
+			acc = v.(*Account)
+		} else {
+			acc, err = s.lookupAccount(i.Account)
+		}
 		if acc == nil || err != nil {
 			s.Errorf("Can't locate account [%s] for import of [%v] %s (err=%v)", i.Account, i.Subject, i.Type, err)
 			continue
@@ -2435,6 +2434,20 @@ func (s *Server) UpdateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 		})
 	}
 
+	// Now make sure we shutdown the old service import subscriptions.
+	var sids [][]byte
+	a.mu.RLock()
+	c := a.ic
+	for _, si := range old.imports.services {
+		if c != nil && si.sid != nil {
+			sids = append(sids, si.sid)
+		}
+	}
+	a.mu.RUnlock()
+	for _, sid := range sids {
+		c.processUnsub(sid)
+	}
+
 	// Now do limits if they are present.
 	a.mu.Lock()
 	a.msubs = int32(ac.Limits.Subs)
@@ -2450,6 +2463,7 @@ func (s *Server) UpdateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 			a.usersRevoked[pk] = t
 		}
 	}
+	a.defaultPerms = buildPermissionsFromJwt(&ac.DefaultPermissions)
 	a.mu.Unlock()
 
 	clients := gatherClients()
@@ -2518,16 +2532,13 @@ func (s *Server) buildInternalAccount(ac *jwt.AccountClaims) *Account {
 	return acc
 }
 
-// Helper to build internal NKeyUser.
-func buildInternalNkeyUser(uc *jwt.UserClaims, acc *Account) *NkeyUser {
-	nu := &NkeyUser{Nkey: uc.Subject, Account: acc}
-	if uc.IssuerAccount != "" {
-		nu.SigningKey = uc.Issuer
+// Helper to build Permissions from jwt.Permissions
+// or return nil if none were specified
+func buildPermissionsFromJwt(uc *jwt.Permissions) *Permissions {
+	if uc == nil {
+		return nil
 	}
-
-	// Now check for permissions.
 	var p *Permissions
-
 	if len(uc.Pub.Allow) > 0 || len(uc.Pub.Deny) > 0 {
 		if p == nil {
 			p = &Permissions{}
@@ -2554,20 +2565,69 @@ func buildInternalNkeyUser(uc *jwt.UserClaims, acc *Account) *NkeyUser {
 		}
 		validateResponsePermissions(p)
 	}
+	return p
+}
+
+// Helper to build internal NKeyUser.
+func buildInternalNkeyUser(uc *jwt.UserClaims, acc *Account) *NkeyUser {
+	nu := &NkeyUser{Nkey: uc.Subject, Account: acc}
+	if uc.IssuerAccount != "" {
+		nu.SigningKey = uc.Issuer
+	}
+
+	// Now check for permissions.
+	var p = buildPermissionsFromJwt(&uc.Permissions)
+	if p == nil && acc.defaultPerms != nil {
+		p = acc.defaultPerms.clone()
+	}
 	nu.Permissions = p
 	return nu
 }
+
+const fetchTimeout = 2 * time.Second
 
 // AccountResolver interface. This is to fetch Account JWTs by public nkeys
 type AccountResolver interface {
 	Fetch(name string) (string, error)
 	Store(name, jwt string) error
+	IsReadOnly() bool
+	Start(server *Server) error
+	IsTrackingUpdate() bool
+	Reload() error
+	Close()
+}
+
+// Default implementations of IsReadOnly/Start so only need to be written when changed
+type resolverDefaultsOpsImpl struct{}
+
+func (*resolverDefaultsOpsImpl) IsReadOnly() bool {
+	return true
+}
+
+func (*resolverDefaultsOpsImpl) IsTrackingUpdate() bool {
+	return false
+}
+
+func (*resolverDefaultsOpsImpl) Start(*Server) error {
+	return nil
+}
+
+func (*resolverDefaultsOpsImpl) Reload() error {
+	return nil
+}
+
+func (*resolverDefaultsOpsImpl) Close() {
+}
+
+func (*resolverDefaultsOpsImpl) Store(_, _ string) error {
+	return fmt.Errorf("Store operation not supported for URL Resolver")
 }
 
 // MemAccResolver is a memory only resolver.
 // Mostly for testing.
 type MemAccResolver struct {
 	sm sync.Map
+	resolverDefaultsOpsImpl
 }
 
 // Fetch will fetch the account jwt claims from the internal sync.Map.
@@ -2584,10 +2644,15 @@ func (m *MemAccResolver) Store(name, jwt string) error {
 	return nil
 }
 
+func (ur *MemAccResolver) IsReadOnly() bool {
+	return false
+}
+
 // URLAccResolver implements an http fetcher.
 type URLAccResolver struct {
 	url string
 	c   *http.Client
+	resolverDefaultsOpsImpl
 }
 
 // NewURLAccResolver returns a new resolver for the given base URL.
@@ -2603,7 +2668,7 @@ func NewURLAccResolver(url string) (*URLAccResolver, error) {
 	}
 	ur := &URLAccResolver{
 		url: url,
-		c:   &http.Client{Timeout: 2 * time.Second, Transport: tr},
+		c:   &http.Client{Timeout: fetchTimeout, Transport: tr},
 	}
 	return ur, nil
 }
@@ -2628,7 +2693,277 @@ func (ur *URLAccResolver) Fetch(name string) (string, error) {
 	return string(body), nil
 }
 
-// Store is not implemented for URL Resolver.
-func (ur *URLAccResolver) Store(name, jwt string) error {
-	return fmt.Errorf("Store operation not supported for URL Resolver")
+// Resolver based on nats for synchronization and backing directory for storage.
+type DirAccResolver struct {
+	*DirJWTStore
+	syncInterval time.Duration
+}
+
+func (dr *DirAccResolver) IsTrackingUpdate() bool {
+	return true
+}
+
+func respondToUpdate(s *Server, respSubj string, acc string, message string, err error) {
+	if err == nil {
+		s.Debugf("%s - %s", message, acc)
+	} else {
+		s.Errorf("%s - %s - %s", message, acc, err)
+	}
+	if respSubj == "" {
+		return
+	}
+	server := &ServerInfo{}
+	response := map[string]interface{}{"server": server}
+	if err == nil {
+		response["data"] = map[string]interface{}{
+			"code":    http.StatusOK,
+			"account": acc,
+			"message": message,
+		}
+	} else {
+		response["error"] = map[string]interface{}{
+			"code":        http.StatusInternalServerError,
+			"account":     acc,
+			"description": fmt.Sprintf("%s - %v", message, err),
+		}
+	}
+	s.sendInternalMsgLocked(respSubj, _EMPTY_, server, response)
+}
+
+func (dr *DirAccResolver) Start(s *Server) error {
+	dr.Lock()
+	defer dr.Unlock()
+	dr.DirJWTStore.changed = func(pubKey string) {
+		if v, ok := s.accounts.Load(pubKey); !ok {
+		} else if jwt, err := dr.LoadAcc(pubKey); err != nil {
+			s.Errorf("update got error on load: %v", err)
+		} else if err := s.updateAccountWithClaimJWT(v.(*Account), jwt); err != nil {
+			s.Errorf("update resulted in error %v", err)
+		}
+	}
+	const accountPackRequest = "$SYS.ACCOUNT.CLAIMS.PACK"
+	const accountLookupRequest = "$SYS.ACCOUNT.*.CLAIMS.LOOKUP"
+	packRespIb := s.newRespInbox()
+	// subscribe to account jwt update requests
+	if _, err := s.sysSubscribe(fmt.Sprintf(accUpdateEventSubj, "*"), func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+		tk := strings.Split(subj, tsep)
+		if len(tk) != accUpdateTokens {
+			return
+		}
+		pubKey := tk[accUpdateAccIndex]
+		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
+			respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
+		} else if claim.Subject != pubKey {
+			err := errors.New("subject does not match jwt content")
+			respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
+		} else if err := dr.save(pubKey, string(msg)); err != nil {
+			respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
+		} else {
+			respondToUpdate(s, resp, pubKey, "jwt updated", nil)
+		}
+	}); err != nil {
+		return fmt.Errorf("error setting up update handling: %v", err)
+	} else if _, err := s.sysSubscribe(accountLookupRequest, func(_ *subscription, _ *client, subj, reply string, msg []byte) {
+		// respond to lookups with our version
+		if reply == "" {
+			return
+		}
+		tk := strings.Split(subj, tsep)
+		if len(tk) != accUpdateTokens {
+			return
+		}
+		if theJWT, err := dr.DirJWTStore.LoadAcc(tk[accUpdateAccIndex]); err != nil {
+			s.Errorf("Merging resulted in error: %v", err)
+		} else {
+			s.sendInternalMsgLocked(reply, "", nil, []byte(theJWT))
+		}
+	}); err != nil {
+		return fmt.Errorf("error setting up lookup request handling: %v", err)
+	} else if _, err = s.sysSubscribeQ(accountPackRequest, "responder",
+		// respond to pack requests with one or more pack messages
+		// an empty message signifies the end of the response responder
+		func(_ *subscription, _ *client, _, reply string, theirHash []byte) {
+			if reply == "" {
+				return
+			}
+			ourHash := dr.DirJWTStore.Hash()
+			if bytes.Equal(theirHash, ourHash[:]) {
+				s.sendInternalMsgLocked(reply, "", nil, []byte{})
+				s.Debugf("pack request matches hash %x", ourHash[:])
+			} else if err := dr.DirJWTStore.PackWalk(1, func(partialPackMsg string) {
+				s.sendInternalMsgLocked(reply, "", nil, []byte(partialPackMsg))
+			}); err != nil {
+				// let them timeout
+				s.Errorf("pack request error: %v", err)
+			} else {
+				s.Debugf("pack request hash %x - finished responding with hash %x")
+				s.sendInternalMsgLocked(reply, "", nil, []byte{})
+			}
+		}); err != nil {
+		return fmt.Errorf("error setting up pack request handling: %v", err)
+	} else if _, err = s.sysSubscribe(packRespIb, func(_ *subscription, _ *client, _, _ string, msg []byte) {
+		// embed pack responses into store
+		hash := dr.DirJWTStore.Hash()
+		if len(msg) == 0 { // end of response stream
+			s.Debugf("Merging Finished and resulting in: %x", dr.DirJWTStore.Hash())
+			return
+		} else if err := dr.DirJWTStore.Merge(string(msg)); err != nil {
+			s.Errorf("Merging resulted in error: %v", err)
+		} else {
+			s.Debugf("Merging succeeded and changed %x to %x", hash, dr.DirJWTStore.Hash())
+		}
+	}); err != nil {
+		return fmt.Errorf("error setting up pack response handling: %v", err)
+	}
+	// periodically send out pack message
+	quit := s.quitCh
+	s.startGoRoutine(func() {
+		defer s.grWG.Done()
+		ticker := time.NewTicker(dr.syncInterval)
+		for {
+			select {
+			case <-quit:
+				ticker.Stop()
+				return
+			case <-ticker.C:
+			}
+			ourHash := dr.DirJWTStore.Hash()
+			s.Debugf("Checking store state: %x", ourHash)
+			s.sendInternalMsgLocked(accountPackRequest, packRespIb, nil, ourHash[:])
+		}
+	})
+	s.Noticef("Managing all jwt in exclusive directory %s", dr.directory)
+	return nil
+}
+
+func (dr *DirAccResolver) Fetch(name string) (string, error) {
+	return dr.LoadAcc(name)
+}
+
+func (dr *DirAccResolver) Store(name, jwt string) error {
+	return dr.saveIfNewer(name, jwt)
+}
+
+func NewDirAccResolver(path string, limit int64, syncInterval time.Duration) (*DirAccResolver, error) {
+	if limit == 0 {
+		limit = math.MaxInt64
+	}
+	if syncInterval <= 0 {
+		syncInterval = time.Minute
+	}
+	store, err := NewExpiringDirJWTStore(path, false, true, 0, limit, false, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &DirAccResolver{store, syncInterval}, nil
+}
+
+// Caching resolver using nats for lookups and making use of a directory for storage
+type CacheDirAccResolver struct {
+	DirAccResolver
+	*Server
+	ttl time.Duration
+}
+
+func (dr *CacheDirAccResolver) Fetch(name string) (string, error) {
+	if theJWT, _ := dr.LoadAcc(name); theJWT != "" {
+		return theJWT, nil
+	}
+	// lookup from other server
+	s := dr.Server
+	if s == nil {
+		return "", ErrNoAccountResolver
+	}
+	respC := make(chan []byte, 1)
+	accountLookupRequest := fmt.Sprintf("$SYS.ACCOUNT.%s.CLAIMS.LOOKUP", name)
+	s.mu.Lock()
+	replySubj := s.newRespInbox()
+	if s.sys == nil || s.sys.replies == nil {
+		s.mu.Unlock()
+		return "", fmt.Errorf("eventing shut down")
+	}
+	replies := s.sys.replies
+	// Store our handler.
+	replies[replySubj] = func(sub *subscription, _ *client, subject, _ string, msg []byte) {
+		clone := make([]byte, len(msg))
+		copy(clone, msg)
+		s.mu.Lock()
+		if _, ok := replies[replySubj]; ok {
+			respC <- clone // only send if there is still interest
+		}
+		s.mu.Unlock()
+	}
+	s.sendInternalMsg(accountLookupRequest, replySubj, nil, []byte{})
+	quit := s.quitCh
+	s.mu.Unlock()
+	var err error
+	var theJWT string
+	select {
+	case <-quit:
+		err = errors.New("fetching jwt failed due to shutdown")
+	case <-time.After(fetchTimeout):
+		err = errors.New("fetching jwt timed out")
+	case m := <-respC:
+		if err = dr.Store(name, string(m)); err == nil {
+			theJWT = string(m)
+		}
+	}
+	s.mu.Lock()
+	delete(replies, replySubj)
+	s.mu.Unlock()
+	close(respC)
+	return theJWT, err
+}
+
+func NewCacheDirAccResolver(path string, limit int64, ttl time.Duration) (*CacheDirAccResolver, error) {
+	if limit <= 0 {
+		limit = 1_000
+	}
+	store, err := NewExpiringDirJWTStore(path, false, true, 0, limit, true, ttl, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &CacheDirAccResolver{DirAccResolver{store, 0}, nil, ttl}, nil
+}
+
+func (dr *CacheDirAccResolver) Start(s *Server) error {
+	dr.Lock()
+	defer dr.Unlock()
+	dr.Server = s
+	dr.DirJWTStore.changed = func(pubKey string) {
+		if v, ok := s.accounts.Load(pubKey); !ok {
+		} else if jwt, err := dr.LoadAcc(pubKey); err != nil {
+			s.Errorf("update got error on load: %v", err)
+		} else if err := s.updateAccountWithClaimJWT(v.(*Account), jwt); err != nil {
+			s.Errorf("update resulted in error %v", err)
+		}
+	}
+	// subscribe to account jwt update requests
+	if _, err := s.sysSubscribe(fmt.Sprintf(accUpdateEventSubj, "*"), func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+		tk := strings.Split(subj, tsep)
+		if len(tk) != accUpdateTokens {
+			return
+		}
+		pubKey := tk[accUpdateAccIndex]
+		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
+			respondToUpdate(s, resp, pubKey, "jwt update cache resulted in error", err)
+		} else if claim.Subject != pubKey {
+			err := errors.New("subject does not match jwt content")
+			respondToUpdate(s, resp, pubKey, "jwt update cache resulted in error", err)
+		} else if _, ok := s.accounts.Load(pubKey); !ok {
+			respondToUpdate(s, resp, pubKey, "jwt update cache skipped", nil)
+		} else if err := dr.save(pubKey, string(msg)); err != nil {
+			respondToUpdate(s, resp, pubKey, "jwt update cache resulted in error", err)
+		} else {
+			respondToUpdate(s, resp, pubKey, "jwt updated cache", nil)
+		}
+	}); err != nil {
+		return fmt.Errorf("error setting up update handling: %v", err)
+	}
+	s.Noticef("Managing some jwt in exclusive directory %s", dr.directory)
+	return nil
+}
+
+func (dr *CacheDirAccResolver) Reload() error {
+	return dr.DirAccResolver.Reload()
 }

@@ -100,7 +100,7 @@ func (ms *memStore) StoreMsg(subj string, hdr, msg []byte) (uint64, int64, error
 	ts := now.UnixNano()
 
 	seq := ms.state.LastSeq + 1
-	if ms.state.FirstSeq == 0 {
+	if ms.state.Msgs == 0 {
 		ms.state.FirstSeq = seq
 		ms.state.FirstTime = now.UTC()
 	}
@@ -215,11 +215,17 @@ func (ms *memStore) expireMsgs() {
 			ms.deleteFirstMsgOrPanic()
 		} else {
 			if !ok {
-				ms.ageChk.Stop()
-				ms.ageChk = nil
+				if ms.ageChk != nil {
+					ms.ageChk.Stop()
+					ms.ageChk = nil
+				}
 			} else {
 				fireIn := time.Duration(sm.ts-now) + ms.cfg.MaxAge
-				ms.ageChk.Reset(fireIn)
+				if ms.ageChk != nil {
+					ms.ageChk.Reset(fireIn)
+				} else {
+					ms.ageChk = time.AfterFunc(fireIn, ms.expireMsgs)
+				}
 			}
 			return
 		}
@@ -234,7 +240,7 @@ func (ms *memStore) Purge() uint64 {
 	cb := ms.scb
 	bytes := int64(ms.state.Bytes)
 	ms.state.FirstSeq = ms.state.LastSeq + 1
-	ms.state.FirstTime = ms.state.LastTime
+	ms.state.FirstTime = time.Time{}
 	ms.state.Bytes = 0
 	ms.state.Msgs = 0
 	ms.msgs = make(map[uint64]*storedMsg)

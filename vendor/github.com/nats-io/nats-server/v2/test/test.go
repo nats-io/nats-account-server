@@ -216,10 +216,10 @@ func doDefaultConnect(t tLogger, c net.Conn) {
 	doConnect(t, c, false, false, false)
 }
 
-const connectProto = "CONNECT {\"verbose\":false,\"user\":\"%s\",\"pass\":\"%s\",\"name\":\"%s\"}\r\n"
+const routeConnectProto = "CONNECT {\"verbose\":false,\"user\":\"%s\",\"pass\":\"%s\",\"name\":\"%s\",\"cluster\":\"xyz\"}\r\n"
 
 func doRouteAuthConnect(t tLogger, c net.Conn, user, pass, id string) {
-	cs := fmt.Sprintf(connectProto, user, pass, id)
+	cs := fmt.Sprintf(routeConnectProto, user, pass, id)
 	sendProto(t, c, cs)
 }
 
@@ -315,6 +315,7 @@ var (
 	lsubRe    = regexp.MustCompile(`LS\+\s+([^\s]+)\s*([^\s]+)?\s*(\d+)?\r\n`)
 	lunsubRe  = regexp.MustCompile(`LS\-\s+([^\s]+)\s*([^\s]+)?\r\n`)
 	lmsgRe    = regexp.MustCompile(`(?:(?:LMSG\s+([^\s]+)\s+(?:([|+]\s+([\w\s]+)|[^\s]+)[^\S\r\n]+)?(\d+)\s*\r\n([^\\r\\n]*?)\r\n)+?)`)
+	rlsubRe   = regexp.MustCompile(`LS\+\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*([^\s]+)?\s*(\d+)?\r\n`)
 )
 
 const (

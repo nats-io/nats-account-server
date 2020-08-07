@@ -109,10 +109,10 @@ const (
 	flushOutbound                            // Marks client as having a flushOutbound call in progress.
 	noReconnect                              // Indicate that on close, this connection should not attempt a reconnect
 	closeConnection                          // Marks that closeConnection has already been called.
+	connMarkedClosed                         // Marks that markConnAsClosed has already been called.
 	writeLoopStarted                         // Marks that the writeLoop has been started.
 	skipFlushOnClose                         // Marks that flushOutbound() should not be called on connection close.
 	expectConnect                            // Marks if this connection is expected to send a CONNECT
-	allSubsSent                              // Marks this leafnode connection as having sent all subs.
 )
 
 // set the flag (would be equivalent to set the boolean to true)
@@ -174,6 +174,8 @@ const (
 	Revocation
 	InternalClient
 	MsgHeaderViolation
+	NoRespondersRequiresHeaders
+	ClusterNameConflict
 )
 
 // Some flags passed to processMsgResultsEx
@@ -191,43 +193,42 @@ type client struct {
 	// when processing inbound messages and requires the lock we want to
 	// check only when needed. This is set/get using atomic, so needs to
 	// be memory aligned.
-	cgwrt   int32
-	mpay    int32
-	msubs   int32
-	mcl     int32
-	mu      sync.Mutex
-	kind    int
-	cid     uint64
-	opts    clientOpts
-	start   time.Time
-	nonce   []byte
-	pubKey  string
-	nc      net.Conn
-	ncs     string
-	out     outbound
-	srv     *Server
-	acc     *Account
-	user    *NkeyUser
-	host    string
-	port    uint16
-	subs    map[string]*subscription
-	perms   *permissions
-	replies map[string]*resp
-	mperms  *msgDeny
-	darray  []string
-	in      readCache
-	pcd     map[*client]struct{}
-	atmr    *time.Timer
-	ping    pinfo
-	msgb    [msgScratchSize]byte
-	last    time.Time
+	cgwrt int32
+	kind  int
+	srv   *Server
+	acc   *Account
+	perms *permissions
+	in    readCache
 	parseState
-	headers bool
+	opts       clientOpts
+	rrTracking *rrTracking
+	mpay       int32
+	msubs      int32
+	mcl        int32
+	mu         sync.Mutex
+	cid        uint64
+	start      time.Time
+	nonce      []byte
+	pubKey     string
+	nc         net.Conn
+	ncs        string
+	out        outbound
+	user       *NkeyUser
+	host       string
+	port       uint16
+	subs       map[string]*subscription
+	replies    map[string]*resp
+	mperms     *msgDeny
+	darray     []string
+	pcd        map[*client]struct{}
+	atmr       *time.Timer
+	ping       pinfo
+	msgb       [msgScratchSize]byte
+	last       time.Time
+	headers    bool
 
 	rtt      time.Duration
 	rttStart time.Time
-
-	rrTracking *rrTracking
 
 	route *route
 	gw    *gateway
@@ -238,6 +239,8 @@ type client struct {
 	gwrm map[string]*gwReplyMap
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
+
+	rref byte
 
 	trace bool
 	echo  bool
@@ -401,6 +404,7 @@ type subscription struct {
 	subject []byte
 	queue   []byte
 	sid     []byte
+	origin  []byte
 	nm      int64
 	max     int64
 	qw      int32
@@ -420,25 +424,26 @@ func (s *subscription) isClosed() bool {
 }
 
 type clientOpts struct {
-	Echo        bool   `json:"echo"`
-	Verbose     bool   `json:"verbose"`
-	Pedantic    bool   `json:"pedantic"`
-	TLSRequired bool   `json:"tls_required"`
-	Nkey        string `json:"nkey,omitempty"`
-	JWT         string `json:"jwt,omitempty"`
-	Sig         string `json:"sig,omitempty"`
-	Token       string `json:"auth_token,omitempty"`
-	Username    string `json:"user,omitempty"`
-	Password    string `json:"pass,omitempty"`
-	Name        string `json:"name"`
-	Lang        string `json:"lang"`
-	Version     string `json:"version"`
-	Protocol    int    `json:"protocol"`
-	Account     string `json:"account,omitempty"`
-	AccountNew  bool   `json:"new_account,omitempty"`
-	Headers     bool   `json:"headers,omitempty"`
+	Echo         bool   `json:"echo"`
+	Verbose      bool   `json:"verbose"`
+	Pedantic     bool   `json:"pedantic"`
+	TLSRequired  bool   `json:"tls_required"`
+	Nkey         string `json:"nkey,omitempty"`
+	JWT          string `json:"jwt,omitempty"`
+	Sig          string `json:"sig,omitempty"`
+	Token        string `json:"auth_token,omitempty"`
+	Username     string `json:"user,omitempty"`
+	Password     string `json:"pass,omitempty"`
+	Name         string `json:"name"`
+	Lang         string `json:"lang"`
+	Version      string `json:"version"`
+	Protocol     int    `json:"protocol"`
+	Account      string `json:"account,omitempty"`
+	AccountNew   bool   `json:"new_account,omitempty"`
+	Headers      bool   `json:"headers,omitempty"`
+	NoResponders bool   `json:"no_responders,omitempty"`
 
-	// Routes only
+	// Routes and Leafnodes only
 	Import *SubjectPermission `json:"import,omitempty"`
 	Export *SubjectPermission `json:"export,omitempty"`
 }
@@ -490,6 +495,9 @@ func (c *client) initClient() {
 				host, port, _ := net.SplitHostPort(conn)
 				iPort, _ := strconv.Atoi(port)
 				c.host, c.port = host, uint16(iPort)
+				// Now that we have extracted host and port, escape
+				// the string because it is going to be used in Sprintf
+				conn = strings.ReplaceAll(conn, "%", "%%")
 			}
 		}
 	}
@@ -746,20 +754,36 @@ func (c *client) setPermissions(perms *Permissions) {
 			c.perms.sub.deny.Insert(sub)
 		}
 	}
+
+	// If we are a leafnode and we are the hub copy the extracted perms
+	// to resend back to soliciting server. These are reversed from the
+	// way routes interpret them since this is how the soliciting server
+	// will receive these back in an update INFO.
+	if c.isHubLeafNode() {
+		c.opts.Import = perms.Subscribe
+		c.opts.Export = perms.Publish
+	}
 }
 
 // Check to see if we have an expiration for the user JWT via base claims.
 // FIXME(dlc) - Clear on connect with new JWT.
-func (c *client) checkExpiration(claims *jwt.ClaimsData) {
+func (c *client) setExpiration(claims *jwt.ClaimsData, validFor time.Duration) {
 	if claims.Expires == 0 {
+		if validFor != 0 {
+			c.setExpirationTimer(validFor)
+		}
 		return
 	}
+	expiresAt := time.Duration(0)
 	tn := time.Now().Unix()
-	if claims.Expires < tn {
-		return
+	if claims.Expires > tn {
+		expiresAt = time.Duration(claims.Expires-tn) * time.Second
 	}
-	expiresAt := time.Duration(claims.Expires - tn)
-	c.setExpirationTimer(expiresAt * time.Second)
+	if validFor != 0 && validFor < expiresAt {
+		c.setExpirationTimer(validFor)
+	} else {
+		c.setExpirationTimer(expiresAt)
+	}
 }
 
 // This will load up the deny structure used for filtering delivered
@@ -785,9 +809,6 @@ func (c *client) writeLoop() {
 	ch := c.out.sch
 	c.mu.Unlock()
 
-	// This will clear connection state and remove it from the server.
-	defer c.teardownConn()
-
 	// Used to check that we did flush from last wake up.
 	waitOk := true
 
@@ -801,7 +822,7 @@ func (c *client) writeLoop() {
 	// buffered outbound structure for efficient writev to the underlying socket.
 	for {
 		c.mu.Lock()
-		if close = c.flags.isSet(closeConnection); !close {
+		if close = c.isClosed(); !close {
 			owtf := c.out.fsp > 0 && c.out.pb < maxBufSize && c.out.fsp < maxFlushPending
 			if waitOk && (c.out.pb == 0 || owtf) {
 				c.mu.Unlock()
@@ -816,12 +837,21 @@ func (c *client) writeLoop() {
 				}
 
 				c.mu.Lock()
-				close = c.flags.isSet(closeConnection)
+				close = c.isClosed()
 			}
 		}
 		if close {
 			c.flushAndClose(false)
 			c.mu.Unlock()
+
+			// We should always call closeConnection() to ensure that state is
+			// properly cleaned-up. It will be a no-op if already done.
+			c.closeConnection(WriteError)
+
+			// Now explicitly call reconnect(). Thanks to ref counting, we know
+			// that the reconnect will execute only after connection has been
+			// removed from the server state.
+			c.reconnect()
 			return
 		}
 		// Flush data
@@ -851,12 +881,12 @@ func (c *client) flushClients(budget time.Duration) time.Time {
 		cp.out.fsp--
 
 		// Just ignore if this was closed.
-		if cp.flags.isSet(closeConnection) {
+		if cp.isClosed() {
 			cp.mu.Unlock()
 			continue
 		}
 
-		if budget > 0 && cp.flushOutbound() {
+		if budget > 0 && cp.out.lft < 2*budget && cp.flushOutbound() {
 			budget -= cp.out.lft
 		} else {
 			cp.flushSignal()
@@ -869,7 +899,7 @@ func (c *client) flushClients(budget time.Duration) time.Time {
 
 // readLoop is the main socket read functionality.
 // Runs in its own Go routine.
-func (c *client) readLoop() {
+func (c *client) readLoop(pre []byte) {
 	// Grab the connection off the client, it will be cleared on a close.
 	// We check for that after the loop, but want to avoid a nil dereference
 	c.mu.Lock()
@@ -917,6 +947,11 @@ func (c *client) readLoop() {
 	if ws {
 		wsr = &wsReadInfo{}
 		wsr.init()
+	}
+
+	// If we have a pre parse that first.
+	if len(pre) > 0 {
+		c.parse(pre)
 	}
 
 	for {
@@ -989,7 +1024,6 @@ func (c *client) readLoop() {
 
 		// Update activity, check read buffer size.
 		c.mu.Lock()
-		closed := c.isClosed()
 
 		// Activity based on interest changes or data/msgs.
 		if c.in.msgs > 0 || c.in.subs > 0 {
@@ -1016,11 +1050,6 @@ func (c *client) readLoop() {
 
 		if dur := time.Since(start); dur >= readLoopReportThreshold {
 			c.Warnf("Readloop processing time: %v", dur)
-		}
-
-		// Check to see if we got closed, e.g. slow consumer
-		if closed {
-			return
 		}
 
 		// We could have had a read error from above but still read some data.
@@ -1250,13 +1279,13 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 }
 
 // Marks this connection has closed with the given reason.
-// Sets the closeConnection flag and skipFlushOnClose depending on the reason.
+// Sets the connMarkedClosed flag and skipFlushOnClose depending on the reason.
 // Depending on the kind of connection, the connection will be saved.
-// If a writeLoop has been started, the final flush/close/teardown will
-// be done there, otherwise flush and close of TCP connection is done here in place.
+// If a writeLoop has been started, the final flush will be done there, otherwise
+// flush and close of TCP connection is done here in place.
 // Returns true if closed in place, flase otherwise.
 // Lock is held on entry.
-func (c *client) markConnAsClosed(reason ClosedState) bool {
+func (c *client) markConnAsClosed(reason ClosedState) {
 	// Possibly set skipFlushOnClose flag even if connection has already been
 	// mark as closed. The rationale is that a connection may be closed with
 	// a reason that justifies a flush (say after sending an -ERR), but then
@@ -1269,10 +1298,10 @@ func (c *client) markConnAsClosed(reason ClosedState) bool {
 		c.flags.set(skipFlushOnClose)
 		skipFlush = true
 	}
-	if c.flags.isSet(closeConnection) {
-		return false
+	if c.flags.isSet(connMarkedClosed) {
+		return
 	}
-	c.flags.set(closeConnection)
+	c.flags.set(connMarkedClosed)
 	// For a websocket client, unless we are told not to flush, enqueue
 	// a websocket CloseMessage based on the reason.
 	if !skipFlush && c.ws != nil && !c.ws.closeSent {
@@ -1283,7 +1312,7 @@ func (c *client) markConnAsClosed(reason ClosedState) bool {
 	if c.srv != nil {
 		if c.kind == ROUTER || c.kind == GATEWAY {
 			c.Noticef("%s connection closed: %s", c.typeString(), reason)
-		} else { // Client and Leaf Node connections.
+		} else { // Client, System, Jetstream, Account and Leafnode connections.
 			c.Debugf("%s connection closed: %s", c.typeString(), reason)
 		}
 	}
@@ -1298,13 +1327,18 @@ func (c *client) markConnAsClosed(reason ClosedState) bool {
 	}
 	// If writeLoop exists, let it do the final flush, close and teardown.
 	if c.flags.isSet(writeLoopStarted) {
+		// Since we want the writeLoop to do the final flush and tcp close,
+		// we want the reconnect to be done there too. However, it should'nt
+		// happen before the connection has been removed from the server
+		// state (end of closeConnection()). This ref count allows us to
+		// guarantee that.
+		c.rref++
 		c.flushSignal()
-		return false
+		return
 	}
 	// Flush (if skipFlushOnClose is not set) and close in place. If flushing,
 	// use a small WriteDeadline.
 	c.flushAndClose(true)
-	return true
 }
 
 // flushSignal will use server to queue the flush IO operation to a pool of flushers.
@@ -1481,7 +1515,13 @@ func (c *client) processConnect(arg []byte) error {
 	lang := c.opts.Lang
 	account := c.opts.Account
 	accountNew := c.opts.AccountNew
+
+	// If websocket client and JWT not in the CONNECT, use the cookie JWT (possibly empty).
+	if ws := c.ws; ws != nil && c.opts.JWT == "" {
+		c.opts.JWT = ws.cookieJwt
+	}
 	ujwt := c.opts.JWT
+
 	// For headers both client and server need to support.
 	c.headers = supportsHeaders && c.opts.Headers
 	c.mu.Unlock()
@@ -1558,6 +1598,17 @@ func (c *client) processConnect(arg []byte) error {
 			c.sendErr(ErrBadClientProtocol.Error())
 			c.closeConnection(BadClientProtocolVersion)
 			return ErrBadClientProtocol
+		}
+		// Check to see that if no_responders is requested
+		// they have header support on as well.
+		c.mu.Lock()
+		misMatch := c.opts.NoResponders && !c.headers
+		c.mu.Unlock()
+		if misMatch {
+			c.sendErr(ErrNoRespondersRequiresHeaders.Error())
+			c.closeConnection(NoRespondersRequiresHeaders)
+			return ErrNoRespondersRequiresHeaders
+
 		}
 		if verbose {
 			c.sendOK()
@@ -1655,7 +1706,7 @@ func (c *client) maxPayloadViolation(sz int, max int32) {
 // Lock should be held.
 func (c *client) queueOutbound(data []byte) bool {
 	// Do not keep going if closed
-	if c.flags.isSet(closeConnection) {
+	if c.isClosed() {
 		return false
 	}
 
@@ -1792,7 +1843,7 @@ func (c *client) sendRTTPingLocked() bool {
 	// send the PING. But in case we have client libs that don't do that,
 	// allow the send of the PING if more than 2 secs have elapsed since
 	// the client TCP connection was accepted.
-	if !c.flags.isSet(closeConnection) &&
+	if !c.isClosed() &&
 		(c.flags.isSet(firstPongSent) || time.Since(c.start) > maxNoRTTPingBeforeFirstPong) {
 		c.sendPing()
 		return true
@@ -1842,7 +1893,6 @@ func (c *client) sendOK() {
 		c.traceOutOp("OK", nil)
 	}
 	c.enqueueProto([]byte(okProto))
-	c.pcd[c] = needFlush
 	c.mu.Unlock()
 }
 
@@ -2061,25 +2111,39 @@ func splitArg(arg []byte) [][]byte {
 	return args
 }
 
-func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) {
+func (c *client) parseSub(argo []byte, noForward bool) error {
 	// Copy so we do not reference a potentially large buffer
 	// FIXME(dlc) - make more efficient.
 	arg := make([]byte, len(argo))
 	copy(arg, argo)
 	args := splitArg(arg)
-	sub := &subscription{client: c}
+	var (
+		subject []byte
+		queue   []byte
+		sid     []byte
+	)
 	switch len(args) {
 	case 2:
-		sub.subject = args[0]
-		sub.queue = nil
-		sub.sid = args[1]
+		subject = args[0]
+		queue = nil
+		sid = args[1]
 	case 3:
-		sub.subject = args[0]
-		sub.queue = args[1]
-		sub.sid = args[2]
+		subject = args[0]
+		queue = args[1]
+		sid = args[2]
 	default:
-		return nil, fmt.Errorf("processSub Parse Error: '%s'", arg)
+		return fmt.Errorf("processSub Parse Error: '%s'", arg)
 	}
+	// If there was an error, it has been sent to the client. We don't return an
+	// error here to not close the connection as a parsing error.
+	c.processSub(subject, queue, sid, nil, noForward)
+	return nil
+}
+
+func (c *client) processSub(subject, queue, bsid []byte, cb msgHandler, noForward bool) (*subscription, error) {
+
+	// Create the subscription
+	sub := &subscription{client: c, subject: subject, queue: queue, sid: bsid, icb: cb}
 
 	c.mu.Lock()
 
@@ -2112,12 +2176,12 @@ func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) 
 			if !c.canQueueSubscribe(string(sub.subject), string(sub.queue)) {
 				c.mu.Unlock()
 				c.subPermissionViolation(sub)
-				return nil, nil
+				return nil, ErrSubscribePermissionViolation
 			}
 		} else if !c.canSubscribe(string(sub.subject)) {
 			c.mu.Unlock()
 			c.subPermissionViolation(sub)
-			return nil, nil
+			return nil, ErrSubscribePermissionViolation
 		}
 	}
 
@@ -2125,14 +2189,15 @@ func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) 
 	if c.subsAtLimit() {
 		c.mu.Unlock()
 		c.maxSubsExceeded()
-		return nil, nil
+		return nil, ErrTooManySubs
 	}
 
 	var updateGWs bool
 	var err error
 
 	// Subscribe here.
-	if c.subs[sid] == nil {
+	es := c.subs[sid]
+	if es == nil {
 		c.subs[sid] = sub
 		if acc != nil && acc.sl != nil {
 			err = acc.sl.Insert(sub)
@@ -2148,9 +2213,14 @@ func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) 
 
 	if err != nil {
 		c.sendErr("Invalid Subject")
-		return nil, nil
+		return nil, ErrMalformedSubject
 	} else if c.opts.Verbose && kind != SYSTEM {
 		c.sendOK()
+	}
+
+	// If it was already registered, return it.
+	if es != nil {
+		return es, nil
 	}
 
 	// No account just return.
@@ -2494,7 +2564,7 @@ func (c *client) processUnsub(arg []byte) error {
 
 	if unsub {
 		c.unsubscribe(acc, sub, false, true)
-		if acc != nil && kind == CLIENT || kind == SYSTEM {
+		if acc != nil && kind == CLIENT || kind == SYSTEM || kind == ACCOUNT {
 			srv.updateRouteSubscriptionMap(acc, sub, -1)
 			if updateGWs {
 				srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
@@ -2526,16 +2596,28 @@ func (c *client) checkDenySub(subject string) bool {
 	return false
 }
 
-// Create a message header for routes or leafnodes. Header aware.
+// Create a message header for routes or leafnodes. Header and origin cluster aware.
 func (c *client) msgHeaderForRouteOrLeaf(subj, reply []byte, rt *routeTarget, acc *Account) []byte {
 	hasHeader := c.pa.hdr > 0
 	canReceiveHeader := rt.sub.client.headers
 
-	kind := rt.sub.client.kind
 	mh := c.msgb[:msgHeadProtoLen]
+	kind := rt.sub.client.kind
+	var lnoc bool
+
 	if kind == ROUTER {
-		// Router (and Gateway) nodes are RMSG. Set here since leafnodes may rewrite.
-		mh[0] = 'R'
+		// If we are coming from a leaf with an origin cluster we need to handle differently
+		// if we can. We will send a route based LMSG which has origin cluster and headers
+		// by default.
+		if c.kind == LEAF && c.remoteCluster() != _EMPTY_ && rt.sub.client.route.lnoc {
+			mh[0] = 'L'
+			mh = append(mh, c.remoteCluster()...)
+			mh = append(mh, ' ')
+			lnoc = true
+		} else {
+			// Router (and Gateway) nodes are RMSG. Set here since leafnodes may rewrite.
+			mh[0] = 'R'
+		}
 		mh = append(mh, acc.Name...)
 		mh = append(mh, ' ')
 	} else {
@@ -2562,7 +2644,17 @@ func (c *client) msgHeaderForRouteOrLeaf(subj, reply []byte, rt *routeTarget, ac
 		mh = append(mh, reply...)
 		mh = append(mh, ' ')
 	}
-	if hasHeader {
+
+	if lnoc {
+		// leafnode origin LMSG always have a header entry even if zero.
+		if c.pa.hdr <= 0 {
+			mh = append(mh, '0')
+		} else {
+			mh = append(mh, c.pa.hdb...)
+		}
+		mh = append(mh, ' ')
+		mh = append(mh, c.pa.szb...)
+	} else if hasHeader {
 		if canReceiveHeader {
 			mh[0] = 'H'
 			mh = append(mh, c.pa.hdb...)
@@ -2576,8 +2668,7 @@ func (c *client) msgHeaderForRouteOrLeaf(subj, reply []byte, rt *routeTarget, ac
 	} else {
 		mh = append(mh, c.pa.szb...)
 	}
-	mh = append(mh, _CRLF_...)
-	return mh
+	return append(mh, _CRLF_...)
 }
 
 // Create a message header for clients. Header aware.
@@ -2652,7 +2743,7 @@ var needFlush = struct{}{}
 
 // deliverMsg will deliver a message to a matching subscription and its underlying client.
 // We process all connection/client types. mh is the part that will be protocol/client specific.
-func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply bool) bool {
+func (c *client) deliverMsg(sub *subscription, subject, reply, mh, msg []byte, gwrply bool) bool {
 	if sub.client == nil {
 		return false
 	}
@@ -2678,6 +2769,14 @@ func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply b
 	if sub.closed == 1 {
 		client.mu.Unlock()
 		return false
+	}
+
+	// Check if we are a leafnode and have perms to check.
+	if client.kind == LEAF && client.perms != nil {
+		if !client.pubAllowed(string(subject)) {
+			client.mu.Unlock()
+			return false
+		}
 	}
 
 	srv := client.srv
@@ -2805,8 +2904,8 @@ func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply b
 
 	// If we are tracking dynamic publish permissions that track reply subjects,
 	// do that accounting here. We only look at client.replies which will be non-nil.
-	if client.replies != nil && len(c.pa.reply) > 0 {
-		client.replies[string(c.pa.reply)] = &resp{time.Now(), 0}
+	if client.replies != nil && len(reply) > 0 {
+		client.replies[string(reply)] = &resp{time.Now(), 0}
 		if len(client.replies) > replyPermLimit {
 			client.pruneReplyPerms()
 		}
@@ -2823,10 +2922,7 @@ func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply b
 
 	// Add the data size we are responsible for here. This will be processed when we
 	// return to the top of the readLoop.
-	if _, ok := c.pcd[client]; !ok {
-		client.out.fsp++
-		c.pcd[client] = needFlush
-	}
+	c.addToPCD(client)
 
 	if client.trace {
 		client.traceOutOp(string(mh[:len(mh)-LEN_CR_LF]), nil)
@@ -2835,6 +2931,17 @@ func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply b
 	client.mu.Unlock()
 
 	return true
+}
+
+// Add the given sub's client to the list of clients that need flushing.
+// This must be invoked from `c`'s readLoop. No lock for c is required,
+// however, `client` lock must be held on entry. This holds true even
+// if `client` is same than `c`.
+func (c *client) addToPCD(client *client) {
+	if _, ok := c.pcd[client]; !ok {
+		client.out.fsp++
+		c.pcd[client] = needFlush
+	}
 }
 
 // This will track a remote reply for an exported service that has requested
@@ -3160,7 +3267,32 @@ func (c *client) processInboundClientMsg(msg []byte) bool {
 		didDeliver = c.sendMsgToGateways(c.acc, msg, c.pa.subject, c.pa.reply, qnames) || didDeliver
 	}
 
+	// Check to see if we did not deliver to anyone and the client has a reply subject set
+	// and wants notification of no_responders.
+	if !didDeliver && len(c.pa.reply) > 0 {
+		c.mu.Lock()
+		if c.opts.NoResponders {
+			if sub := c.subForReply(c.pa.reply); sub != nil {
+				proto := fmt.Sprintf("HMSG %s %s 16 16\r\nNATS/1.0 503\r\n\r\n\r\n", c.pa.reply, sub.sid)
+				c.queueOutbound([]byte(proto))
+				c.addToPCD(c)
+			}
+		}
+		c.mu.Unlock()
+	}
+
 	return didDeliver
+}
+
+// Return the subscription for this reply subject. Only look at normal subs for this client.
+func (c *client) subForReply(reply []byte) *subscription {
+	r := c.acc.sl.Match(string(reply))
+	for _, sub := range r.psubs {
+		if sub.client == c {
+			return sub
+		}
+	}
+	return nil
 }
 
 // This is invoked knowing that this client has some GW replies
@@ -3439,7 +3571,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			// Leaf node delivery audience is different however.
 			// Also leaf nodes are always no echo, so we make sure we are not
 			// going to send back to ourselves here.
-			if c != sub.client && (c.kind != ROUTER || !c.isSpokeLeafNode()) {
+			if c != sub.client && (c.kind != ROUTER || sub.client.isHubLeafNode()) {
 				c.addSubToRouteTargets(sub)
 			}
 			continue
@@ -3453,7 +3585,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		}
 		// Normal delivery
 		mh := c.msgHeader(dsubj, creply, sub)
-		didDeliver = c.deliverMsg(sub, subj, mh, msg, rplyHasGWPrefix) || didDeliver
+		didDeliver = c.deliverMsg(sub, subj, creply, mh, msg, rplyHasGWPrefix) || didDeliver
 	}
 
 	// Set these up to optionally filter based on the queue lists.
@@ -3464,11 +3596,11 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	// Declared here because of goto.
 	var queues [][]byte
 
-	// For all non-client connections, we may still want to send messages to
+	// For all routes/leaf/gateway connections, we may still want to send messages to
 	// leaf nodes or routes even if there are no queue filters since we collect
 	// them above and do not process inline like normal clients.
 	// However, do select queue subs if asked to ignore empty queue filter.
-	if (c.kind != CLIENT && c.kind != JETSTREAM && c.kind != ACCOUNT) && qf == nil && flags&pmrIgnoreEmptyQueueFilter == 0 {
+	if (c.kind == LEAF || c.kind == ROUTER || c.kind == GATEWAY) && qf == nil && flags&pmrIgnoreEmptyQueueFilter == 0 {
 		goto sendToRoutesOrLeafs
 	}
 
@@ -3508,10 +3640,12 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			ql := _ql[:0]
 			for i := 0; i < len(qsubs); i++ {
 				sub = qsubs[i]
-				if sub.client.kind == CLIENT {
+				if sub.client.kind == LEAF || sub.client.kind == ROUTER {
+					if rsub == nil {
+						rsub = sub
+					}
+				} else {
 					ql = append(ql, sub)
-				} else if rsub == nil {
-					rsub = sub
 				}
 			}
 			qsubs = ql
@@ -3566,7 +3700,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			// "rreply" will be stripped of the $GNR prefix (if present)
 			// for client connections only.
 			mh := c.msgHeader(dsubj, rreply, sub)
-			if c.deliverMsg(sub, subject, mh, msg, rplyHasGWPrefix) {
+			if c.deliverMsg(sub, subject, rreply, mh, msg, rplyHasGWPrefix) {
 				didDeliver = true
 				// Clear rsub
 				rsub = nil
@@ -3607,8 +3741,27 @@ sendToRoutesOrLeafs:
 	// We have inline structs for memory layout and cache coherency.
 	for i := range c.in.rts {
 		rt := &c.in.rts[i]
+		// Check if we have an origin cluster set from a leafnode message.
+		// If so make sure we do not send it back to the same cluster for a different
+		// leafnode. Cluster wide no echo.
+		if rt.sub.client.kind == LEAF {
+			// Check two scenarios. One is inbound from a route (c.pa.origin)
+			if c.kind == ROUTER && len(c.pa.origin) > 0 {
+				if string(c.pa.origin) == rt.sub.client.remoteCluster() {
+					continue
+				}
+			}
+			// The other is leaf to leaf.
+			if c.kind == LEAF {
+				src, dest := c.remoteCluster(), rt.sub.client.remoteCluster()
+				if src != _EMPTY_ && src == dest {
+					continue
+				}
+			}
+		}
+
 		mh := c.msgHeaderForRouteOrLeaf(subject, reply, rt, acc)
-		didDeliver = c.deliverMsg(rt.sub, subject, mh, msg, false) || didDeliver
+		didDeliver = c.deliverMsg(rt.sub, subject, reply, mh, msg, false) || didDeliver
 	}
 	return didDeliver, queues
 }
@@ -3749,6 +3902,7 @@ func (c *client) flushAndClose(minimalFlush bool) {
 	if c.nc != nil {
 		c.nc.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		c.nc.Close()
+		c.nc = nil
 	}
 }
 
@@ -3761,7 +3915,7 @@ func (c *client) typeString() string {
 	case GATEWAY:
 		return "Gateway"
 	case LEAF:
-		return "LeafNode"
+		return "Leafnode"
 	case JETSTREAM:
 		return "JetStream"
 	case ACCOUNT:
@@ -3861,51 +4015,23 @@ func (c *client) closeConnection(reason ClosedState) {
 		c.mu.Unlock()
 		return
 	}
-	// This will set the closeConnection flag and save the connection, etc..
-	// Will return true if no writeLoop was started and TCP connection was
-	// closed in place, in which case we need to do the teardown.
-	teardownNow := c.markConnAsClosed(reason)
-	c.mu.Unlock()
-
-	if teardownNow {
-		c.teardownConn()
-	}
-}
-
-// Clear the state of this connection and remove it from the server.
-// If the connection was initiated (such as ROUTE, GATEWAY, etc..) this may trigger
-// a reconnect. This function MUST be called only once per connection. It normally
-// happens when the writeLoop returns, or in closeConnection() if no writeLoop has
-// been started.
-func (c *client) teardownConn() {
-	c.mu.Lock()
-
-	// Be consistent with the creation: for routes and gateways,
-	// we use Noticef on create, so use that too for delete.
-	if c.srv != nil {
-		if c.kind == ROUTER || c.kind == GATEWAY {
-			c.Noticef("%s connection closed", c.typeString())
-		} else { // Client, System, Jetstream, Account and Leafnode connections.
-			c.Debugf("%s connection closed", c.typeString())
-		}
-	}
-
+	// Note that we may have markConnAsClosed() invoked before closeConnection(),
+	// so don't set this to 1, instead bump the count.
+	c.rref++
+	c.flags.set(closeConnection)
 	c.clearAuthTimer()
 	c.clearPingTimer()
+	c.markConnAsClosed(reason)
+
 	// Unblock anyone who is potentially stalled waiting on us.
 	if c.out.stc != nil {
 		close(c.out.stc)
 		c.out.stc = nil
 	}
-	c.nc = nil
 
 	var (
-		retryImplicit bool
 		connectURLs   []string
 		wsConnectURLs []string
-		gwName        string
-		gwIsOutbound  bool
-		gwCfg         *gatewayCfg
 		kind          = c.kind
 		srv           = c.srv
 		noReconnect   = c.flags.isSet(noReconnect)
@@ -3928,16 +4054,8 @@ func (c *client) teardownConn() {
 	}
 
 	if c.route != nil {
-		if !noReconnect {
-			retryImplicit = c.route.retry
-		}
 		connectURLs = c.route.connectURLs
 		wsConnectURLs = c.route.wsConnURLs
-	}
-	if kind == GATEWAY {
-		gwName = c.gw.name
-		gwIsOutbound = c.gw.outbound
-		gwCfg = c.gw.cfg
 	}
 
 	// If we have remote latency tracking running shut that down.
@@ -4007,6 +4125,38 @@ func (c *client) teardownConn() {
 	if noReconnect {
 		return
 	}
+
+	c.reconnect()
+}
+
+// Depending on the kind of connections, this may attempt to recreate a connection.
+// The actual reconnect attempt will be started in a go routine.
+func (c *client) reconnect() {
+	var (
+		retryImplicit bool
+		gwName        string
+		gwIsOutbound  bool
+		gwCfg         *gatewayCfg
+	)
+
+	c.mu.Lock()
+	// Decrease the ref count and perform the reconnect only if == 0.
+	c.rref--
+	if c.flags.isSet(noReconnect) || c.rref > 0 {
+		c.mu.Unlock()
+		return
+	}
+	if c.route != nil {
+		retryImplicit = c.route.retry
+	}
+	kind := c.kind
+	if kind == GATEWAY {
+		gwName = c.gw.name
+		gwIsOutbound = c.gw.outbound
+		gwCfg = c.gw.cfg
+	}
+	srv := c.srv
+	c.mu.Unlock()
 
 	// Check for a solicited route. If it was, start up a reconnect unless
 	// we are already connected to the other end.
@@ -4219,10 +4369,10 @@ func (c *client) getAuthUser() string {
 	}
 }
 
-// isClosed returns true if either closeConnection or clearConnection
+// isClosed returns true if either closeConnection or connMarkedClosed
 // flag have been set, or if `nc` is nil, which may happen in tests.
 func (c *client) isClosed() bool {
-	return c.flags.isSet(closeConnection) || c.nc == nil
+	return c.flags.isSet(closeConnection) || c.flags.isSet(connMarkedClosed) || c.nc == nil
 }
 
 // Logging functionality scoped to a client or route.

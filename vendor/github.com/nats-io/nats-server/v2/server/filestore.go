@@ -65,22 +65,23 @@ type FileConsumerInfo struct {
 }
 
 type fileStore struct {
-	mu      sync.RWMutex
-	state   StreamState
-	scb     func(int64)
-	ageChk  *time.Timer
-	syncTmr *time.Timer
-	cfg     FileStreamInfo
-	fcfg    FileStoreConfig
-	lmb     *msgBlock
-	blks    []*msgBlock
-	hh      hash.Hash64
-	wmb     *bytes.Buffer
-	fch     chan struct{}
-	qch     chan struct{}
-	cfs     []*consumerFileStore
-	closed  bool
-	sips    int
+	mu       sync.RWMutex
+	state    StreamState
+	scb      func(int64)
+	ageChk   *time.Timer
+	syncTmr  *time.Timer
+	cfg      FileStreamInfo
+	fcfg     FileStoreConfig
+	lmb      *msgBlock
+	blks     []*msgBlock
+	hh       hash.Hash64
+	wmb      *bytes.Buffer
+	fch      chan struct{}
+	qch      chan struct{}
+	cfs      []*consumerFileStore
+	closed   bool
+	expiring bool
+	sips     int
 }
 
 // Represents a message store block and its data.
@@ -607,7 +608,7 @@ func (fs *fileStore) StoreMsg(subj string, hdr, msg []byte) (uint64, int64, erro
 	}
 	fs.kickFlusher()
 
-	if fs.state.FirstSeq == 0 {
+	if fs.state.Msgs == 0 {
 		fs.state.FirstSeq = seq
 		fs.state.FirstTime = time.Unix(0, ts).UTC()
 	}
@@ -714,7 +715,9 @@ func (fs *fileStore) removeMsg(seq uint64, secure bool) (bool, error) {
 	sm, _ := mb.fetchMsg(seq)
 	// We have the message here, so we can delete it.
 	if sm != nil {
-		fs.deleteMsgFromBlock(mb, seq, sm, secure)
+		if err := fs.deleteMsgFromBlock(mb, seq, sm, secure); err != nil {
+			return false, err
+		}
 	}
 	return sm != nil, nil
 }
@@ -770,7 +773,7 @@ func (mb *msgBlock) selectNextFirst() {
 	}
 }
 
-func (fs *fileStore) deleteMsgFromBlock(mb *msgBlock, seq uint64, sm *fileStoredMsg, secure bool) {
+func (fs *fileStore) deleteMsgFromBlock(mb *msgBlock, seq uint64, sm *fileStoredMsg, secure bool) error {
 	// Update global accounting.
 	msz := fileStoreMsgSize(sm.subj, sm.hdr, sm.msg)
 
@@ -778,17 +781,34 @@ func (fs *fileStore) deleteMsgFromBlock(mb *msgBlock, seq uint64, sm *fileStored
 	mb.mu.Lock()
 
 	// Make sure the seq still exists.
+	if mb.cache == nil {
+		// Rare condition but can happen. We will load with lock held at this point.
+		buf, err := ioutil.ReadFile(mb.mfn)
+		if err == nil {
+			err = mb.indexCacheBuf(buf)
+		}
+		if err != nil {
+			mb.mu.Unlock()
+			fs.mu.Unlock()
+			return err
+		}
+		if len(buf) > 0 {
+			mb.cloads++
+			mb.startCacheExpireTimer()
+		}
+	}
+
 	if seq < mb.cache.fseq || (seq-mb.cache.fseq) >= uint64(len(mb.cache.idx)) {
 		mb.mu.Unlock()
 		fs.mu.Unlock()
-		return
+		return nil
 	}
 	// Now check dmap if it is there.
 	if mb.dmap != nil {
 		if _, ok := mb.dmap[seq]; ok {
 			mb.mu.Unlock()
 			fs.mu.Unlock()
-			return
+			return nil
 		}
 	}
 
@@ -846,6 +866,8 @@ func (fs *fileStore) deleteMsgFromBlock(mb *msgBlock, seq uint64, sm *fileStored
 		delta := int64(msz)
 		fs.scb(-delta)
 	}
+
+	return nil
 }
 
 // Lock should be held.
@@ -888,6 +910,21 @@ func (fs *fileStore) expireMsgsLocked() {
 
 // Will expire msgs that are too old.
 func (fs *fileStore) expireMsgs() {
+	// Make sure this is only running one at a time.
+	fs.mu.Lock()
+	if fs.expiring {
+		fs.mu.Unlock()
+		return
+	}
+	fs.expiring = true
+	fs.mu.Unlock()
+
+	defer func() {
+		fs.mu.Lock()
+		fs.expiring = false
+		fs.mu.Unlock()
+	}()
+
 	now := time.Now().UnixNano()
 	minAge := now - int64(fs.cfg.MaxAge)
 
@@ -1361,7 +1398,13 @@ func (mb *msgBlock) indexCacheBuf(buf []byte) error {
 func (mb *msgBlock) loadMsgs() error {
 	mb.mu.RLock()
 	mfn := mb.mfn
+	hasCache := mb.cache != nil
 	mb.mu.RUnlock()
+
+	// Someone else may have filled this in by the time we get here.
+	if hasCache {
+		return nil
+	}
 
 	// Load in the whole block.
 	buf, err := ioutil.ReadFile(mfn)
@@ -1568,11 +1611,12 @@ func (fs *fileStore) LoadMsg(seq uint64) (string, []byte, []byte, int64, error) 
 	return "", nil, nil, 0, err
 }
 
+// State returns the current state of the stream.
 func (fs *fileStore) State() StreamState {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
 	state := fs.state
 	state.Consumers = len(fs.cfs)
+	fs.mu.RUnlock()
 	return state
 }
 

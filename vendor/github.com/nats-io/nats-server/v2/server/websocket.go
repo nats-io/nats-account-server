@@ -90,6 +90,7 @@ type websocket struct {
 	closeSent  bool
 	browser    bool
 	compressor *flate.Writer
+	cookieJwt  string
 }
 
 type srvWebsocket struct {
@@ -100,7 +101,10 @@ type srvWebsocket struct {
 	allowedOrigins map[string]*allowedOrigin // host will be the key
 	sameOrigin     bool
 	connectURLs    []string
-	connectURLsMap map[string]struct{}
+	connectURLsMap refCountedUrlSet
+	users          map[string]*User
+	nkeys          map[string]*NkeyUser
+	authOverride   bool // indicate if there is auth override in websocket config
 }
 
 type allowedOrigin struct {
@@ -594,6 +598,11 @@ func (s *Server) wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsUpgradeRe
 	if ua := r.Header.Get("User-Agent"); ua != "" && strings.HasPrefix(ua, "Mozilla/") {
 		ws.browser = true
 	}
+	if opts.Websocket.JWTCookie != "" {
+		if c, err := r.Cookie(opts.Websocket.JWTCookie); err == nil && c != nil {
+			ws.cookieJwt = c.Value
+		}
+	}
 	return &wsUpgradeResult{conn: conn, ws: ws}, nil
 }
 
@@ -722,14 +731,33 @@ func validateWebsocketOptions(o *Options) error {
 	if wo.Port == 0 {
 		return nil
 	}
-	// Enforce TLS...
-	if wo.TLSConfig == nil {
+	// Enforce TLS... unless NoTLS is set to true.
+	if wo.TLSConfig == nil && !wo.NoTLS {
 		return errors.New("websocket requires TLS configuration")
 	}
 	// Make sure that allowed origins, if specified, can be parsed.
 	for _, ao := range wo.AllowedOrigins {
 		if _, err := url.Parse(ao); err != nil {
 			return fmt.Errorf("unable to parse allowed origin: %v", err)
+		}
+	}
+	// If there is a NoAuthUser, we need to have Users defined and
+	// the user to be present.
+	if wo.NoAuthUser != _EMPTY_ {
+		if wo.Users == nil {
+			return fmt.Errorf("websocket no_auth_user %q configured, but users are not", wo.NoAuthUser)
+		}
+		for _, u := range wo.Users {
+			if u.Username == wo.NoAuthUser {
+				return nil
+			}
+		}
+		return fmt.Errorf("websocket no_auth_user %q not found in users configuration", wo.NoAuthUser)
+	}
+	// Using JWT requires Trusted Keys
+	if wo.JWTCookie != "" {
+		if len(o.TrustedOperators) == 0 && len(o.TrustedKeys) == 0 {
+			return fmt.Errorf("trusted operators or trusted keys configuration is required for JWT authentication via cookie %q", wo.JWTCookie)
 		}
 	}
 	return nil
@@ -763,6 +791,26 @@ func (s *Server) wsSetOriginOptions(o *WebsocketOpts) {
 	}
 }
 
+// Given the websocket options, we check if any auth configuration
+// has been provided. If so, possibly create users/nkey users and
+// store them in s.websocket.users/nkeys.
+// Also update a boolean that indicates if auth is required for
+// websocket clients.
+// Server lock is held on entry.
+func (s *Server) wsConfigAuth(opts *WebsocketOpts) {
+	ws := &s.websocket
+	if len(opts.Nkeys) > 0 || len(opts.Users) > 0 {
+		ws.nkeys, ws.users = s.buildNkeysAndUsersFromOptions(opts.Nkeys, opts.Users)
+		ws.authOverride = true
+	} else if opts.Username != "" || opts.Token != "" {
+		ws.authOverride = true
+	} else {
+		ws.users = nil
+		ws.nkeys = nil
+		ws.authOverride = false
+	}
+}
+
 func (s *Server) startWebsocketServer() {
 	sopts := s.getOpts()
 	o := &sopts.Websocket
@@ -784,22 +832,33 @@ func (s *Server) startWebsocketServer() {
 	// that we expect users to send JWTs with bearer tokens and we want to
 	// avoid the possibility of it being "intercepted".
 
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return
+	}
+	// Do not check o.NoTLS here. If a TLS configuration is available, use it,
+	// regardless of NoTLS. If we don't have a TLS config, it means that the
+	// user has configured NoTLS because otherwise the server would have failed
+	// to start due to options validation.
 	if o.TLSConfig != nil {
 		proto = "wss"
 		config := o.TLSConfig.Clone()
-		config.ClientAuth = tls.NoClientCert
 		hl, err = tls.Listen("tcp", hp, config)
 	} else {
 		proto = "ws"
 		hl, err = net.Listen("tcp", hp)
 	}
 	if err != nil {
+		s.mu.Unlock()
 		s.Fatalf("Unable to listen for websocket connections: %v", err)
 		return
 	}
 	s.Noticef("Listening for websocket clients on %s://%s:%d", proto, o.Host, port)
+	if proto == "ws" {
+		s.Warnf("Websocket not configured with TLS. DO NOT USE IN PRODUCTION!")
+	}
 
-	s.mu.Lock()
 	s.websocket.tls = proto == "wss"
 	if port == 0 {
 		s.opts.Websocket.Port = hl.Addr().(*net.TCPAddr).Port
@@ -828,16 +887,20 @@ func (s *Server) startWebsocketServer() {
 	}
 	s.websocket.server = hs
 	s.websocket.listener = hl
-	s.mu.Unlock()
-
-	s.startGoRoutine(func() {
-		defer s.grWG.Done()
-
+	go func() {
 		if err := hs.Serve(hl); err != http.ErrServerClosed {
 			s.Fatalf("websocket listener error: %v", err)
 		}
+		if s.isLameDuckMode() {
+			// Signal that we are not accepting new clients
+			s.ldmCh <- true
+			// Now wait for the Shutdown...
+			<-s.quitCh
+			return
+		}
 		s.done <- true
-	})
+	}()
+	s.mu.Unlock()
 }
 
 type wsCaptureHTTPServerLog struct {

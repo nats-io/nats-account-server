@@ -48,6 +48,7 @@ type AccountServer struct {
 	logger natsserver.Logger
 	config *conf.AccountServerConfig
 
+	respSeqNo    int64
 	nats         *nats.Conn
 	natsTimer    *time.Timer
 	shutdownNats func()
@@ -60,12 +61,16 @@ type AccountServer struct {
 
 	store.JWTStore
 	jwt JwtHandler
+	id  string
 }
 
 // NewAccountServer creates a new account server with a default logger
 func NewAccountServer() *AccountServer {
+	kp, _ := nkeys.CreateServer()
+	pub, _ := kp.PublicKey()
 	ac := &AccountServer{
 		logger: NewNilLogger(),
+		id:     pub,
 	}
 	return ac
 }
@@ -111,8 +116,7 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 
 	if flags.Directory != "" {
 		server.config.Store = conf.StoreConfig{
-			Dir:      flags.Directory,
-			ReadOnly: flags.ReadOnly,
+			Dir: flags.Directory,
 		}
 	}
 
@@ -204,9 +208,13 @@ func (server *AccountServer) Start() error {
 	if len(server.config.NATS.Servers) > 0 {
 		store = server
 	}
-	if err := server.initializeFromPrimary(); err != nil {
+	server.Unlock()
+	err = server.initializeFromPrimary()
+	server.Lock()
+	if err != nil {
 		return err
 	}
+
 	if err := server.connectToNATS(); err != nil {
 		return err
 	}
@@ -239,7 +247,11 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 	if nkeys.IsValidPublicAccountKey(pubKey) {
 		server.Lock()
 		jwtStore := server.JWTStore
+		nc := server.nats
 		server.Unlock()
+		if nc == nil {
+			return
+		}
 		theJWT, err := jwtStore.LoadAcc(pubKey)
 		if err != nil {
 			server.logger.Noticef("error trying to send notification from file change for %s, %s", ShortKey(pubKey), err.Error())
@@ -259,28 +271,14 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 	}
 }
 
-func (server *AccountServer) storeErrorCallback(err error) {
-	server.logger.Errorf("The NSC store encountered an error, shutting down ...")
-	server.Stop()
-}
-
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
 	if config.Dir == "" {
 		return nil, fmt.Errorf("store directory is required")
 	}
-	if config.ReadOnly {
-		server.logger.Noticef("creating a read-only store at %s", config.Dir)
-		return store.NewImmutableDirJWTStore(config.Dir, config.Shard,
-			server.jwtChangedCallback, server.storeErrorCallback)
-	} else if config.CleanupInterval == 0 {
-		server.logger.Noticef("creating a store with cleanup functions at %s", config.Dir)
-		return store.NewExpiringDirJWTStore(config.Dir, config.Shard, true,
-			time.Duration(config.CleanupInterval)*time.Millisecond, 0) // intentionally unlimited
-	} else {
-		server.logger.Noticef("creating a store at %s", config.Dir)
-		return store.NewDirJWTStore(config.Dir, config.Shard, true, nil, nil)
-	}
+	server.logger.Noticef("creating a store with cleanup functions at %s", config.Dir)
+	return natsserver.NewExpiringDirJWTStore(config.Dir, config.Shard, true,
+		time.Duration(config.CleanupInterval)*time.Millisecond, 0, false, 0, server.jwtChangedCallback)
 }
 
 func (server *AccountServer) readJWT(opPath string, jwtType string) ([]byte, error) {
@@ -314,8 +312,11 @@ func (server *AccountServer) Stop() {
 		server.natsTimer.Stop()
 	}
 
-	if server.shutdownNats != nil {
-		server.shutdownNats()
+	shutdown := server.shutdownNats
+	if shutdown != nil {
+		server.Unlock()
+		shutdown()
+		server.Lock()
 		server.nats = nil
 	}
 

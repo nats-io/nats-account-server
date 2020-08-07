@@ -21,10 +21,16 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	gnatsd "github.com/nats-io/nats-server/v2/test"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
@@ -324,7 +330,8 @@ func TestLookup(t *testing.T) {
 	received = false
 	lock.Unlock()
 
-	testEnv.Server.JWTStore.(*store.DirJWTStore).SaveAcc(acctPubKey, jwt)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey, jwt)
+	require.NoError(t, err)
 
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
@@ -354,7 +361,8 @@ func TestPack(t *testing.T) {
 	require.NoError(t, err)
 	jwtHash := sha256.Sum256([]byte(jwt))
 
-	testEnv.Server.JWTStore.(*store.DirJWTStore).SaveAcc(acctPubKey, jwt)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey, jwt)
+	require.NoError(t, err)
 
 	respChan := make(chan *nats.Msg, 10)
 
@@ -380,4 +388,138 @@ func TestPack(t *testing.T) {
 	sub.Unsubscribe()
 
 	close(respChan)
+}
+
+func createConfFile(t *testing.T, content []byte) string {
+	t.Helper()
+	conf, err := ioutil.TempFile("", "")
+	if err != nil {
+		t.Fatalf("Error creating conf file: %v", err)
+	}
+	fName := conf.Name()
+	conf.Close()
+	if err := ioutil.WriteFile(fName, content, 0666); err != nil {
+		os.Remove(fName)
+		t.Fatalf("Error writing conf file: %v", err)
+	}
+	return fName
+}
+
+func TestFullDirNatsResolver(t *testing.T) {
+	config := conf.DefaultServerConfig()
+	testEnv, err := SetupTestServer(config, false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accKey1, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	acctPubKey1, err := accKey1.PublicKey()
+	require.NoError(t, err)
+	accC1 := jwt.NewAccountClaims(acctPubKey1)
+	accJwt1, err := accC1.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+
+	accKey2, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	acctPubKey2, err := accKey2.PublicKey()
+	require.NoError(t, err)
+	accC2 := jwt.NewAccountClaims(acctPubKey2)
+	accJwt2, err := accC2.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+
+	// store jwt in account server
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
+	require.NoError(t, err)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, testEnv.SystemAccountJWTFile)
+	require.NoError(t, err)
+
+	dirA, err := ioutil.TempDir("", "srv-a")
+	defer os.RemoveAll(dirA)
+	require.NoError(t, err)
+	err = ioutil.WriteFile(fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey2), []byte(accJwt2), 0666)
+	require.NoError(t, err)
+	confA := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: %d
+		server_name: srv-A
+		operator: %s
+		system_account: %s
+		resolver: {
+			type: full
+			dir: %s
+			interval: "1s"
+		}
+    `, atomic.LoadUint64(&port)-1, testEnv.OperatorJWTFile, testEnv.SystemAccountPubKey, dirA)))
+	defer os.Remove(confA)
+	srv, _ := gnatsd.RunServerWithConfig(confA)
+	defer srv.Shutdown()
+	time.Sleep(3 * time.Second) // wait for account server and nats server to connect and converge
+	// check if the nats server contains the files stored in the account server
+	require.FileExists(t, fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, testEnv.SystemAccountPubKey))
+	require.FileExists(t, fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey1))
+	// check if the account server contains the files stored in the account server
+	j, err := testEnv.Server.JWTStore.(*natsserver.DirJWTStore).LoadAcc(acctPubKey2)
+	require.NoError(t, err)
+	require.Equal(t, j, accJwt2)
+}
+
+func TestCacheDirNatsResolver(t *testing.T) {
+	config := conf.DefaultServerConfig()
+	testEnv, err := SetupTestServer(config, false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+
+	accKey1, err := nkeys.CreateAccount()
+	require.NoError(t, err)
+	acctPubKey1, err := accKey1.PublicKey()
+	require.NoError(t, err)
+	accC1 := jwt.NewAccountClaims(acctPubKey1)
+	accJwt1, err := accC1.Encode(testEnv.OperatorKey)
+	require.NoError(t, err)
+	usrKey, err := nkeys.CreateUser()
+	require.NoError(t, err)
+	userPub, err := usrKey.PublicKey()
+	require.NoError(t, err)
+	userClaim := jwt.NewUserClaims(userPub)
+	userJwt, err := userClaim.Encode(accKey1)
+	require.NoError(t, err)
+
+	// store jwt in account server
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
+	require.NoError(t, err)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, testEnv.SystemAccountJWTFile)
+	require.NoError(t, err)
+
+	port := atomic.LoadUint64(&port) - 1
+	dirA, err := ioutil.TempDir("", "srv-a")
+	defer os.RemoveAll(dirA)
+	require.NoError(t, err)
+	confA := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: %d
+		server_name: srv-A
+		operator: %s
+		system_account: %s
+		resolver: {
+			type: cache
+			dir: %s
+		}
+    `, port, testEnv.OperatorJWTFile, testEnv.SystemAccountPubKey, dirA)))
+	defer os.Remove(confA)
+	srv, _ := gnatsd.RunServerWithConfig(confA)
+	defer srv.Shutdown()
+	time.Sleep(4 * time.Second) // wait for account server and nats server to connect
+	// check if the nats server contains the files stored in the account server
+	// the system account lookup is initiated automatically
+	require.FileExists(t, fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, testEnv.SystemAccountPubKey))
+	// will exist, after connect
+	require.NoFileExists(t, fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey1))
+	nc, err := nats.Connect(fmt.Sprintf("localhost:%d", port), nats.UserJWT(
+		func() (string, error) {
+			return userJwt, nil
+		}, func(nonce []byte) ([]byte, error) {
+			sig, _ := usrKey.Sign(nonce)
+			return sig, nil
+		}))
+	require.NoError(t, err)
+	nc.Close()
+	require.FileExists(t, fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey1))
 }

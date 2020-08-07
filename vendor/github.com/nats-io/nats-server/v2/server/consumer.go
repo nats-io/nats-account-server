@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nuid"
+	"golang.org/x/time/rate"
 )
 
 type ConsumerInfo struct {
@@ -52,6 +53,7 @@ type ConsumerConfig struct {
 	MaxDeliver      int           `json:"max_deliver,omitempty"`
 	FilterSubject   string        `json:"filter_subject,omitempty"`
 	ReplayPolicy    ReplayPolicy  `json:"replay_policy"`
+	RateLimit       uint64        `json:"rate_limit_bps,omitempty"` // Bits per sec
 	SampleFrequency string        `json:"sample_freq,omitempty"`
 }
 
@@ -166,6 +168,7 @@ type Consumer struct {
 	adflr             uint64
 	asflr             uint64
 	dsubj             string
+	rlimit            *rate.Limiter
 	reqSub            *subscription
 	ackSub            *subscription
 	ackReplyT         string
@@ -223,6 +226,9 @@ func (mset *Stream) AddConsumer(config *ConsumerConfig) (*Consumer, error) {
 		// clean them up.
 		if config.Durable == _EMPTY_ {
 			return nil, fmt.Errorf("consumer in pull mode requires a durable name")
+		}
+		if config.RateLimit > 0 {
+			return nil, fmt.Errorf("consumer in pull mode can not have rate limit set")
 		}
 	}
 
@@ -317,8 +323,16 @@ func (mset *Stream) AddConsumer(config *ConsumerConfig) (*Consumer, error) {
 		}
 	}
 
-	// Check for any limits.
-	if mset.config.MaxConsumers > 0 && len(mset.consumers) >= mset.config.MaxConsumers {
+	// Check for any limits, if the config for the consumer sets a limit we check against that
+	// but if not we use the value from account limits, if account limits is more restrictive
+	// than stream config we prefer the account limits to handle cases where account limits are
+	// updated during the lifecycle of the stream
+	maxc := mset.config.MaxConsumers
+	if mset.config.MaxConsumers <= 0 || mset.jsa.limits.MaxConsumers < mset.config.MaxConsumers {
+		maxc = mset.jsa.limits.MaxConsumers
+	}
+
+	if maxc > 0 && len(mset.consumers) >= maxc {
 		mset.mu.Unlock()
 		return nil, fmt.Errorf("maximum consumers limit reached")
 	}
@@ -372,6 +386,24 @@ func (mset *Stream) AddConsumer(config *ConsumerConfig) (*Consumer, error) {
 				break
 			}
 		}
+	}
+
+	// Check if we have a rate limit set.
+	if config.RateLimit != 0 {
+		// TODO(dlc) - Make sane values or error if not sane?
+		// We are configured in bits per sec so adjust to bytes.
+		rl := rate.Limit(config.RateLimit / 8)
+		// Burst should be set to maximum msg size for this account, etc.
+		var burst int
+		if mset.config.MaxMsgSize > 0 {
+			burst = int(mset.config.MaxMsgSize)
+		} else if mset.jsa.account.limits.mpay > 0 {
+			burst = int(mset.jsa.account.limits.mpay)
+		} else {
+			s := mset.jsa.account.srv
+			burst = int(s.getOpts().MaxPayload)
+		}
+		o.rlimit = rate.NewLimiter(rl, burst)
 	}
 
 	// Check if we have  filtered subject that is a wildcard.
@@ -488,8 +520,9 @@ func (mset *Stream) AddConsumer(config *ConsumerConfig) (*Consumer, error) {
 // Lock should be held on entry but will be released.
 func (o *Consumer) sendAdvisory(subj string, msg []byte) {
 	if o.mset != nil && o.mset.sendq != nil {
+		sendq := o.mset.sendq
 		o.mu.Unlock()
-		o.mset.sendq <- &jsPubMsg{subj, subj, _EMPTY_, nil, msg, nil, 0}
+		sendq <- &jsPubMsg{subj, subj, _EMPTY_, nil, msg, nil, 0}
 		o.mu.Lock()
 	}
 }
@@ -654,6 +687,13 @@ func configsEqualSansDelivery(a, b ConsumerConfig) bool {
 	return a == b
 }
 
+// Helper to send a reply to an ack.
+func (o *Consumer) sendAckReply(subj string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sendAdvisory(subj, nil)
+}
+
 // Process a message for the ack reply subject delivered with a message.
 func (o *Consumer) processAck(_ *subscription, _ *client, subject, reply string, msg []byte) {
 	sseq, dseq, dcount, _ := o.ReplyInfo(subject)
@@ -670,6 +710,11 @@ func (o *Consumer) processAck(_ *subscription, _ *client, subject, reply string,
 		o.progressUpdate(sseq)
 	case bytes.Equal(msg, AckTerm):
 		o.processTerm(sseq, dseq, dcount)
+	}
+
+	// Ack the ack if requested.
+	if len(reply) > 0 {
+		o.sendAckReply(reply)
 	}
 }
 
@@ -748,7 +793,7 @@ const ackWaitDelay = time.Millisecond
 
 // ackWait returns how long to wait to fire the pending timer.
 func (o *Consumer) ackWait(next time.Duration) time.Duration {
-	if next != 0 {
+	if next > 0 {
 		return next + ackWaitDelay
 	}
 	return o.config.AckWait + ackWaitDelay
@@ -1205,8 +1250,26 @@ func (o *Consumer) loopAndDeliverMsgs(s *Server, a *Account) {
 				o.mu.Lock()
 			}
 		}
+
 		// Track this regardless.
 		lts = ts
+
+		// If we have a rate limit set make sure we check that here.
+		if o.rlimit != nil {
+			now := time.Now()
+			r := o.rlimit.ReserveN(now, len(msg)+len(hdr)+len(subj)+len(dsubj)+len(o.ackReplyT))
+			delay := r.DelayFrom(now)
+			if delay > 0 {
+				qch := o.qch
+				o.mu.Unlock()
+				select {
+				case <-qch:
+					return
+				case <-time.After(delay):
+				}
+				o.mu.Lock()
+			}
+		}
 
 		o.deliverMsg(dsubj, subj, hdr, msg, seq, dcnt, ts)
 
@@ -1387,12 +1450,14 @@ func (o *Consumer) checkPending() {
 	var expired []uint64
 	for seq, ts := range o.pending {
 		elapsed := now - ts
-		if elapsed > ttl && !o.onRedeliverQueue(seq) {
-			expired = append(expired, seq)
-			shouldSignal = true
-		} else if elapsed-ttl < next {
+		if elapsed >= ttl {
+			if !o.onRedeliverQueue(seq) {
+				expired = append(expired, seq)
+				shouldSignal = true
+			}
+		} else if ttl-elapsed < next {
 			// Update when we should fire next.
-			next = elapsed - ttl
+			next = ttl - elapsed
 		}
 	}
 
@@ -1401,10 +1466,9 @@ func (o *Consumer) checkPending() {
 		o.rdq = append(o.rdq, expired...)
 		// Now we should update the timestamp here since we are redelivering.
 		// We will use an incrementing time to preserve order for any other redelivery.
-		now := time.Now()
+		off := now - o.pending[expired[0]]
 		for _, seq := range expired {
-			now = now.Add(time.Microsecond)
-			o.pending[seq] = now.UnixNano()
+			o.pending[seq] += off
 		}
 	}
 

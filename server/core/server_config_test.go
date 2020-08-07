@@ -208,7 +208,6 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	require.Equal(t, "http://primary.nats.io:5222", server.config.Primary)
 
 	require.Equal(t, "D:/nats/as_store", server.config.Store.Dir)
-	require.False(t, server.config.Store.ReadOnly)
 	require.False(t, server.config.Store.Shard)
 
 	require.Equal(t, 5000, server.config.HTTP.ReadTimeout)
@@ -337,7 +336,6 @@ func TestFlagOverridesConfig(t *testing.T) {
 	{
 		store: {
 			Dir: '%s',
-			ReadOnly: false,
 		},
 		http: {
 			ReadTimeout: 2000,
@@ -355,7 +353,6 @@ func TestFlagOverridesConfig(t *testing.T) {
 
 	flags := Flags{
 		ConfigFile: fullPath,
-		ReadOnly:   true,
 		Directory:  path,
 	}
 
@@ -369,5 +366,4 @@ func TestFlagOverridesConfig(t *testing.T) {
 
 	require.Equal(t, server.config.Store.Dir, path)
 	require.Equal(t, server.config.HTTP.ReadTimeout, 2000)
-	require.True(t, server.JWTStore.IsReadOnly())
 }

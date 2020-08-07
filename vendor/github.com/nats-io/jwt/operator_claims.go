@@ -26,7 +26,7 @@ import (
 
 // Operator specific claims
 type Operator struct {
-	// Slice of real identities (like websites) that can be used to identify the operator.
+	// Slice of real identies (like websites) that can be used to identify the operator.
 	Identities []Identity `json:"identity,omitempty"`
 	// Slice of other operator NKeys that can be used to sign on behalf of the main
 	// operator identity.
@@ -65,6 +65,7 @@ func (o *Operator) Validate(vr *ValidationResults) {
 			vr.AddError("%s is not an operator public key", k)
 		}
 	}
+
 	if o.SystemAccount != "" {
 		if !nkeys.IsValidPublicAccountKey(o.SystemAccount) {
 			vr.AddError("%s is not an account public key", o.SystemAccount)
@@ -119,15 +120,15 @@ func ValidateOperatorServiceURL(v string) error {
 }
 
 func (o *Operator) validateOperatorServiceURLs() []error {
-	var errs []error
+	var errors []error
 	for _, v := range o.OperatorServiceURLs {
 		if v != "" {
 			if err := ValidateOperatorServiceURL(v); err != nil {
-				errs = append(errs, err)
+				errors = append(errors, err)
 			}
 		}
 	}
-	return errs
+	return errors
 }
 
 // OperatorClaims define the data for an operator JWT

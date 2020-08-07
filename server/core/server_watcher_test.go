@@ -25,13 +25,15 @@ import (
 	"testing"
 	"time"
 
+	natsserver "github.com/nats-io/nats-server/v2/server"
+
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
 
-func TestServerFileWatchNotification(t *testing.T) {
+func TestServerReloadNotification(t *testing.T) {
 
 	// Skip the file notification test on travis
 	if os.Getenv("TRAVIS_GO_VERSION") != "" {
@@ -51,7 +53,6 @@ func TestServerFileWatchNotification(t *testing.T) {
 
 	config := conf.DefaultServerConfig()
 	config.Store.Dir = path
-	config.Store.ReadOnly = true
 
 	testEnv, err := SetupTestServer(config, false, true)
 	defer testEnv.Cleanup()
@@ -81,6 +82,8 @@ func TestServerFileWatchNotification(t *testing.T) {
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
 	store(apub, cd)
+
+	testEnv.Server.JWTStore.(*natsserver.DirJWTStore).Reload()
 
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)

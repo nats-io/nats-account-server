@@ -181,16 +181,16 @@ func (s *Server) checkAuthforWarnings() {
 	}
 }
 
-// If opts.Users or opts.Nkeys have definitions without an account
-// defined assign them to the default global account.
+// If Users or Nkeys options have definitions without an account defined,
+// assign them to the default global account.
 // Lock should be held.
-func (s *Server) assignGlobalAccountToOrphanUsers() {
-	for _, u := range s.users {
+func (s *Server) assignGlobalAccountToOrphanUsers(nkeys map[string]*NkeyUser, users map[string]*User) {
+	for _, u := range users {
 		if u.Account == nil {
 			u.Account = s.gacc
 		}
 	}
-	for _, u := range s.nkeys {
+	for _, u := range nkeys {
 		if u.Account == nil {
 			u.Account = s.gacc
 		}
@@ -225,12 +225,10 @@ func validateResponsePermissions(p *Permissions) {
 // configureAuthorization will do any setup needed for authorization.
 // Lock is assumed held.
 func (s *Server) configureAuthorization() {
-	if s.opts == nil {
+	opts := s.getOpts()
+	if opts == nil {
 		return
 	}
-
-	// Snapshot server options.
-	opts := s.getOpts()
 
 	// Check for multiple users first
 	// This just checks and sets up the user map if we have multiple users.
@@ -239,45 +237,62 @@ func (s *Server) configureAuthorization() {
 	} else if len(s.trustedKeys) > 0 {
 		s.info.AuthRequired = true
 	} else if opts.Nkeys != nil || opts.Users != nil {
-		// Support both at the same time.
-		if opts.Nkeys != nil {
-			s.nkeys = make(map[string]*NkeyUser)
-			for _, u := range opts.Nkeys {
-				copy := u.clone()
-				if u.Account != nil {
-					if v, ok := s.accounts.Load(u.Account.Name); ok {
-						copy.Account = v.(*Account)
-					}
-				}
-				if copy.Permissions != nil {
-					validateResponsePermissions(copy.Permissions)
-				}
-				s.nkeys[u.Nkey] = copy
-			}
-		}
-		if opts.Users != nil {
-			s.users = make(map[string]*User)
-			for _, u := range opts.Users {
-				copy := u.clone()
-				if u.Account != nil {
-					if v, ok := s.accounts.Load(u.Account.Name); ok {
-						copy.Account = v.(*Account)
-					}
-				}
-				if copy.Permissions != nil {
-					validateResponsePermissions(copy.Permissions)
-				}
-				s.users[u.Username] = copy
-			}
-		}
-		s.assignGlobalAccountToOrphanUsers()
+		s.nkeys, s.users = s.buildNkeysAndUsersFromOptions(opts.Nkeys, opts.Users)
 		s.info.AuthRequired = true
 	} else if opts.Username != "" || opts.Authorization != "" {
 		s.info.AuthRequired = true
 	} else {
 		s.users = nil
+		s.nkeys = nil
 		s.info.AuthRequired = false
 	}
+
+	// Do similar for websocket config
+	s.wsConfigAuth(&opts.Websocket)
+}
+
+// Takes the given slices of NkeyUser and User options and build
+// corresponding maps used by the server. The users are cloned
+// so that server does not reference options.
+// The global account is assigned to users that don't have an
+// existing account.
+// Server lock is held on entry.
+func (s *Server) buildNkeysAndUsersFromOptions(nko []*NkeyUser, uo []*User) (map[string]*NkeyUser, map[string]*User) {
+	var nkeys map[string]*NkeyUser
+	var users map[string]*User
+
+	if nko != nil {
+		nkeys = make(map[string]*NkeyUser, len(nko))
+		for _, u := range nko {
+			copy := u.clone()
+			if u.Account != nil {
+				if v, ok := s.accounts.Load(u.Account.Name); ok {
+					copy.Account = v.(*Account)
+				}
+			}
+			if copy.Permissions != nil {
+				validateResponsePermissions(copy.Permissions)
+			}
+			nkeys[u.Nkey] = copy
+		}
+	}
+	if uo != nil {
+		users = make(map[string]*User, len(uo))
+		for _, u := range uo {
+			copy := u.clone()
+			if u.Account != nil {
+				if v, ok := s.accounts.Load(u.Account.Name); ok {
+					copy.Account = v.(*Account)
+				}
+			}
+			if copy.Permissions != nil {
+				validateResponsePermissions(copy.Permissions)
+			}
+			users[u.Username] = copy
+		}
+	}
+	s.assignGlobalAccountToOrphanUsers(nkeys, users)
+	return nkeys, users
 }
 
 // checkAuthentication will check based on client type and
@@ -309,10 +324,10 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		return opts.CustomClientAuthentication.Check(c)
 	}
 
-	return s.processClientOrLeafAuthentication(c)
+	return s.processClientOrLeafAuthentication(c, opts)
 }
 
-func (s *Server) processClientOrLeafAuthentication(c *client) bool {
+func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) bool {
 	var (
 		nkey *NkeyUser
 		juc  *jwt.UserClaims
@@ -320,15 +335,55 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 		user *User
 		ok   bool
 		err  error
-		opts = s.getOpts()
+		ao   bool // auth override
 	)
-
 	s.mu.Lock()
 	authRequired := s.info.AuthRequired
+	// c.ws is immutable, but may need lock if we get race reports.
+	if !authRequired && c.ws != nil {
+		// If no auth required for regular clients, then check if
+		// we have an override for websocket clients.
+		authRequired = s.websocket.authOverride
+	}
 	if !authRequired {
 		// TODO(dlc) - If they send us credentials should we fail?
 		s.mu.Unlock()
 		return true
+	}
+	var (
+		username   string
+		password   string
+		token      string
+		noAuthUser string
+		users      map[string]*User
+		nkusers    map[string]*NkeyUser
+	)
+	tlsMap := opts.TLSMap
+	if c.ws != nil {
+		wo := &opts.Websocket
+		// Always override TLSMap.
+		tlsMap = wo.TLSMap
+		// The rest depends on if there was any auth override in
+		// the websocket's config.
+		if s.websocket.authOverride {
+			noAuthUser = wo.NoAuthUser
+			username = wo.Username
+			password = wo.Password
+			token = wo.Token
+			users = s.websocket.users
+			nkusers = s.websocket.nkeys
+			ao = true
+		}
+	} else if c.kind == LEAF {
+		tlsMap = opts.LeafNode.TLSMap
+	}
+	if !ao {
+		noAuthUser = opts.NoAuthUser
+		username = opts.Username
+		password = opts.Password
+		token = opts.Authorization
+		users = s.users
+		nkusers = s.nkeys
 	}
 
 	// Check if we have trustedKeys defined in the server. If so we require a user jwt.
@@ -355,21 +410,21 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 	}
 
 	// Check if we have nkeys or users for client.
-	hasNkeys := s.nkeys != nil
-	hasUsers := s.users != nil
+	hasNkeys := len(nkusers) > 0
+	hasUsers := len(users) > 0
 	if hasNkeys && c.opts.Nkey != "" {
-		nkey, ok = s.nkeys[c.opts.Nkey]
+		nkey, ok = nkusers[c.opts.Nkey]
 		if !ok {
 			s.mu.Unlock()
 			return false
 		}
 	} else if hasUsers {
 		// Check if we are tls verify and are mapping users from the client_certificate
-		if opts.TLSMap {
+		if tlsMap {
 			var euser string
 			authorized := checkClientTLSCertSubject(c, func(u string) bool {
 				var ok bool
-				user, ok = s.users[u]
+				user, ok = users[u]
 				if !ok {
 					c.Debugf("User in cert [%q], not found", u)
 					return false
@@ -382,20 +437,20 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 				return false
 			}
 			if c.opts.Username != "" {
-				s.Warnf("User found in connect proto, but user required from cert - %v", c)
+				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
 			}
 			// Already checked that the client didn't send a user in connect
 			// but we set it here to be able to identify it in the logs.
 			c.opts.Username = euser
 		} else {
-			if c.kind == CLIENT && c.opts.Username == "" && s.opts.NoAuthUser != "" {
-				if u, exists := s.users[s.opts.NoAuthUser]; exists {
+			if c.kind == CLIENT && c.opts.Username == "" && noAuthUser != "" {
+				if u, exists := users[noAuthUser]; exists {
 					c.opts.Username = u.Username
 					c.opts.Password = u.Password
 				}
 			}
 			if c.opts.Username != "" {
-				user, ok = s.users[c.opts.Username]
+				user, ok = users[c.opts.Username]
 				if !ok {
 					s.mu.Unlock()
 					return false
@@ -459,6 +514,15 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 			c.Debugf("User authentication revoked")
 			return false
 		}
+		if !validateSrc(juc, c.host) {
+			c.Errorf("Bad src Ip %s", c.host)
+			return false
+		}
+		allowNow, validFor := validateTimes(juc)
+		if !allowNow {
+			c.Errorf("Outside connect times")
+			return false
+		}
 
 		nkey = buildInternalNkeyUser(juc, acc)
 		if err := c.RegisterNkeyUser(nkey); err != nil {
@@ -471,7 +535,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 		s.accountConnectEvent(c)
 
 		// Check if we need to set an auth timer if the user jwt expires.
-		c.checkExpiration(juc.Claims())
+		c.setExpiration(juc.Claims(), validFor)
 		return true
 	}
 
@@ -517,13 +581,13 @@ func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 	}
 
 	if c.kind == CLIENT {
-		if opts.Authorization != "" {
-			return comparePasswords(opts.Authorization, c.opts.Token)
-		} else if opts.Username != "" {
-			if opts.Username != c.opts.Username {
+		if token != "" {
+			return comparePasswords(token, c.opts.Token)
+		} else if username != "" {
+			if username != c.opts.Username {
 				return false
 			}
-			return comparePasswords(opts.Password, c.opts.Password)
+			return comparePasswords(password, c.opts.Password)
 		}
 	} else if c.kind == LEAF {
 		// There is no required username/password to connect and
@@ -715,6 +779,31 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	if opts.LeafNode.Username != _EMPTY_ {
 		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
 	} else if len(opts.LeafNode.Users) > 0 {
+		if opts.LeafNode.TLSMap {
+			var user *User
+			found := checkClientTLSCertSubject(c, func(u string) bool {
+				// This is expected to be a very small array.
+				for _, usr := range opts.LeafNode.Users {
+					if u == usr.Username {
+						user = usr
+						return true
+					}
+				}
+				c.Debugf("User in cert [%q], not found", u)
+				return false
+			})
+			if !found {
+				return false
+			}
+			if c.opts.Username != "" {
+				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
+			}
+			c.opts.Username = user.Username
+			// This will authorize since are using an existing user,
+			// but it will also register with proper account.
+			return isAuthorized(user.Username, user.Password, user.Account.GetName())
+		}
+
 		// This is expected to be a very small array.
 		for _, u := range opts.LeafNode.Users {
 			if u.Username == c.opts.Username {
@@ -728,12 +817,12 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 		return false
 	}
 
-	// We are here if we accept leafnode connections without any credential.
+	// We are here if we accept leafnode connections without any credentials.
 
 	// Still, if the CONNECT has some user info, we will bind to the
 	// user's account or to the specified default account (if provided)
 	// or to the global account.
-	return s.processClientOrLeafAuthentication(c)
+	return s.processClientOrLeafAuthentication(c, opts)
 }
 
 // Support for bcrypt stored passwords and tokens.

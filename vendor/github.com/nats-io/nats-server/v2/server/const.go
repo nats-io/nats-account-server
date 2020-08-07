@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.2.0-beta.13"
+	VERSION = "2.2.0-beta.23"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -92,7 +92,7 @@ const (
 	LEN_CR_LF = len(CR_LF)
 
 	// DEFAULT_FLUSH_DEADLINE is the write/flush deadlines.
-	DEFAULT_FLUSH_DEADLINE = 2 * time.Second
+	DEFAULT_FLUSH_DEADLINE = 10 * time.Second
 
 	// DEFAULT_HTTP_PORT is the default monitoring port.
 	DEFAULT_HTTP_PORT = 8222
@@ -145,6 +145,10 @@ const (
 	// DEFAULT_LAME_DUCK_DURATION is the time in which the server spreads
 	// the closing of clients when signaled to go in lame duck mode.
 	DEFAULT_LAME_DUCK_DURATION = 2 * time.Minute
+
+	// DEFAULT_LAME_DUCK_GRACE_PERIOD is the duration the server waits, after entering
+	// lame duck mode, before starting closing client connections.
+	DEFAULT_LAME_DUCK_GRACE_PERIOD = 10 * time.Second
 
 	// DEFAULT_LEAFNODE_INFO_WAIT Route dial timeout.
 	DEFAULT_LEAFNODE_INFO_WAIT = 1 * time.Second

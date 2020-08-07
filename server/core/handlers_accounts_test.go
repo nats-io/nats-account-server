@@ -174,7 +174,7 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusOK)
 	body, err = ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = fmt.Sprintf("/jwt/v1/accounts/%s?decode=true", pubKey)
 	url = testEnv.URLForPath(path)

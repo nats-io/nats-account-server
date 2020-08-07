@@ -14,5 +14,3 @@
 # IDE Files
 .vscode
 .idea/
-
-coverage.out

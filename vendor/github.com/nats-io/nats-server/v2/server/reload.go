@@ -297,25 +297,28 @@ type clusterOption struct {
 }
 
 // Apply the cluster change.
-func (c *clusterOption) Apply(server *Server) {
+func (c *clusterOption) Apply(s *Server) {
 	// TODO: support enabling/disabling clustering.
-	server.mu.Lock()
+	s.mu.Lock()
 	tlsRequired := c.newValue.TLSConfig != nil
-	server.routeInfo.TLSRequired = tlsRequired
-	server.routeInfo.TLSVerify = tlsRequired
-	server.routeInfo.AuthRequired = c.newValue.Username != ""
+	s.routeInfo.TLSRequired = tlsRequired
+	s.routeInfo.TLSVerify = tlsRequired
+	s.routeInfo.AuthRequired = c.newValue.Username != ""
 	if c.newValue.NoAdvertise {
-		server.routeInfo.ClientConnectURLs = nil
-		server.routeInfo.WSConnectURLs = nil
+		s.routeInfo.ClientConnectURLs = nil
+		s.routeInfo.WSConnectURLs = nil
 	} else {
-		server.routeInfo.ClientConnectURLs = server.clientConnectURLs
-		server.routeInfo.WSConnectURLs = server.websocket.connectURLs
+		s.routeInfo.ClientConnectURLs = s.clientConnectURLs
+		s.routeInfo.WSConnectURLs = s.websocket.connectURLs
 	}
-	server.setRouteInfoHostPortAndIP()
-	server.mu.Unlock()
-	server.Noticef("Reloaded: cluster")
+	s.setRouteInfoHostPortAndIP()
+	s.mu.Unlock()
+	if c.newValue.Name != "" && c.newValue.Name != s.ClusterName() {
+		s.setClusterName(c.newValue.Name)
+	}
+	s.Noticef("Reloaded: cluster")
 	if tlsRequired && c.newValue.TLSConfig.InsecureSkipVerify {
-		server.Warnf(clusterTLSInsecureWarning)
+		s.Warnf(clusterTLSInsecureWarning)
 	}
 }
 
@@ -767,7 +770,7 @@ func imposeOrder(value interface{}) error {
 			return value.AllowedOrigins[i] < value.AllowedOrigins[j]
 		})
 	case string, bool, int, int32, int64, time.Duration, float64, nil,
-		LeafNodeOpts, ClusterOpts, *tls.Config, *URLAccResolver, *MemAccResolver, Authentication:
+		LeafNodeOpts, ClusterOpts, *tls.Config, *URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication:
 		// explicitly skipped types
 	default:
 		// this will fail during unit tests
@@ -906,6 +909,44 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew := newValue.(LeafNodeOpts)
 			tmpOld.TLSConfig = nil
 			tmpNew.TLSConfig = nil
+
+			// Special check for leafnode remotes changes which are not supported right now.
+			leafRemotesChanged := func(a, b LeafNodeOpts) bool {
+				if len(tmpOld.Remotes) != len(tmpNew.Remotes) {
+					return true
+				}
+
+				// Check whether all remotes URLs are still the same.
+				for _, oldRemote := range tmpOld.Remotes {
+					var found bool
+
+					for _, newRemote := range tmpNew.Remotes {
+						// Bind to global account in case not defined.
+						if newRemote.LocalAccount == _EMPTY_ {
+							newRemote.LocalAccount = globalAccountName
+						}
+
+						if reflect.DeepEqual(oldRemote, newRemote) {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						return true
+					}
+				}
+
+				return false
+			}
+
+			// First check whether remotes changed at all. If they did not,
+			// skip them in the complete equal check.
+			if !leafRemotesChanged(tmpOld, tmpNew) {
+				tmpOld.Remotes = nil
+				tmpNew.Remotes = nil
+			}
+
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
@@ -1088,6 +1129,7 @@ func (s *Server) reloadAuthorization() {
 		s.gacc = nil
 		s.configureAccounts()
 		s.configureAuthorization()
+		s.mu.Unlock()
 
 		s.accounts.Range(func(k, v interface{}) bool {
 			newAcc := v.(*Account)
@@ -1128,6 +1170,11 @@ func (s *Server) reloadAuthorization() {
 			}
 			return true
 		})
+		s.mu.Lock()
+		// Check if we had a default system account.
+		if s.sys != nil && s.sys.account != nil && !s.opts.NoSystemAccount {
+			s.accounts.Store(s.sys.account.Name, s.sys.account)
+		}
 		// Double check any JetStream configs.
 		checkJetStream = true
 	} else if s.opts.AccountResolver != nil {
@@ -1144,9 +1191,7 @@ func (s *Server) reloadAuthorization() {
 				if acc == s.gacc {
 					return true
 				}
-				acc.mu.RLock()
-				accName := acc.Name
-				acc.mu.RUnlock()
+				accName := acc.GetName()
 				// Release server lock for following actions
 				s.mu.Unlock()
 				accClaims, claimJWT, _ := s.fetchAccountClaims(accName)
@@ -1229,6 +1274,10 @@ func (s *Server) reloadAuthorization() {
 	// We will double check all JetStream configs on a reload.
 	if checkJetStream {
 		s.configAllJetStreamAccounts()
+	}
+
+	if res := s.AccountResolver(); res != nil {
+		res.Reload()
 	}
 }
 

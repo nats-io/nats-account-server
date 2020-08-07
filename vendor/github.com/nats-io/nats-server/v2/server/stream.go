@@ -15,6 +15,7 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -48,13 +49,15 @@ type StreamConfig struct {
 	Replicas     int             `json:"num_replicas"`
 	NoAck        bool            `json:"no_ack,omitempty"`
 	Template     string          `json:"template_owner,omitempty"`
+	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
 }
 
 // PubAck is the detail you get back from a publish to a stream that was successful.
 // e.g. +OK {"stream": "Orders", "seq": 22}
 type PubAck struct {
-	Stream string `json:"stream"`
-	Seq    uint64 `json:"seq"`
+	Stream    string `json:"stream"`
+	Seq       uint64 `json:"seq"`
+	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -79,11 +82,27 @@ type Stream struct {
 	consumers map[string]*Consumer
 	config    StreamConfig
 	created   time.Time
+	ddmap     map[string]*ddentry
+	ddarr     []*ddentry
+	ddindex   int
+	ddtmr     *time.Timer
 }
 
+// JSPubId is used for identifying published messages and performing de-duplication.
+const JSPubId = "Msg-Id"
+const StreamDefaultDuplicatesWindow = 2 * time.Minute
+
+// Dedupe entry
+type ddentry struct {
+	id  string
+	seq uint64
+	ts  int64
+}
+
+// Replicas Range
 const (
 	StreamDefaultReplicas = 1
-	StreamMaxReplicas     = 8
+	StreamMaxReplicas     = 7
 )
 
 // AddStream adds a stream for the given account.
@@ -159,12 +178,6 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 	// Setup our internal send go routine.
 	mset.setupSendCapabilities()
 
-	// Setup subscriptions
-	if err := mset.subscribeToStream(); err != nil {
-		mset.Delete()
-		return nil, err
-	}
-
 	// Create our pubAck here. This will be reused and for +OK will contain JSON
 	// for stream name and sequence.
 	longestSeq := strconv.FormatUint(math.MaxUint64, 10)
@@ -173,9 +186,44 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 	mset.pubAck = append(mset.pubAck, OK...)
 	mset.pubAck = append(mset.pubAck, fmt.Sprintf(" {\"stream\": %q, \"seq\": ", cfg.Name)...)
 
+	// Rebuild dedupe as needed.
+	mset.rebuildDedupe()
+
+	// Setup subscriptions
+	if err := mset.subscribeToStream(); err != nil {
+		mset.Delete()
+		return nil, err
+	}
+
+	// Send advisory.
 	mset.sendCreateAdvisory()
 
 	return mset, nil
+}
+
+// rebuildDedupe will rebuild any dedupe structures needed after recovery of a stream.
+// Lock not needed, only called during initialization.
+// TODO(dlc) - Might be good to know if this should be checked at all for streams with no
+// headers and msgId in them. Would need signaling from the storage layer.
+func (mset *Stream) rebuildDedupe() {
+	state := mset.store.State()
+	if state.Msgs == 0 {
+		return
+	}
+	// We have some messages. Lookup starting sequence by duplicate time window.
+	sseq := mset.store.GetSeqFromTime(time.Now().Add(-mset.config.Duplicates))
+	if sseq == 0 {
+		return
+	}
+
+	for seq := sseq; seq <= state.LastSeq; seq++ {
+		_, hdr, _, ts, err := mset.store.LoadMsg(seq)
+		if err == nil && len(hdr) > 0 {
+			if msgId := getMsgId(hdr); msgId != "" {
+				mset.storeMsgId(&ddentry{msgId, seq, ts})
+			}
+		}
+	}
 }
 
 func (mset *Stream) sendCreateAdvisory() {
@@ -318,6 +366,20 @@ func checkStreamCfg(config *StreamConfig) (StreamConfig, error) {
 	if cfg.MaxConsumers == 0 {
 		cfg.MaxConsumers = -1
 	}
+	if cfg.Duplicates == 0 {
+		if cfg.MaxAge != 0 && cfg.MaxAge < StreamDefaultDuplicatesWindow {
+			cfg.Duplicates = cfg.MaxAge
+		} else {
+			cfg.Duplicates = StreamDefaultDuplicatesWindow
+		}
+	} else if cfg.Duplicates < 0 {
+		return StreamConfig{}, fmt.Errorf("duplicates window can not be negative")
+	}
+	// Check that duplicates is not larger then age if set.
+	if cfg.MaxAge != 0 && cfg.Duplicates > cfg.MaxAge {
+		return StreamConfig{}, fmt.Errorf("duplicates window can not be larger then max age")
+	}
+
 	if len(cfg.Subjects) == 0 {
 		cfg.Subjects = append(cfg.Subjects, cfg.Name)
 	} else {
@@ -436,6 +498,11 @@ func (mset *Stream) Update(config *StreamConfig) error {
 		}
 	}
 
+	// Check for the Duplicates
+	if cfg.Duplicates != o_cfg.Duplicates && mset.ddtmr != nil {
+		// Let it fire right away, it will adjust properly on purge.
+		mset.ddtmr.Reset(time.Microsecond)
+	}
 	// Now update config and store's version of our config.
 	mset.config = cfg
 	mset.store.UpdateConfig(&cfg)
@@ -509,16 +576,7 @@ func (mset *Stream) subscribeInternal(subject string, cb msgHandler) (*subscript
 	mset.sid++
 
 	// Now create the subscription
-	sub, err := c.processSub([]byte(subject+" "+strconv.Itoa(mset.sid)), false)
-	if err != nil {
-		return nil, err
-	} else if sub == nil {
-		return nil, fmt.Errorf("malformed subject")
-	}
-	c.mu.Lock()
-	sub.icb = cb
-	c.mu.Unlock()
-	return sub, nil
+	return c.processSub([]byte(subject), nil, []byte(strconv.Itoa(mset.sid)), cb, false)
 }
 
 // Helper for unlocked stream.
@@ -597,6 +655,95 @@ func (mset *Stream) setupStore(fsCfg *FileStoreConfig) error {
 	return nil
 }
 
+// NumMsgIds returns the number of message ids being tracked for duplicate suppression.
+func (mset *Stream) NumMsgIds() int {
+	mset.mu.RLock()
+	defer mset.mu.RUnlock()
+	return len(mset.ddmap)
+}
+
+// checkMsgId will process and check for duplicates.
+// Lock should be held.
+func (mset *Stream) checkMsgId(id string) *ddentry {
+	if id == "" || mset.ddmap == nil {
+		return nil
+	}
+	return mset.ddmap[id]
+}
+
+// Will purge the entries that are past the window.
+// Should be called from a timer.
+func (mset *Stream) purgeMsgIds() {
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+
+	now := time.Now().UnixNano()
+	tmrNext := mset.config.Duplicates
+	window := int64(tmrNext)
+
+	for i, dde := range mset.ddarr[mset.ddindex:] {
+		if now-dde.ts >= window {
+			delete(mset.ddmap, dde.id)
+		} else {
+			mset.ddindex += i
+			// Check if we should garbage collect here if we are 1/3 total size.
+			if cap(mset.ddarr) > 3*(len(mset.ddarr)-mset.ddindex) {
+				mset.ddarr = append([]*ddentry(nil), mset.ddarr[mset.ddindex:]...)
+				mset.ddindex = 0
+			}
+			tmrNext = time.Duration(window - (now - dde.ts))
+			break
+		}
+	}
+	if len(mset.ddmap) > 0 {
+		// Make sure to not fire too quick
+		const minFire = 50 * time.Millisecond
+		if tmrNext < minFire {
+			tmrNext = minFire
+		}
+		mset.ddtmr.Reset(tmrNext)
+	} else {
+		mset.ddtmr.Stop()
+		mset.ddtmr = nil
+	}
+}
+
+// storeMsgId will store the message id for duplicate detection.
+func (mset *Stream) storeMsgId(dde *ddentry) {
+	mset.mu.Lock()
+	if mset.ddmap == nil {
+		mset.ddmap = make(map[string]*ddentry)
+	}
+	if mset.ddtmr == nil {
+		mset.ddtmr = time.AfterFunc(mset.config.Duplicates, mset.purgeMsgIds)
+	}
+	mset.ddmap[dde.id] = dde
+	mset.ddarr = append(mset.ddarr, dde)
+	mset.mu.Unlock()
+}
+
+// Will return the value for the header denoted by key or nil if it does not exists.
+// This function ignores errors and tries to achieve speed and no additional allocations.
+func getHdrVal(key string, hdr []byte) []byte {
+	index := bytes.Index(hdr, []byte(key))
+	if index < 0 {
+		return nil
+	}
+	var value []byte
+	for i := index + len(key) + 2; i > 0 && i < len(hdr); i++ {
+		if hdr[i] == '\r' && i < len(hdr)-1 && hdr[i+1] == '\n' {
+			break
+		}
+		value = append(value, hdr[i])
+	}
+	return value
+}
+
+// Fast lookup of msgId.
+func getMsgId(hdr []byte) string {
+	return string(getHdrVal(JSPubId, hdr))
+}
+
 // processInboundJetStreamMsg handles processing messages bound for a stream.
 func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subject, reply string, msg []byte) {
 	mset.mu.Lock()
@@ -613,6 +760,21 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 	name := mset.config.Name
 	maxMsgSize := int(mset.config.MaxMsgSize)
 	numConsumers := len(mset.consumers)
+
+	// Process msgId if we have headers.
+	var msgId string
+	if pc != nil && pc.pa.hdr > 0 {
+		msgId = getMsgId(msg[:pc.pa.hdr])
+		if dde := mset.checkMsgId(msgId); dde != nil {
+			if doAck && len(reply) > 0 {
+				response := append(pubAck, strconv.FormatUint(dde.seq, 10)...)
+				response = append(response, ", \"duplicate\": true}"...)
+				mset.sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, response, nil, 0}
+			}
+			mset.mu.Unlock()
+			return
+		}
+	}
 	mset.mu.Unlock()
 
 	if c == nil {
@@ -650,9 +812,15 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 			response = []byte("-ERR 'resource limits exceeded for account'")
 			store.RemoveMsg(seq)
 			seq = 0
-		} else if err == nil && doAck && len(reply) > 0 {
-			response = append(pubAck, strconv.FormatUint(seq, 10)...)
-			response = append(response, '}')
+		} else if err == nil {
+			if doAck && len(reply) > 0 {
+				response = append(pubAck, strconv.FormatUint(seq, 10)...)
+				response = append(response, '}')
+			}
+			// If we have a msgId make sure to save.
+			if msgId != "" {
+				mset.storeMsgId(&ddentry{msgId, seq, ts})
+			}
 		}
 	}
 
@@ -793,8 +961,27 @@ func (mset *Stream) delete() error {
 
 // Internal function to stop or delete the stream.
 func (mset *Stream) stop(delete bool) error {
+	// Clean up consumers.
 	mset.mu.Lock()
+	var obs []*Consumer
+	for _, o := range mset.consumers {
+		obs = append(obs, o)
+	}
+	mset.consumers = nil
+	mset.mu.Unlock()
 
+	for _, o := range obs {
+		// Second flag says do not broadcast to signal.
+		// TODO(dlc) - If we have an err here we don't want to stop
+		// but should we log?
+		o.stop(delete, false, delete)
+	}
+
+	// Make sure we release all consumers here at once.
+	mset.mu.Lock()
+	mset.sg.Broadcast()
+
+	// Send stream delete advisory after the consumers.
 	if delete {
 		mset.sendDeleteAdvisoryLocked()
 	}
@@ -809,27 +996,17 @@ func (mset *Stream) stop(delete bool) error {
 		mset.mu.Unlock()
 		return nil
 	}
-	var obs []*Consumer
-	for _, o := range mset.consumers {
-		obs = append(obs, o)
+
+	// Cleanup duplicate timer if running.
+	if mset.ddtmr != nil {
+		mset.ddtmr.Stop()
+		mset.ddtmr = nil
+		mset.ddarr = nil
+		mset.ddmap = nil
 	}
-	mset.consumers = nil
 	mset.mu.Unlock()
 
 	c.closeConnection(ClientClosed)
-
-	// Clean up consumers.
-	for _, o := range obs {
-		// Second flag says do not broadcast to signal.
-		if err := o.stop(delete, false, delete); err != nil {
-			return err
-		}
-	}
-
-	// Make sure we release them all here at once.
-	mset.mu.Lock()
-	mset.sg.Broadcast()
-	mset.mu.Unlock()
 
 	if mset.store == nil {
 		return nil

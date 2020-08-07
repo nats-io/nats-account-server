@@ -104,7 +104,7 @@ func TestOperatorJWT(t *testing.T) {
 
 	operator := string(body)
 	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
-	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)
@@ -143,7 +143,7 @@ func TestOperatorJWTV1(t *testing.T) {
 
 	operator := string(body)
 	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
-	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)

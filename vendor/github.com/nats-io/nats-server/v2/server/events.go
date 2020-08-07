@@ -242,7 +242,7 @@ RESET:
 	servername := s.info.Name
 	seqp := &s.sys.seq
 	js := s.js != nil
-	var cluster string
+	cluster := s.info.Cluster
 	if s.gateway.enabled {
 		cluster = s.getGatewayName()
 	}
@@ -584,9 +584,15 @@ func (s *Server) initEventTracking() {
 		s.Errorf("Error setting up internal tracking: %v", err)
 	}
 	// Listen for account claims updates.
-	subject = fmt.Sprintf(accUpdateEventSubj, "*")
-	if _, err := s.sysSubscribe(subject, s.accountClaimUpdate); err != nil {
-		s.Errorf("Error setting up internal tracking: %v", err)
+	subscribeToUpdate := true
+	if s.accResolver != nil {
+		subscribeToUpdate = !s.accResolver.IsTrackingUpdate()
+	}
+	if subscribeToUpdate {
+		subject = fmt.Sprintf(accUpdateEventSubj, "*")
+		if _, err := s.sysSubscribe(subject, s.accountClaimUpdate); err != nil {
+			s.Errorf("Error setting up internal tracking: %v", err)
+		}
 	}
 	// Listen for requests for our statsz.
 	subject = fmt.Sprintf(serverStatsReqSubj, s.info.ID)
@@ -600,28 +606,28 @@ func (s *Server) initEventTracking() {
 
 	monSrvc := map[string]msgHandler{
 		"VARZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &VarzOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Varz(optz) })
+			optz := &VarzEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Varz(&optz.VarzOptions) })
 		},
 		"SUBSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &SubszOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Subsz(optz) })
+			optz := &SubszEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Subsz(&optz.SubszOptions) })
 		},
 		"CONNZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &ConnzOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Connz(optz) })
+			optz := &ConnzEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Connz(&optz.ConnzOptions) })
 		},
 		"ROUTEZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &RoutezOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Routez(optz) })
+			optz := &RoutezEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Routez(&optz.RoutezOptions) })
 		},
 		"GATEWAYZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &GatewayzOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Gatewayz(optz) })
+			optz := &GatewayzEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Gatewayz(&optz.GatewayzOptions) })
 		},
 		"LEAFZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
-			optz := &LeafzOptions{}
-			s.zReq(reply, msg, optz, func() (interface{}, error) { return s.Leafz(optz) })
+			optz := &LeafzEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Leafz(&optz.LeafzOptions) })
 		},
 	}
 
@@ -647,7 +653,6 @@ func (s *Server) initEventTracking() {
 	if _, err := s.sysSubscribe(subject, s.remoteLatencyUpdate); err != nil {
 		s.Errorf("Error setting up internal latency tracking: %v", err)
 	}
-
 	// This is for simple debugging of number of subscribers that exist in the system.
 	if _, err := s.sysSubscribeInternal(accSubsSubj, s.debugSubscribers); err != nil {
 		s.Errorf("Error setting up internal debug service for subscribers: %v", err)
@@ -832,17 +837,102 @@ func (s *Server) leafNodeConnected(sub *subscription, _ *client, subject, reply 
 	}
 }
 
-// statszReq is a request for us to respond with current statz.
-func (s *Server) statszReq(sub *subscription, _ *client, subject, reply string, msg []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.eventsEnabled() || reply == _EMPTY_ {
-		return
-	}
-	s.sendStatsz(reply)
+// Common filter options for system requests STATSZ VARZ SUBSZ CONNZ ROUTEZ GATEWAYZ LEAFZ
+type EventFilterOptions struct {
+	Name    string `json:"server_name,omitempty"` // filter by server name
+	Cluster string `json:"cluster,omitempty"`     // filter by cluster name
+	Host    string `json:"host,omitempty"`        // filter by host name
 }
 
-func (s *Server) zReq(reply string, msg []byte, optz interface{}, respf func() (interface{}, error)) {
+// StatszEventOptions are options passed to Statsz
+type StatszEventOptions struct {
+	// No actual options yet
+
+	EventFilterOptions
+}
+
+// In the context of system events, ConnzEventOptions are options passed to Connz
+type ConnzEventOptions struct {
+	ConnzOptions
+	EventFilterOptions
+}
+
+// In the context of system events, RoutezEventOptions are options passed to Routez
+type RoutezEventOptions struct {
+	RoutezOptions
+	EventFilterOptions
+}
+
+// In the context of system events, SubzEventOptions are options passed to Subz
+type SubszEventOptions struct {
+	SubszOptions
+	EventFilterOptions
+}
+
+// In the context of system events, VarzEventOptions are options passed to Varz
+type VarzEventOptions struct {
+	VarzOptions
+	EventFilterOptions
+}
+
+// In the context of system events, GatewayzEventOptions are options passed to Gatewayz
+type GatewayzEventOptions struct {
+	GatewayzOptions
+	EventFilterOptions
+}
+
+// In the context of system events, LeafzEventOptions are options passed to Leafz
+type LeafzEventOptions struct {
+	LeafzOptions
+	EventFilterOptions
+}
+
+// returns true if the request does NOT apply to this server and can be ignored.
+// DO NOT hold the server lock when
+func (s *Server) filterRequest(fOpts *EventFilterOptions) bool {
+	if fOpts.Name != "" && !strings.Contains(s.info.Name, fOpts.Name) {
+		return true
+	}
+	if fOpts.Host != "" && !strings.Contains(s.info.Host, fOpts.Host) {
+		return true
+	}
+	if fOpts.Cluster != "" {
+		s.mu.Lock()
+		cluster := s.info.Cluster
+		s.mu.Unlock()
+		if !strings.Contains(cluster, fOpts.Cluster) {
+			return true
+		}
+	}
+	return false
+}
+
+// statszReq is a request for us to respond with current statsz.
+func (s *Server) statszReq(sub *subscription, _ *client, subject, reply string, msg []byte) {
+	if !s.EventsEnabled() || reply == _EMPTY_ {
+		return
+	}
+	opts := StatszEventOptions{}
+	if len(msg) != 0 {
+		if err := json.Unmarshal(msg, &opts); err != nil {
+			server := &ServerInfo{}
+			response := map[string]interface{}{"server": server}
+			response["error"] = map[string]interface{}{
+				"code":        http.StatusBadRequest,
+				"description": err.Error(),
+			}
+			s.sendInternalMsgLocked(reply, _EMPTY_, server, response)
+			return
+		} else if ignore := s.filterRequest(&opts.EventFilterOptions); ignore {
+			return
+		}
+	}
+	s.mu.Lock()
+	s.sendStatsz(reply)
+	s.mu.Unlock()
+}
+
+func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz interface{}, respf func() (interface{}, error)) {
 	if !s.EventsEnabled() || reply == _EMPTY_ {
 		return
 	}
@@ -851,8 +941,11 @@ func (s *Server) zReq(reply string, msg []byte, optz interface{}, respf func() (
 	var err error
 	status := 0
 	if len(msg) != 0 {
-		err = json.Unmarshal(msg, optz)
-		status = http.StatusBadRequest // status is only included on error, so record how far execution got
+		if err = json.Unmarshal(msg, optz); err != nil {
+			status = http.StatusBadRequest // status is only included on error, so record how far execution got
+		} else if s.filterRequest(fOpts) {
+			return
+		}
 	}
 	if err == nil {
 		response["data"], err = respf()
@@ -890,20 +983,26 @@ func (s *Server) remoteConnsUpdate(sub *subscription, _ *client, subject, reply 
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// check again here if we have been shutdown.
 	if !s.running || !s.eventsEnabled() {
+		s.mu.Unlock()
 		return
 	}
 	// Double check that this is not us, should never happen, so error if it does.
 	if m.Server.ID == s.info.ID {
 		s.sys.client.Errorf("Processing our own account connection event message: ignored")
+		s.mu.Unlock()
 		return
 	}
 	// If we are here we have interest in tracking this account. Update our accounting.
-	acc.updateRemoteServer(&m)
+	clients := acc.updateRemoteServer(&m)
 	s.updateRemoteServer(&m.Server)
+	s.mu.Unlock()
+	// Need to close clients outside of server lock
+	for _, c := range clients {
+		c.maxAccountConnExceeded()
+	}
 }
 
 // Setup tracking for this account. This allows us to track global account activity.
@@ -1088,9 +1187,10 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 		},
 		Reason: reason,
 	}
+	accName := c.acc.Name
 	c.mu.Unlock()
 
-	subj := fmt.Sprintf(disconnectEventSubj, c.acc.Name)
+	subj := fmt.Sprintf(disconnectEventSubj, accName)
 	s.sendInternalMsgLocked(subj, _EMPTY_, &m.Server, &m)
 }
 
@@ -1144,17 +1244,22 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 // required to be copied.
 type msgHandler func(sub *subscription, client *client, subject, reply string, msg []byte)
 
-// Create an internal subscription. No support for queue groups atm.
+// Create an internal subscription. sysSubscribeQ for queue groups.
 func (s *Server) sysSubscribe(subject string, cb msgHandler) (*subscription, error) {
-	return s.systemSubscribe(subject, false, cb)
+	return s.systemSubscribe(subject, "", false, cb)
+}
+
+// Create an internal subscription with queue
+func (s *Server) sysSubscribeQ(subject, queue string, cb msgHandler) (*subscription, error) {
+	return s.systemSubscribe(subject, queue, false, cb)
 }
 
 // Create an internal subscription but do not forward interest.
 func (s *Server) sysSubscribeInternal(subject string, cb msgHandler) (*subscription, error) {
-	return s.systemSubscribe(subject, true, cb)
+	return s.systemSubscribe(subject, "", true, cb)
 }
 
-func (s *Server) systemSubscribe(subject string, internalOnly bool, cb msgHandler) (*subscription, error) {
+func (s *Server) systemSubscribe(subject, queue string, internalOnly bool, cb msgHandler) (*subscription, error) {
 	if !s.eventsEnabled() {
 		return nil, ErrNoSysAccount
 	}
@@ -1168,20 +1273,16 @@ func (s *Server) systemSubscribe(subject string, internalOnly bool, cb msgHandle
 	sid := strconv.Itoa(s.sys.sid)
 	s.mu.Unlock()
 
-	arg := []byte(subject + " " + sid)
+	// Now create the subscription
 	if trace {
-		c.traceInOp("SUB", arg)
+		c.traceInOp("SUB", []byte(subject+" "+queue+" "+sid))
 	}
 
-	// Now create the subscription
-	sub, err := c.processSub(arg, internalOnly)
-	if err != nil {
-		return nil, err
+	var q []byte
+	if queue != "" {
+		q = []byte(queue)
 	}
-	c.mu.Lock()
-	sub.icb = cb
-	c.mu.Unlock()
-	return sub, nil
+	return c.processSub([]byte(subject), q, []byte(sid), cb, internalOnly)
 }
 
 func (s *Server) sysUnsubscribe(sub *subscription) {
