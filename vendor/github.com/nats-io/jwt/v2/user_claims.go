@@ -21,11 +21,19 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
+const (
+	ConnectionTypeStandard  = "STANDARD"
+	ConnectionTypeWebsocket = "WEBSOCKET"
+	ConnectionTypeLeafnode  = "LEAFNODE"
+	ConnectionTypeMqtt      = "MQTT"
+)
+
 // User defines the user specific data in a user JWT
 type User struct {
 	Permissions
 	Limits
-	BearerToken bool `json:"bearer_token,omitempty"`
+	BearerToken            bool       `json:"bearer_token,omitempty"`
+	AllowedConnectionTypes StringList `json:"allowed_connection_types,omitempty"`
 	// IssuerAccount stores the public key for the account the issuer represents.
 	// When set, the claim was issued by a signing key.
 	IssuerAccount string `json:"issuer_account,omitempty"`
@@ -53,8 +61,8 @@ func NewUserClaims(subject string) *UserClaims {
 	c := &UserClaims{}
 	c.Subject = subject
 	c.Limits = Limits{
-		UserLimits{"", nil},
-		NatsLimits{NoLimit, NoLimit, NoLimit, NoLimit, NoLimit},
+		UserLimits{CIDRList{}, nil, ""},
+		NatsLimits{NoLimit, NoLimit, NoLimit},
 	}
 	return c
 }

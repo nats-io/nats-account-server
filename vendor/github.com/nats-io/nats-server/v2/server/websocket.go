@@ -102,8 +102,6 @@ type srvWebsocket struct {
 	sameOrigin     bool
 	connectURLs    []string
 	connectURLsMap refCountedUrlSet
-	users          map[string]*User
-	nkeys          map[string]*NkeyUser
 	authOverride   bool // indicate if there is auth override in websocket config
 }
 
@@ -152,6 +150,12 @@ func wsGet(r io.Reader, buf []byte, pos, needed int) ([]byte, int, error) {
 		start += n
 	}
 	return b, pos + avail, nil
+}
+
+// Returns true if this connection is from a Websocket client.
+// Lock held on entry.
+func (c *client) isWebsocket() bool {
+	return c.ws != nil
 }
 
 // Returns a slice of byte slices corresponding to payload of websocket frames.
@@ -531,7 +535,7 @@ func (s *Server) wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsUpgradeRe
 	}
 	// Point 3.
 	if !wsHeaderContains(r.Header, "Upgrade", "websocket") {
-		return nil, wsReturnHTTPError(w, http.StatusBadRequest, "invalid value for header 'Uprade'")
+		return nil, wsReturnHTTPError(w, http.StatusBadRequest, "invalid value for header 'Upgrade'")
 	}
 	// Point 4.
 	if !wsHeaderContains(r.Header, "Connection", "Upgrade") {
@@ -744,15 +748,18 @@ func validateWebsocketOptions(o *Options) error {
 	// If there is a NoAuthUser, we need to have Users defined and
 	// the user to be present.
 	if wo.NoAuthUser != _EMPTY_ {
-		if wo.Users == nil {
-			return fmt.Errorf("websocket no_auth_user %q configured, but users are not", wo.NoAuthUser)
+		if err := validateNoAuthUser(o, wo.NoAuthUser); err != nil {
+			return err
 		}
-		for _, u := range wo.Users {
-			if u.Username == wo.NoAuthUser {
-				return nil
-			}
+	}
+	// Token/Username not possible if there are users/nkeys
+	if len(o.Users) > 0 || len(o.Nkeys) > 0 {
+		if wo.Username != _EMPTY_ {
+			return fmt.Errorf("websocket authentication username not compatible with presence of users/nkeys")
 		}
-		return fmt.Errorf("websocket no_auth_user %q not found in users configuration", wo.NoAuthUser)
+		if wo.Token != _EMPTY_ {
+			return fmt.Errorf("websocket authentication token not compatible with presence of users/nkeys")
+		}
 	}
 	// Using JWT requires Trusted Keys
 	if wo.JWTCookie != "" {
@@ -799,16 +806,8 @@ func (s *Server) wsSetOriginOptions(o *WebsocketOpts) {
 // Server lock is held on entry.
 func (s *Server) wsConfigAuth(opts *WebsocketOpts) {
 	ws := &s.websocket
-	if len(opts.Nkeys) > 0 || len(opts.Users) > 0 {
-		ws.nkeys, ws.users = s.buildNkeysAndUsersFromOptions(opts.Nkeys, opts.Users)
-		ws.authOverride = true
-	} else if opts.Username != "" || opts.Token != "" {
-		ws.authOverride = true
-	} else {
-		ws.users = nil
-		ws.nkeys = nil
-		ws.authOverride = false
-	}
+	// If any of those is specified, we consider that there is an override.
+	ws.authOverride = opts.Username != _EMPTY_ || opts.Token != _EMPTY_ || opts.NoAuthUser != _EMPTY_
 }
 
 func (s *Server) startWebsocketServer() {
@@ -863,6 +862,7 @@ func (s *Server) startWebsocketServer() {
 	if port == 0 {
 		s.opts.Websocket.Port = hl.Addr().(*net.TCPAddr).Port
 	}
+	s.Noticef("Listening for websocket clients on %s://%s:%d", proto, o.Host, port)
 	s.websocket.connectURLs, err = s.getConnectURLs(o.Advertise, o.Host, o.Port)
 	if err != nil {
 		s.Fatalf("Unable to get websocket connect URLs: %v", err)
@@ -877,7 +877,7 @@ func (s *Server) startWebsocketServer() {
 			s.Errorf(err.Error())
 			return
 		}
-		s.createClient(res.conn, res.ws)
+		s.createWSClient(res.conn, res.ws)
 	})
 	hs := &http.Server{
 		Addr:        hp,
@@ -901,6 +901,102 @@ func (s *Server) startWebsocketServer() {
 		s.done <- true
 	}()
 	s.mu.Unlock()
+}
+
+// This is similar to createClient() but has some modifications
+// specific to handle websocket clients.
+// The comments have been kept to minimum to reduce code size.
+// Check createClient() for more details.
+func (s *Server) createWSClient(conn net.Conn, ws *websocket) *client {
+	opts := s.getOpts()
+
+	maxPay := int32(opts.MaxPayload)
+	maxSubs := int32(opts.MaxSubs)
+	if maxSubs == 0 {
+		maxSubs = -1
+	}
+	now := time.Now()
+
+	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now, ws: ws}
+
+	c.registerWithAccount(s.globalAccount())
+
+	var info Info
+	var authRequired bool
+
+	s.mu.Lock()
+	info = s.copyInfo()
+	// Check auth, override if applicable.
+	if !info.AuthRequired {
+		// Set info.AuthRequired since this is what is sent to the client.
+		info.AuthRequired = s.websocket.authOverride
+	}
+	if s.nonceRequired() {
+		var raw [nonceLen]byte
+		nonce := raw[:]
+		s.generateNonce(nonce)
+		info.Nonce = string(nonce)
+	}
+	c.nonce = []byte(info.Nonce)
+	authRequired = info.AuthRequired
+
+	s.totalClients++
+	s.mu.Unlock()
+
+	c.mu.Lock()
+	if authRequired {
+		c.flags.set(expectConnect)
+	}
+	c.initClient()
+	c.Debugf("Client connection created")
+	c.sendProtoNow(c.generateClientInfoJSON(info))
+	c.mu.Unlock()
+
+	s.mu.Lock()
+	if !s.running || s.ldm {
+		if s.shutdown {
+			conn.Close()
+		}
+		s.mu.Unlock()
+		return c
+	}
+
+	if opts.MaxConn > 0 && len(s.clients) >= opts.MaxConn {
+		s.mu.Unlock()
+		c.maxConnExceeded()
+		return nil
+	}
+	s.clients[c.cid] = c
+
+	// Websocket clients do TLS in the websocket http server.
+	// So no TLS here...
+	s.mu.Unlock()
+
+	c.mu.Lock()
+
+	if c.isClosed() {
+		c.mu.Unlock()
+		c.closeConnection(WriteError)
+		return nil
+	}
+
+	if authRequired {
+		timeout := opts.AuthTimeout
+		// Possibly override with Websocket specific value.
+		if opts.Websocket.AuthTimeout != 0 {
+			timeout = opts.Websocket.AuthTimeout
+		}
+		c.setAuthTimer(secondsToDuration(timeout))
+	}
+
+	c.setPingTimer()
+
+	s.startGoRoutine(func() { c.readLoop(nil) })
+	s.startGoRoutine(func() { c.writeLoop() })
+
+	c.mu.Unlock()
+
+	return c
 }
 
 type wsCaptureHTTPServerLog struct {

@@ -146,7 +146,7 @@ func validateTrustedOperators(o *Options) error {
 func validateSrc(claims *jwt.UserClaims, host string) bool {
 	if claims == nil {
 		return false
-	} else if claims.Src == "" {
+	} else if len(claims.Src) == 0 {
 		return true
 	} else if host == "" {
 		return false
@@ -155,7 +155,7 @@ func validateSrc(claims *jwt.UserClaims, host string) bool {
 	if ip == nil {
 		return false
 	}
-	for _, cidr := range strings.Split(claims.Src, ",") {
+	for _, cidr := range claims.Src {
 		if _, net, err := net.ParseCIDR(cidr); err != nil {
 			return false // should not happen as this jwt is invalid
 		} else if net.Contains(ip) {
@@ -172,15 +172,23 @@ func validateTimes(claims *jwt.UserClaims) (bool, time.Duration) {
 		return true, time.Duration(0)
 	}
 	now := time.Now()
+	loc := time.Local
+	if claims.Locale != "" {
+		var err error
+		if loc, err = time.LoadLocation(claims.Locale); err != nil {
+			return false, time.Duration(0) // parsing not expected to fail at this point
+		}
+		now = now.In(loc)
+	}
 	for _, timeRange := range claims.Times {
 		y, m, d := now.Date()
 		m = m - 1
 		d = d - 1
-		start, err := time.ParseInLocation("15:04:05", timeRange.Start, now.Location())
+		start, err := time.ParseInLocation("15:04:05", timeRange.Start, loc)
 		if err != nil {
 			return false, time.Duration(0) // parsing not expected to fail at this point
 		}
-		end, err := time.ParseInLocation("15:04:05", timeRange.End, now.Location())
+		end, err := time.ParseInLocation("15:04:05", timeRange.End, loc)
 		if err != nil {
 			return false, time.Duration(0) // parsing not expected to fail at this point
 		}

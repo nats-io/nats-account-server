@@ -34,8 +34,8 @@ import (
 )
 
 const (
-	accountPackRequest           = "$SYS.ACCOUNT.CLAIMS.PACK"
-	accountLookupRequest         = "$SYS.ACCOUNT.%s.CLAIMS.LOOKUP"
+	accountPackRequest           = "$SYS.REQ.CLAIMS.PACK"
+	accountLookupRequest         = "$SYS.REQ.ACCOUNT.%s.CLAIMS.LOOKUP"
 	accountNotificationFormat    = "$SYS.ACCOUNT.%s.CLAIMS.UPDATE"
 	activationNotificationFormat = "$SYS.ACCOUNT.%s.CLAIMS.ACTIVATE.%s"
 )
@@ -216,7 +216,7 @@ func (server *AccountServer) connectToNATS() error {
 }
 
 func (server *AccountServer) handleAccountLookup(msg *nats.Msg) {
-	account := strings.TrimPrefix(msg.Subject, "$SYS.ACCOUNT.")
+	account := strings.TrimPrefix(msg.Subject, "$SYS.REQ.ACCOUNT.")
 	account = strings.TrimSuffix(account, ".CLAIMS.LOOKUP")
 	if len(account) == len(msg.Subject) || len(account) == 0 {
 		server.logger.Errorf("lookup %s failed parsing", msg.Subject)

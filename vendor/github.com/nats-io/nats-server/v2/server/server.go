@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -140,6 +141,8 @@ type Server struct {
 	routeListener    net.Listener
 	routeInfo        Info
 	routeInfoJSON    []byte
+	routeResolver    netResolver
+	routesToSelf     map[string]struct{}
 	leafNodeListener net.Listener
 	leafNodeInfo     Info
 	leafNodeInfoJSON []byte
@@ -218,6 +221,16 @@ type Server struct {
 
 	// Websocket structure
 	websocket srvWebsocket
+
+	// MQTT structure
+	mqtt srvMQTT
+
+	// exporting account name the importer experienced issues with
+	incompleteAccExporterMap sync.Map
+
+	// Holds cluster name under different lock for mapping
+	cnMu sync.RWMutex
+	cn   string
 }
 
 // Make sure all are 64bits for atomic use
@@ -300,6 +313,7 @@ func NewServer(opts *Options) (*Server, error) {
 		gwLeafSubs:   NewSublistWithCache(),
 		httpBasePath: httpBasePath,
 		eventIds:     nuid.New(),
+		routesToSelf: make(map[string]struct{}),
 	}
 
 	// Trusted root operator keys.
@@ -309,6 +323,11 @@ func NewServer(opts *Options) (*Server, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.routeResolver = opts.Cluster.resolver
+	if s.routeResolver == nil {
+		s.routeResolver = net.DefaultResolver
+	}
 
 	// Used internally for quick look-ups.
 	s.clientConnectURLsMap = make(refCountedUrlSet)
@@ -381,7 +400,7 @@ func NewServer(opts *Options) (*Server, error) {
 			s.mu.Unlock()
 			var a *Account
 			// perform direct lookup to avoid warning trace
-			if _, err := ar.Fetch(s.opts.SystemAccount); err == nil {
+			if _, err := fetchAccount(ar, s.opts.SystemAccount); err == nil {
 				a, _ = s.fetchAccount(s.opts.SystemAccount)
 			}
 			s.mu.Lock()
@@ -396,39 +415,6 @@ func NewServer(opts *Options) (*Server, error) {
 	// For tracking accounts
 	if err := s.configureAccounts(); err != nil {
 		return nil, err
-	}
-
-	// In local config mode, check that leafnode configuration
-	// refers to account that exist.
-	if len(opts.TrustedOperators) == 0 {
-		checkAccountExists := func(accName string) error {
-			if accName == _EMPTY_ {
-				return nil
-			}
-			if _, ok := s.accounts.Load(accName); !ok {
-				return fmt.Errorf("cannot find account %q specified in leafnode authorization", accName)
-			}
-			return nil
-		}
-		if err := checkAccountExists(opts.LeafNode.Account); err != nil {
-			return nil, err
-		}
-		for _, lu := range opts.LeafNode.Users {
-			if lu.Account == nil {
-				continue
-			}
-			if err := checkAccountExists(lu.Account.Name); err != nil {
-				return nil, err
-			}
-		}
-		for _, r := range opts.LeafNode.Remotes {
-			if r.LocalAccount == _EMPTY_ {
-				continue
-			}
-			if _, ok := s.accounts.Load(r.LocalAccount); !ok {
-				return nil, fmt.Errorf("no local account %q for remote leafnode", r.LocalAccount)
-			}
-		}
 	}
 
 	// Used to setup Authorization.
@@ -448,6 +434,14 @@ func (s *Server) ClusterName() string {
 	return cn
 }
 
+// Grabs cluster name with cluster name specific lock.
+func (s *Server) cachedClusterName() string {
+	s.cnMu.RLock()
+	cn := s.cn
+	s.cnMu.RUnlock()
+	return cn
+}
+
 // setClusterName will update the cluster name for this server.
 func (s *Server) setClusterName(name string) {
 	s.mu.Lock()
@@ -458,6 +452,7 @@ func (s *Server) setClusterName(name string) {
 	}
 	s.info.Cluster = name
 	s.routeInfo.Cluster = name
+
 	// Regenerate the info byte array
 	s.generateRouteInfoJSON()
 	// Need to close solicited leaf nodes. The close has to be done outside of the server lock.
@@ -470,6 +465,12 @@ func (s *Server) setClusterName(name string) {
 		c.mu.Unlock()
 	}
 	s.mu.Unlock()
+
+	// Also place into mapping cn with cnMu lock.
+	s.cnMu.Lock()
+	s.cn = name
+	s.cnMu.Unlock()
+
 	for _, l := range leafs {
 		l.closeConnection(ClusterNameConflict)
 	}
@@ -477,7 +478,6 @@ func (s *Server) setClusterName(name string) {
 		resetCh <- struct{}{}
 	}
 	s.Noticef("Cluster name updated to %s", name)
-
 }
 
 // Return whether the cluster name is dynamic.
@@ -536,6 +536,9 @@ func validateOptions(o *Options) error {
 	if err := validateClusterName(o); err != nil {
 		return err
 	}
+	if err := validateMQTTOptions(o); err != nil {
+		return err
+	}
 	// Finally check websocket options.
 	return validateWebsocketOptions(o)
 }
@@ -574,7 +577,19 @@ func (s *Server) configureAccounts() error {
 	// Check opts and walk through them. We need to copy them here
 	// so that we do not keep a real one sitting in the options.
 	for _, acc := range s.opts.Accounts {
-		a := acc.shallowCopy()
+		var a *Account
+		if acc.Name == globalAccountName {
+			a = s.gacc
+		} else {
+			a = acc.shallowCopy()
+		}
+		if acc.hasMappings() {
+			// For now just move and wipe from opts.Accounts version.
+			a.mappings = acc.mappings
+			acc.mappings = nil
+			// We use this for selecting between multiple weighted destinations.
+			a.prand = rand.New(rand.NewSource(time.Now().UnixNano()))
+		}
 		acc.sl = nil
 		acc.clients = nil
 		s.registerAccountNoLock(a)
@@ -628,7 +643,7 @@ func (s *Server) configureAccounts() error {
 			acc.ic.acc = acc
 			acc.addAllServiceImportSubs()
 		}
-
+		acc.updated = time.Now()
 		return true
 	})
 
@@ -717,6 +732,10 @@ func (s *Server) generateRouteInfoJSON() {
 // Determines if we are in pre NATS 2.0 setup with no accounts.
 func (s *Server) globalAccountOnly() bool {
 	var hasOthers bool
+
+	if len(s.trustedKeys) > 0 {
+		return false
+	}
 
 	s.mu.Lock()
 	s.accounts.Range(func(k, v interface{}) bool {
@@ -1141,6 +1160,7 @@ func (s *Server) registerAccountNoLock(acc *Account) *Account {
 		acc.lqws = make(map[string]int32)
 	}
 	acc.srv = s
+	acc.updated = time.Now()
 	acc.mu.Unlock()
 	s.accounts.Store(acc.Name, acc)
 	s.tmpAccounts.Delete(acc.Name)
@@ -1174,7 +1194,7 @@ func (s *Server) lookupAccount(name string) (*Account, error) {
 	}
 	// If we have a resolver see if it can fetch the account.
 	if s.AccountResolver() == nil {
-		return nil, ErrMissingAccount
+		return nil, ErrNoAccountResolver
 	}
 	return s.fetchAccount(name)
 }
@@ -1189,7 +1209,7 @@ func (s *Server) LookupAccount(name string) (*Account, error) {
 // Lock MUST NOT be held upon entry.
 func (s *Server) updateAccount(acc *Account) error {
 	// TODO(dlc) - Make configurable
-	if time.Since(acc.updated) < time.Second {
+	if !acc.incomplete && time.Since(acc.updated) < time.Second {
 		s.Debugf("Requested account update for [%s] ignored, too soon", acc.Name)
 		return ErrAccountResolverUpdateTooSoon
 	}
@@ -1206,8 +1226,7 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 	if acc == nil {
 		return ErrMissingAccount
 	}
-	acc.updated = time.Now()
-	if acc.claimJWT != "" && acc.claimJWT == claimJWT {
+	if acc.claimJWT != "" && acc.claimJWT == claimJWT && !acc.incomplete {
 		s.Debugf("Requested account update for [%s], same claims detected", acc.Name)
 		return ErrAccountResolverSameClaims
 	}
@@ -1216,7 +1235,8 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 		acc.mu.Lock()
 		if acc.Issuer == "" {
 			acc.Issuer = accClaims.Issuer
-		} else if acc.Issuer != accClaims.Issuer {
+		}
+		if acc.Name != accClaims.Subject {
 			acc.mu.Unlock()
 			return ErrAccountValidation
 		}
@@ -1237,7 +1257,7 @@ func (s *Server) fetchRawAccountClaims(name string) (string, error) {
 	}
 	// Need to do actual Fetch
 	start := time.Now()
-	claimJWT, err := accResolver.Fetch(name)
+	claimJWT, err := fetchAccount(accResolver, name)
 	fetchTime := time.Since(start)
 	if fetchTime > time.Second {
 		s.Warnf("Account [%s] fetch took %v", name, fetchTime)
@@ -1258,7 +1278,12 @@ func (s *Server) fetchAccountClaims(name string) (*jwt.AccountClaims, string, er
 	if err != nil {
 		return nil, _EMPTY_, err
 	}
-	return s.verifyAccountClaims(claimJWT)
+	var claim *jwt.AccountClaims
+	claim, claimJWT, err = s.verifyAccountClaims(claimJWT)
+	if claim != nil && claim.Subject != name {
+		return nil, _EMPTY_, ErrAccountValidation
+	}
+	return claim, claimJWT, err
 }
 
 // verifyAccountClaims will decode and validate any account claims.
@@ -1267,12 +1292,12 @@ func (s *Server) verifyAccountClaims(claimJWT string) (*jwt.AccountClaims, strin
 	if err != nil {
 		return nil, _EMPTY_, err
 	}
+	if !s.isTrustedIssuer(accClaims.Issuer) {
+		return nil, _EMPTY_, ErrAccountValidation
+	}
 	vr := jwt.CreateValidationResults()
 	accClaims.Validate(vr)
 	if vr.IsBlocking(true) {
-		return nil, _EMPTY_, ErrAccountValidation
-	}
-	if !s.isTrustedIssuer(accClaims.Issuer) {
 		return nil, _EMPTY_, ErrAccountValidation
 	}
 	return accClaims, claimJWT, nil
@@ -1400,7 +1425,7 @@ func (s *Server) Start() {
 						case <-s.quitCh:
 							return
 						case <-t.C:
-							if _, err := ar.Fetch(s.opts.SystemAccount); err != nil {
+							if _, err := fetchAccount(ar, s.opts.SystemAccount); err != nil {
 								continue
 							}
 							if _, err := s.fetchAccount(s.opts.SystemAccount); err != nil {
@@ -1497,6 +1522,11 @@ func (s *Server) Start() {
 		s.startWebsocketServer()
 	}
 
+	// MQTT
+	if opts.MQTT.Port != 0 {
+		s.startMQTT()
+	}
+
 	// Start up routing as well if needed.
 	if opts.Cluster.Port != 0 {
 		s.startGoRoutine(func() {
@@ -1590,6 +1620,13 @@ func (s *Server) Shutdown() {
 		s.websocket.server.Close()
 		s.websocket.server = nil
 		s.websocket.listener = nil
+	}
+
+	// Kick MQTT accept loop
+	if s.mqtt.listener != nil {
+		doneExpected++
+		s.mqtt.listener.Close()
+		s.mqtt.listener = nil
 	}
 
 	// Kick leafnodes AcceptLoop()
@@ -1705,6 +1742,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	}
 
 	s.Noticef("Server id is %s", s.info.ID)
+	s.Noticef("Server name is %s", s.info.Name)
 	s.Noticef("Server is ready")
 
 	// If server was started with RANDOM_PORT (-1), opts.Port would be equal
@@ -1727,7 +1765,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	s.clientConnectURLs = s.getClientConnectURLs()
 	s.listener = l
 
-	go s.acceptConnections(l, "Client", func(conn net.Conn) { s.createClient(conn, nil) },
+	go s.acceptConnections(l, "Client", func(conn net.Conn) { s.createClient(conn) },
 		func(_ error) bool {
 			if s.isLameDuckMode() {
 				// Signal that we are not accepting new clients
@@ -1892,6 +1930,7 @@ const (
 	LeafzPath    = "/leafz"
 	SubszPath    = "/subsz"
 	StackszPath  = "/stacksz"
+	AccountzPath = "/accountz"
 )
 
 func (s *Server) basePath(p string) string {
@@ -1969,6 +2008,8 @@ func (s *Server) startMonitoring(secure bool) error {
 	mux.HandleFunc(s.basePath("/subscriptionsz"), s.HandleSubsz)
 	// Stacksz
 	mux.HandleFunc(s.basePath(StackszPath), s.HandleStacksz)
+	// Accountz
+	mux.HandleFunc(s.basePath(AccountzPath), s.HandleAccountz)
 
 	// Do not set a WriteTimeout because it could cause cURL/browser
 	// to return empty response or unable to display page if the
@@ -1979,6 +2020,11 @@ func (s *Server) startMonitoring(secure bool) error {
 		MaxHeaderBytes: 1 << 20,
 	}
 	s.mu.Lock()
+	if s.shutdown {
+		httpListener.Close()
+		s.mu.Unlock()
+		return nil
+	}
 	s.http = httpListener
 	s.httpHandler = mux
 	s.monitoringServer = srv
@@ -2045,7 +2091,7 @@ func (c *tlsMixConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
-func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
+func (s *Server) createClient(conn net.Conn) *client {
 	// Snapshot server options.
 	opts := s.getOpts()
 
@@ -2057,19 +2103,16 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 	}
 	now := time.Now()
 
-	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now, ws: ws}
+	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now}
 
 	c.registerWithAccount(s.globalAccount())
 
-	// Grab JSON info string
+	var info Info
+	var authRequired bool
+
 	s.mu.Lock()
-	info := s.copyInfo()
-	// If this is a websocket client and there is no top-level auth specified,
-	// then we use the websocket's specific boolean that will be set to true
-	// if there is any auth{} configured in websocket{}.
-	if ws != nil && !info.AuthRequired {
-		info.AuthRequired = s.websocket.authOverride
-	}
+	// Grab JSON info string
+	info = s.copyInfo()
 	if s.nonceRequired() {
 		// Nonce handling
 		var raw [nonceLen]byte
@@ -2078,12 +2121,14 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 		info.Nonce = string(nonce)
 	}
 	c.nonce = []byte(info.Nonce)
+	authRequired = info.AuthRequired
+
 	s.totalClients++
 	s.mu.Unlock()
 
 	// Grab lock
 	c.mu.Lock()
-	if info.AuthRequired {
+	if authRequired {
 		c.flags.set(expectConnect)
 	}
 
@@ -2127,6 +2172,8 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 		return nil
 	}
 	s.clients[c.cid] = c
+
+	tlsRequired := info.TLSRequired
 	s.mu.Unlock()
 
 	// Re-Grab lock
@@ -2135,7 +2182,6 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 	// Connection could have been closed while sending the INFO proto.
 	isClosed := c.isClosed()
 
-	tlsRequired := ws == nil && info.TLSRequired
 	var pre []byte
 	// If we have both TLS and non-TLS allowed we need to see which
 	// one the client wants.
@@ -2203,16 +2249,8 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 	// Check for Auth. We schedule this timer after the TLS handshake to avoid
 	// the race where the timer fires during the handshake and causes the
 	// server to write bad data to the socket. See issue #432.
-	if info.AuthRequired {
-		timeout := opts.AuthTimeout
-		// For websocket, possibly override only if set. We make sure that
-		// opts.AuthTimeout is set to a default value if not configured,
-		// but we don't do the same for websocket's one so that we know
-		// if user has explicitly set or not.
-		if ws != nil && opts.Websocket.AuthTimeout != 0 {
-			timeout = opts.Websocket.AuthTimeout
-		}
-		c.setAuthTimer(secondsToDuration(timeout))
+	if authRequired {
+		c.setAuthTimer(secondsToDuration(opts.AuthTimeout))
 	}
 
 	// Do final client initialization
@@ -2393,7 +2431,11 @@ func (s *Server) removeClient(c *client) {
 		if updateProtoInfoCount {
 			s.cproto--
 		}
+		mqtt := c.isMqtt()
 		s.mu.Unlock()
+		if mqtt {
+			s.mqttHandleClosedClient(c)
+		}
 	case ROUTER:
 		s.removeRoute(c)
 	case GATEWAY:
@@ -3119,7 +3161,9 @@ func (s *Server) acceptError(acceptName string, err error, tmpDelay time.Duratio
 	return tmpDelay
 }
 
-func (s *Server) getRandomIP(resolver netResolver, url string) (string, error) {
+var errNoIPAvail = errors.New("no IP available")
+
+func (s *Server) getRandomIP(resolver netResolver, url string, excludedAddresses map[string]struct{}) (string, error) {
 	host, port, err := net.SplitHostPort(url)
 	if err != nil {
 		return "", err
@@ -3131,6 +3175,24 @@ func (s *Server) getRandomIP(resolver netResolver, url string) (string, error) {
 	ips, err := resolver.LookupHost(context.Background(), host)
 	if err != nil {
 		return "", fmt.Errorf("lookup for host %q: %v", host, err)
+	}
+	if len(excludedAddresses) > 0 {
+		for i := 0; i < len(ips); i++ {
+			ip := ips[i]
+			addr := net.JoinHostPort(ip, port)
+			if _, excluded := excludedAddresses[addr]; excluded {
+				if len(ips) == 1 {
+					ips = nil
+					break
+				}
+				ips[i] = ips[len(ips)-1]
+				ips = ips[:len(ips)-1]
+				i--
+			}
+		}
+		if len(ips) == 0 {
+			return "", errNoIPAvail
+		}
 	}
 	var address string
 	if len(ips) == 0 {
@@ -3178,6 +3240,9 @@ func (s *Server) setFirstPingTimer(c *client) {
 		if c.kind != CLIENT {
 			if d > firstPingInterval {
 				d = firstPingInterval
+			}
+			if c.kind == GATEWAY {
+				d = adjustPingIntervalForGateway(d)
 			}
 		} else if d > firstClientPingInterval {
 			d = firstClientPingInterval

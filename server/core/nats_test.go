@@ -306,7 +306,7 @@ func TestLookup(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusNotFound)
 
 	// test lookup when there is a responder
-	_, err = testEnv.NC.Subscribe("$SYS.ACCOUNT.*.CLAIMS.LOOKUP", func(m *nats.Msg) {
+	_, err = testEnv.NC.Subscribe(fmt.Sprintf(accountLookupRequest, "*"), func(m *nats.Msg) {
 		lock.Lock()
 		received = true
 		m.Respond([]byte(jwt))
@@ -430,7 +430,9 @@ func TestFullDirNatsResolver(t *testing.T) {
 	// store jwt in account server
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
 	require.NoError(t, err)
-	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, testEnv.SystemAccountJWTFile)
+	sysAccJwt, err := ioutil.ReadFile(testEnv.SystemAccountJWTFile)
+	require.NoError(t, err)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, string(sysAccJwt))
 	require.NoError(t, err)
 
 	dirA, err := ioutil.TempDir("", "srv-a")
@@ -486,7 +488,9 @@ func TestCacheDirNatsResolver(t *testing.T) {
 	// store jwt in account server
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
 	require.NoError(t, err)
-	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, testEnv.SystemAccountJWTFile)
+	sysAccJwt, err := ioutil.ReadFile(testEnv.SystemAccountJWTFile)
+	require.NoError(t, err)
+	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, string(sysAccJwt))
 	require.NoError(t, err)
 
 	port := atomic.LoadUint64(&port) - 1

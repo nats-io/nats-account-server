@@ -277,7 +277,7 @@ func (server *AccountServer) createStore() (store.JWTStore, error) {
 		return nil, fmt.Errorf("store directory is required")
 	}
 	server.logger.Noticef("creating a store with cleanup functions at %s", config.Dir)
-	return natsserver.NewExpiringDirJWTStore(config.Dir, config.Shard, true,
+	return natsserver.NewExpiringDirJWTStore(config.Dir, config.Shard, true, natsserver.NoDelete,
 		time.Duration(config.CleanupInterval)*time.Millisecond, 0, false, 0, server.jwtChangedCallback)
 }
 

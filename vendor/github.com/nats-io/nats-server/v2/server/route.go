@@ -491,6 +491,7 @@ func (c *client) processRouteInfo(info *Info) {
 
 	supportsHeaders := c.srv.supportsHeaders()
 	clusterName := c.srv.ClusterName()
+	srvName := c.srv.Name()
 
 	c.mu.Lock()
 	// Connection can be closed at any time (by auth timeout, etc).
@@ -576,6 +577,12 @@ func (c *client) processRouteInfo(info *Info) {
 			s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
 		}
 		return
+	}
+
+	// Check if remote has same server name than this server.
+	if !c.route.didSolicit && info.Name == srvName {
+		// For now simply report as a warning.
+		c.Warnf("Remote server has a duplicate name: %q", info.Name)
 	}
 
 	// Mark that the INFO protocol has been received, so we can detect updates.
@@ -719,7 +726,7 @@ func (s *Server) sendAsyncInfoToClients(regCli, wsCli bool) {
 		// registered (server has received CONNECT and first PING). For
 		// clients that are not at this stage, this will happen in the
 		// processing of the first PING (see client.processPing)
-		if ((regCli && c.ws == nil) || (wsCli && c.ws != nil)) &&
+		if ((regCli && !c.isWebsocket()) || (wsCli && c.isWebsocket())) &&
 			c.opts.Protocol >= ClientProtoInfo &&
 			c.flags.isSet(firstPongSent) {
 			// sendInfo takes care of checking if the connection is still
@@ -1028,6 +1035,7 @@ func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 		if acc, isNew = srv.LookupOrRegisterAccount(accountName); isNew && expire {
 			acc.mu.Lock()
 			acc.expired = true
+			acc.incomplete = true
 			acc.mu.Unlock()
 		}
 	}
@@ -1228,10 +1236,10 @@ func (c *client) sendRouteSubOrUnSubProtos(subs []*subscription, isSubProto, tra
 		if len(sub.origin) > 0 && c.route.lnoc {
 			if isSubProto {
 				buf = append(buf, lSubBytes...)
+				buf = append(buf, sub.origin...)
 			} else {
 				buf = append(buf, lUnsubBytes...)
 			}
-			buf = append(buf, sub.origin...)
 			buf = append(buf, ' ')
 		} else {
 			if isSubProto {
@@ -1755,6 +1763,23 @@ func (s *Server) startRouteAcceptLoop() {
 		s.Warnf(clusterTLSInsecureWarning)
 	}
 
+	// Now that we have the port, keep track of all ip:port that resolve to this server.
+	if interfaceAddr, err := net.InterfaceAddrs(); err == nil {
+		var localIPs []string
+		for i := 0; i < len(interfaceAddr); i++ {
+			interfaceIP, _, _ := net.ParseCIDR(interfaceAddr[i].String())
+			ipStr := interfaceIP.String()
+			if net.ParseIP(ipStr) != nil {
+				localIPs = append(localIPs, ipStr)
+			}
+		}
+		var portStr = strconv.FormatInt(int64(s.routeInfo.Port), 10)
+		for _, ip := range localIPs {
+			ipPort := net.JoinHostPort(ip, portStr)
+			s.routesToSelf[ipPort] = struct{}{}
+		}
+	}
+
 	// Start the accept loop in a different go routine.
 	go s.acceptConnections(l, "Route", func(conn net.Conn) { s.createRoute(conn, nil) }, nil)
 
@@ -1836,13 +1861,26 @@ func (s *Server) connectToRoute(rURL *url.URL, tryForEver, firstConnect bool) {
 
 	const connErrFmt = "Error trying to connect to route (attempt %v): %v"
 
+	s.mu.Lock()
+	resolver := s.routeResolver
+	excludedAddresses := s.routesToSelf
+	s.mu.Unlock()
+
 	attempts := 0
 	for s.isRunning() && rURL != nil {
 		if tryForEver && !s.routeStillValid(rURL) {
 			return
 		}
-		s.Debugf("Trying to connect to route on %s", rURL.Host)
-		conn, err := natsDialTimeout("tcp", rURL.Host, DEFAULT_ROUTE_DIAL)
+		var conn net.Conn
+		address, err := s.getRandomIP(resolver, rURL.Host, excludedAddresses)
+		if err == errNoIPAvail {
+			// This is ok, we are done.
+			return
+		}
+		if err == nil {
+			s.Debugf("Trying to connect to route on %s (%s)", rURL.Host, address)
+			conn, err = natsDialTimeout("tcp", address, DEFAULT_ROUTE_DIAL)
+		}
 		if err != nil {
 			attempts++
 			if s.shouldReportConnectErr(firstConnect, attempts) {

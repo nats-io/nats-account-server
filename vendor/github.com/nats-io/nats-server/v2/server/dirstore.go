@@ -81,6 +81,8 @@ type DirJWTStore struct {
 	directory  string
 	shard      bool
 	readonly   bool
+	deleteType deleteType
+	operator   string
 	expiration *expirationTracker
 	changed    JWTChanged
 }
@@ -101,10 +103,13 @@ func newDir(dirPath string, create bool) (string, error) {
 	return fullPath, nil
 }
 
+// future proofing in case new options will be added
+type dirJWTStoreOption interface{}
+
 // Creates a directory based jwt store.
 // Reads files only, does NOT watch directories and files.
-func NewImmutableDirJWTStore(dirPath string, shard bool) (*DirJWTStore, error) {
-	theStore, err := NewDirJWTStore(dirPath, shard, false)
+func NewImmutableDirJWTStore(dirPath string, shard bool, _ ...dirJWTStoreOption) (*DirJWTStore, error) {
+	theStore, err := NewDirJWTStore(dirPath, shard, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +119,7 @@ func NewImmutableDirJWTStore(dirPath string, shard bool) (*DirJWTStore, error) {
 
 // Creates a directory based jwt store.
 // Operates on files only, does NOT watch directories and files.
-func NewDirJWTStore(dirPath string, shard bool, create bool) (*DirJWTStore, error) {
+func NewDirJWTStore(dirPath string, shard bool, create bool, _ ...dirJWTStoreOption) (*DirJWTStore, error) {
 	fullPath, err := newDir(dirPath, create)
 	if err != nil {
 		return nil, err
@@ -125,6 +130,14 @@ func NewDirJWTStore(dirPath string, shard bool, create bool) (*DirJWTStore, erro
 	}
 	return theStore, nil
 }
+
+type deleteType int
+
+const (
+	NoDelete deleteType = iota
+	RenameDeleted
+	HardDelete
+)
 
 // Creates a directory based jwt store.
 //
@@ -135,16 +148,17 @@ func NewDirJWTStore(dirPath string, shard bool, create bool) (*DirJWTStore, erro
 // evictOnLimit determines the behavior once limit is reached.
 //     true - Evict based on lru strategy
 //     false - return an error
-func NewExpiringDirJWTStore(dirPath string, shard bool, create bool, expireCheck time.Duration, limit int64,
-	evictOnLimit bool, ttl time.Duration, changeNotification JWTChanged) (*DirJWTStore, error) {
+func NewExpiringDirJWTStore(dirPath string, shard bool, create bool, delete deleteType, expireCheck time.Duration, limit int64,
+	evictOnLimit bool, ttl time.Duration, changeNotification JWTChanged, _ ...dirJWTStoreOption) (*DirJWTStore, error) {
 	fullPath, err := newDir(dirPath, create)
 	if err != nil {
 		return nil, err
 	}
 	theStore := &DirJWTStore{
-		directory: fullPath,
-		shard:     shard,
-		changed:   changeNotification,
+		directory:  fullPath,
+		shard:      shard,
+		deleteType: delete,
+		changed:    changeNotification,
 	}
 	if expireCheck <= 0 {
 		if ttl != 0 {
@@ -261,11 +275,11 @@ func (store *DirJWTStore) PackWalk(maxJWTs int, cb func(partialPackMsg string)) 
 	exp := store.expiration
 	store.Unlock()
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() && strings.HasSuffix(path, fileExtension) { // this is a JWT
+		if info != nil && !info.IsDir() && strings.HasSuffix(path, fileExtension) { // this is a JWT
 			pubKey := strings.TrimSuffix(filepath.Base(path), fileExtension)
 			store.Lock()
 			if exp != nil {
-				if _, ok := store.expiration.idx[pubKey]; !ok {
+				if _, ok := exp.idx[pubKey]; !ok {
 					store.Unlock()
 					return nil // only include indexed files
 				}
@@ -420,6 +434,33 @@ func (store *DirJWTStore) write(path string, publicKey string, theJWT string) (b
 	return true, nil
 }
 
+func (store *DirJWTStore) delete(publicKey string) error {
+	if store.readonly {
+		return fmt.Errorf("store is read-only")
+	} else if store.deleteType == NoDelete {
+		return fmt.Errorf("store is not set up to for delete")
+	}
+	store.Lock()
+	defer store.Unlock()
+	name := store.pathForKey(publicKey)
+	if store.deleteType == RenameDeleted {
+		if err := os.Rename(name, name+".deleted"); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+	} else if err := os.Remove(name); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	store.expiration.unTrack(publicKey)
+	// TODO do cb so server can evict the account and associated clients
+	return nil
+}
+
 // Save puts the JWT in a map by public key and performs update callbacks
 // Assumes lock is NOT held
 func (store *DirJWTStore) save(publicKey string, theJWT string) error {
@@ -566,7 +607,7 @@ func (pq *expirationTracker) updateTrack(publicKey string) {
 		i := e.Value.(*jwtItem)
 		if pq.ttl != 0 {
 			// only update expiration when set
-			i.expiration = time.Now().Add(pq.ttl).Unix()
+			i.expiration = time.Now().Round(time.Second).Add(pq.ttl).Unix()
 			heap.Fix(pq, i.index)
 		}
 		if pq.evictOnLimit {
@@ -590,7 +631,7 @@ func (pq *expirationTracker) track(publicKey string, hash *[sha256.Size]byte, th
 		if pq.ttl == time.Duration(math.MaxInt64) {
 			exp = math.MaxInt64
 		} else {
-			exp = time.Now().Add(pq.ttl).Unix()
+			exp = time.Now().Round(time.Second).Add(pq.ttl).Unix()
 		}
 	} else {
 		if g, err := jwt.DecodeGeneric(theJWT); err == nil {
@@ -645,18 +686,15 @@ func (store *DirJWTStore) startExpiring(reCheck time.Duration, limit int64, evic
 			now := time.Now()
 			store.Lock()
 			if pq.Len() > 0 {
-				if it := heap.Pop(pq).(*jwtItem); it.expiration <= now.Unix() {
+				if it := pq.heap[0]; it.expiration <= now.Unix() {
 					path := store.pathForKey(it.publicKey)
-					if err := os.Remove(path); err != nil {
-						heap.Push(pq, it) // retry later
-					} else {
+					if err := os.Remove(path); err == nil {
+						heap.Pop(pq)
 						pq.unTrack(it.publicKey)
 						xorAssign(&pq.hash, it.hash)
 						store.Unlock()
-						continue // we removed an entry, check next one
+						continue // we removed an entry, check next one right away
 					}
-				} else {
-					heap.Push(pq, it)
 				}
 			}
 			store.Unlock()
