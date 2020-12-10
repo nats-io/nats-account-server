@@ -138,9 +138,10 @@ func (s *Sublist) CacheEnabled() bool {
 // RegisterNotification will register for notifications when interest for the given
 // subject changes. The subject must be a literal publish type subject. The
 // notification is true for when the first interest for a subject is inserted,
-// and false when all interest in the subject is removed. The sublist will not
-// block when trying to send the notification. Its up to the caller to make sure
-// the channel send will not block.
+// and false when all interest in the subject is removed. Note that this interest
+// needs to be exact and that wildcards will not trigger the notifications. The sublist
+// will not block when trying to send the notification. Its up to the caller to make
+// sure the channel send will not block.
 func (s *Sublist) RegisterNotification(subject string, notify chan<- bool) error {
 	if subjectHasWildcard(subject) {
 		return ErrInvalidSubject
@@ -149,8 +150,24 @@ func (s *Sublist) RegisterNotification(subject string, notify chan<- bool) error
 		return ErrNilChan
 	}
 
+	var hasInterest bool
 	r := s.Match(subject)
-	hasInterest := len(r.psubs)+len(r.qsubs) > 0
+
+	if len(r.psubs)+len(r.qsubs) > 0 {
+		for _, sub := range r.psubs {
+			if string(sub.subject) == subject {
+				hasInterest = true
+				break
+			}
+		}
+		for _, qsub := range r.qsubs {
+			qs := qsub[0]
+			if string(qs.subject) == subject {
+				hasInterest = true
+				break
+			}
+		}
+	}
 
 	s.Lock()
 	if s.notify == nil {
@@ -243,52 +260,48 @@ func (s *Sublist) addNotify(m map[string][]chan<- bool, subject string, notify c
 
 // chkForInsertNotification will check to see if we need to notify on this subject.
 // Write lock should be held.
-func (s *Sublist) chkForInsertNotification(subject string, isLiteral bool) {
-	// If we are a literal, all notify subjects are also literal so just do a
-	// hash lookup here.
-	if isLiteral {
-		chs := s.notify.insert[subject]
-		if len(chs) > 0 {
-			for _, ch := range chs {
-				sendNotification(ch, true)
-			}
-			// Move from the insert map to the remove map.
-			s.notify.remove[subject] = append(s.notify.remove[subject], chs...)
-			delete(s.notify.insert, subject)
+func (s *Sublist) chkForInsertNotification(subject string) {
+	// All notify subjects are also literal so just do a hash lookup here.
+	if chs := s.notify.insert[subject]; len(chs) > 0 {
+		for _, ch := range chs {
+			sendNotification(ch, true)
 		}
-		return
-	}
-
-	// We are not a literal, so we may match any subject that we want.
-	// Note we could be smarter here and try to make the list smaller, but probably not worth it TBH.
-	for target, chs := range s.notify.insert {
-		r := s.matchNoLock(target)
-		if len(r.psubs)+len(r.qsubs) > 0 {
-			for _, ch := range chs {
-				sendNotification(ch, true)
-			}
-			// Move from the insert map to the remove map.
-			s.notify.remove[target] = append(s.notify.remove[target], chs...)
-			delete(s.notify.insert, target)
-			break
-		}
+		// Move from the insert map to the remove map.
+		s.notify.remove[subject] = append(s.notify.remove[subject], chs...)
+		delete(s.notify.insert, subject)
 	}
 }
 
 // chkForRemoveNotification will check to see if we need to notify on this subject.
 // Write lock should be held.
-func (s *Sublist) chkForRemoveNotification(subject string, isLiteral bool) {
-	for target, chs := range s.notify.remove {
+func (s *Sublist) chkForRemoveNotification(subject string) {
+	if chs := s.notify.remove[subject]; len(chs) > 0 {
 		// We need to always check that we have no interest anymore.
-		r := s.matchNoLock(target)
-		if len(r.psubs)+len(r.qsubs) == 0 {
+		var hasInterest bool
+		r := s.matchNoLock(subject)
+
+		if len(r.psubs)+len(r.qsubs) > 0 {
+			for _, sub := range r.psubs {
+				if string(sub.subject) == subject {
+					hasInterest = true
+					break
+				}
+			}
+			for _, qsub := range r.qsubs {
+				qs := qsub[0]
+				if string(qs.subject) == subject {
+					hasInterest = true
+					break
+				}
+			}
+		}
+		if !hasInterest {
 			for _, ch := range chs {
 				sendNotification(ch, false)
 			}
 			// Move from the remove map to the insert map.
-			s.notify.insert[target] = append(s.notify.insert[target], chs...)
-			delete(s.notify.remove, target)
-			break
+			s.notify.insert[subject] = append(s.notify.insert[subject], chs...)
+			delete(s.notify.remove, subject)
 		}
 	}
 }
@@ -387,8 +400,8 @@ func (s *Sublist) Insert(sub *subscription) error {
 	s.addToCache(subject, sub)
 	atomic.AddUint64(&s.genid, 1)
 
-	if s.notify != nil && isnew && len(s.notify.insert) > 0 {
-		s.chkForInsertNotification(subject, !haswc)
+	if s.notify != nil && isnew && !haswc && len(s.notify.insert) > 0 {
+		s.chkForInsertNotification(subject)
 	}
 	s.Unlock()
 
@@ -728,8 +741,8 @@ func (s *Sublist) remove(sub *subscription, shouldLock bool, doCacheUpdates bool
 		atomic.AddUint64(&s.genid, 1)
 	}
 
-	if s.notify != nil && last && len(s.notify.remove) > 0 {
-		s.chkForRemoveNotification(subject, !haswc)
+	if s.notify != nil && last && !haswc && len(s.notify.remove) > 0 {
+		s.chkForRemoveNotification(subject)
 	}
 
 	return nil
@@ -1010,6 +1023,32 @@ func IsValidSubject(subject string) bool {
 	return true
 }
 
+// Will share relevant info regarding the subject.
+// Returns valid, tokens, num pwcs, has fwc.
+func subjectInfo(subject string) (bool, []string, int, bool) {
+	if subject == "" {
+		return false, nil, 0, false
+	}
+	npwcs := 0
+	sfwc := false
+	tokens := strings.Split(subject, tsep)
+	for _, t := range tokens {
+		if len(t) == 0 || sfwc {
+			return false, nil, 0, false
+		}
+		if len(t) > 1 {
+			continue
+		}
+		switch t[0] {
+		case fwc:
+			sfwc = true
+		case pwc:
+			npwcs++
+		}
+	}
+	return true, tokens, npwcs, sfwc
+}
+
 // IsValidLiteralSubject returns true if a subject is valid and literal (no wildcards), false otherwise
 func IsValidLiteralSubject(subject string) bool {
 	return isValidLiteralSubject(strings.Split(subject, tsep))
@@ -1062,6 +1101,9 @@ func tokensCanMatch(t1, t2 string) bool {
 
 // SubjectsCollide will determine if two subjects could both match a single literal subject.
 func SubjectsCollide(subj1, subj2 string) bool {
+	if subj1 == subj2 {
+		return true
+	}
 	toks1 := strings.Split(subj1, tsep)
 	toks2 := strings.Split(subj2, tsep)
 	pwc1, fwc1 := analyzeTokens(toks1)
@@ -1078,6 +1120,10 @@ func SubjectsCollide(subj1, subj2 string) bool {
 		return isSubsetMatch(toks2, subj1)
 	}
 	// Both have wildcards.
+	// If they only have partials then the lengths must match.
+	if !fwc1 && !fwc2 && len(toks1) != len(toks2) {
+		return false
+	}
 	stop := len(toks1)
 	if len(toks2) < stop {
 		stop = len(toks2)
@@ -1347,5 +1393,74 @@ func (s *Sublist) collectAllSubs(l *level, subs *[]*subscription) {
 	if l.fwc != nil {
 		s.addAllNodeToSubs(l.fwc, subs)
 		s.collectAllSubs(l.fwc.next, subs)
+	}
+}
+
+// For a given subject (which may contain wildcards), this call returns all
+// subscriptions that would match that subject. For instance, suppose that
+// the sublist contains: foo.bar, foo.bar.baz and foo.baz, ReverseMatch("foo.*")
+// would return foo.bar and foo.baz.
+// This is used in situations where the sublist is likely to contain only
+// literals and one wants to get all the subjects that would have been a match
+// to a subscription on `subject`.
+func (s *Sublist) ReverseMatch(subject string) *SublistResult {
+	tsa := [32]string{}
+	tokens := tsa[:0]
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tokens = append(tokens, subject[start:i])
+			start = i + 1
+		}
+	}
+	tokens = append(tokens, subject[start:])
+
+	result := &SublistResult{}
+
+	s.Lock()
+	reverseMatchLevel(s.root, tokens, nil, result)
+	// Check for empty result.
+	if len(result.psubs) == 0 && len(result.qsubs) == 0 {
+		result = emptyResult
+	}
+	s.Unlock()
+
+	return result
+}
+
+func reverseMatchLevel(l *level, toks []string, n *node, results *SublistResult) {
+	for i, t := range toks {
+		if l == nil {
+			return
+		}
+		if len(t) == 1 {
+			if t[0] == fwc {
+				getAllNodes(l, results)
+				return
+			} else if t[0] == pwc {
+				for _, n := range l.nodes {
+					reverseMatchLevel(n.next, toks[i+1:], n, results)
+				}
+				return
+			}
+		}
+		n = l.nodes[t]
+		if n == nil {
+			break
+		}
+		l = n.next
+	}
+	if n != nil {
+		addNodeToResults(n, results)
+	}
+}
+
+func getAllNodes(l *level, results *SublistResult) {
+	if l == nil {
+		return
+	}
+	for _, n := range l.nodes {
+		addNodeToResults(n, results)
+		getAllNodes(n.next, results)
 	}
 }

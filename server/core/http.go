@@ -28,7 +28,6 @@ import (
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/nats-io/nats-account-server/server/conf"
-	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/rs/cors"
 )
 
@@ -166,34 +165,12 @@ func (server *AccountServer) makeTLSConfig(tlsConf conf.TLSConf) (*tls.Config, e
 	return &config, nil
 }
 
-// BuildRouter creates the http.Router for the NGS server
 func (server *AccountServer) buildRouter() *httprouter.Router {
 	r := httprouter.New()
-
-	r.GET("/jwt/v1/help", server.JWTHelp)
-	r.GET("/healthz", server.HealthZ)
-
-	if server.operatorJWT != "" {
-		r.GET("/jwt/v1/operator", server.GetOperatorJWT)
-	}
-
-	// replicas and readonly stores cannot accept post requests
-	// replicas use a writable store, thus the extra check
-	if !server.jwtStore.IsReadOnly() && server.primary == "" {
-		r.POST("/jwt/v1/accounts/:pubkey", server.UpdateAccountJWT)
-		r.POST("/jwt/v1/activations", server.UpdateActivationJWT)
-	}
-
-	_, ok := server.jwtStore.(store.PackableJWTStore)
-	if ok {
-		r.GET("/jwt/v1/pack", server.PackJWTs)
-	}
-
-	r.GET("/jwt/v1/accounts/:pubkey", server.GetAccountJWT)
-	r.GET("/jwt/v1/accounts/", server.GetAccountJWT) // Server test point
-	r.GET("/jwt/v1/accounts", server.GetAccountJWT)  // Server test point
-
-	r.GET("/jwt/v1/activations/:hash", server.GetActivationJWT)
-
+	server.jwt.InitRouter(r)
+	r.GET("/healthz", func(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+		server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+		w.WriteHeader(http.StatusOK)
+	})
 	return r
 }

@@ -24,62 +24,115 @@ import (
 	"time"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/jwt/v2" // only used to decode and validate, not for storage
 	"github.com/nats-io/nkeys"
 )
 
+func (h *JwtHandler) loadAccountJWT(publicKey string) (bool, *jwt.AccountClaims) {
+	theJwt, err := h.jwtStore.LoadAcc(publicKey)
+
+	if err != nil {
+		return false, nil
+	}
+
+	ac, err := jwt.DecodeAccountClaims(theJwt)
+	if err != nil {
+		return false, nil
+	}
+
+	return true, ac
+}
+
 // UpdateAccountJWT is the target of the post request that updates an account JWT
 // Sends a nats notification
-func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-	paramPubKey := string(params.ByName("pubkey"))
+func (h *JwtHandler) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	h.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
 	theJWT, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
 		return
 	}
 
 	claim, err := jwt.DecodeAccountClaims(string(theJWT))
-
 	if err != nil || claim == nil {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)
+		return
+	}
+	shortCode := ShortKey(claim.Subject)
+
+	if paramPubKey := params.ByName("pubkey"); paramPubKey != "" && claim.Subject != paramPubKey {
+		h.sendErrorResponse(http.StatusBadRequest, "pub keys don't match", shortCode, err, w)
 		return
 	}
 
-	issuer := claim.Issuer
-
-	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer in request", claim.Issuer, err, w)
-		return
-	}
-
-	if claim.Subject != paramPubKey {
-		server.sendErrorResponse(http.StatusBadRequest, "pub keys don't match", paramPubKey, err, w)
+	if !nkeys.IsValidPublicAccountKey(claim.Issuer) && !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
+		h.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer in request", shortCode, err, w)
 		return
 	}
 
 	if !nkeys.IsValidPublicAccountKey(claim.Subject) {
-		server.sendErrorResponse(http.StatusBadRequest, "bad JWT Subject in request", claim.Subject, err, w)
+		h.sendErrorResponse(http.StatusBadRequest, "bad JWT Subject in request", shortCode, err, w)
 		return
 	}
 
-	ok := false
-
-	for _, k := range server.trustedKeys {
-		if k == issuer {
-			ok = true
-			break
+	msg := ""
+	// First check that operator didn't sign the claims
+	// if operator signed, we don't have to check the account signer
+	_, didSign := h.trustedKeys[claim.Issuer]
+	if h.sign != nil && !didSign {
+		found, existingClaim := h.loadAccountJWT(claim.Subject)
+		if !found && claim.Issuer != claim.Subject {
+			h.sendErrorResponse(http.StatusBadRequest, "bad JWT Issuer/Subject pair in request", shortCode, err, w)
+			return
 		}
+
+		// an issuer must be in the known jwt and on the new one
+		if found && (!existingClaim.DidSign(claim) || !claim.DidSign(claim)) {
+			h.sendErrorResponse(http.StatusBadRequest, "bad JWT issuer is not trusted", shortCode, err, w)
+			return
+		}
+
+		// sign self signed account jwt
+		if theJWT, msg, err = h.sign(claim.Subject, theJWT); err != nil {
+			if msg != "" {
+				h.logger.Errorf("%s - %s - %s", shortCode, "error when signing account", err.Error())
+				http.Error(w, msg, http.StatusInternalServerError)
+			} else {
+				h.sendErrorResponse(http.StatusInternalServerError, msg, shortCode, err, w)
+			}
+			return
+		}
+
+		if theJWT == nil {
+			h.logger.Noticef("%s Initiated JWT signing process for %s", shortCode, claim.ID)
+			w.WriteHeader(http.StatusAccepted)
+			if msg != "" {
+				w.Header().Set(ContentType, TextPlain)
+				w.Write([]byte(msg))
+			}
+			return
+		}
+		if claim, err = jwt.DecodeAccountClaims(string(theJWT)); err != nil || claim == nil {
+			h.sendErrorResponse(http.StatusBadRequest, "bad JWT returned when signing account jwt", shortCode, err, w)
+			return
+		}
+		shortCode = ShortKey(claim.Subject)
 	}
 
-	if !ok {
-		server.sendErrorResponse(http.StatusBadRequest, "untrusted issuer in request", claim.Subject, err, w)
+	if !nkeys.IsValidPublicOperatorKey(claim.Issuer) {
+		if claim.Issuer == claim.Subject {
+			h.sendErrorResponse(http.StatusBadRequest, "Signing service not enabled", claim.Issuer, err, w)
+		} else {
+			h.sendErrorResponse(http.StatusBadRequest, "Bad JWT Issuer in request", claim.Issuer, err, w)
+		}
 		return
 	}
 
-	pubKey := claim.Subject
-	shortCode := ShortKey(pubKey)
+	if _, didSign := h.trustedKeys[claim.Issuer]; !didSign {
+		h.sendErrorResponse(http.StatusBadRequest, "untrusted issuer in request", claim.Issuer, err, w)
+		return
+	}
 
 	vr := &jwt.ValidationResults{}
 
@@ -92,34 +145,40 @@ func (server *AccountServer) UpdateAccountJWT(w http.ResponseWriter, r *http.Req
 			lines = append(lines, fmt.Sprintf("\t - %s\n", vi.Description))
 		}
 		msg := strings.Join(lines, "\n")
-		server.logger.Errorf("attempt to update JWT %s with blocking validation errors", shortCode)
+		h.logger.Errorf("attempt to update JWT %s with blocking validation errors", shortCode)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
-	if err := server.jwtStore.Save(pubKey, string(theJWT)); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error saving JWT", shortCode, err, w)
+	if err := h.jwtStore.SaveAcc(claim.Subject, string(theJWT)); err != nil {
+		h.sendErrorResponse(http.StatusInternalServerError, "error saving JWT", shortCode, err, w)
 		return
 	}
 
-	if err := server.sendAccountNotification(claim, theJWT); err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
-		return
+	if h.sendAccountNotification != nil {
+		if err := h.sendAccountNotification(claim.Subject, theJWT); err != nil {
+			h.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
+			return
+		}
 	}
 
-	server.logger.Noticef("updated JWT for account - %s - %s", shortCode, claim.ID)
+	h.logger.Noticef("updated JWT for account - %s - %s", shortCode, claim.ID)
 	w.WriteHeader(http.StatusOK)
+	if msg != "" {
+		w.Header().Set(ContentType, TextPlain)
+		w.Write([]byte(msg))
+	}
 }
 
 // GetAccountJWT looks up an account JWT by public key and returns it
 // Supports cache control
-func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	server.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-	pubKey := string(params.ByName("pubkey"))
+func (h *JwtHandler) GetAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
+	h.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
+	pubKey := params.ByName("pubkey")
 	shortCode := ShortKey(pubKey)
 
 	if pubKey == "" {
-		server.logger.Tracef("server sent resolver check")
+		h.logger.Tracef("server sent resolver check")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
@@ -127,39 +186,44 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	server.logger.Tracef("request for JWT for - %s", ShortKey(pubKey))
+	h.logger.Tracef("request for JWT for - %s", ShortKey(pubKey))
+
+	if jti := r.URL.Query().Get("jti"); jti != "" {
+		h.sendErrorResponse(http.StatusNotImplemented, "lookup by jti is no longer supported", shortCode, nil, w)
+		return
+	}
 
 	check := strings.ToLower(r.URL.Query().Get("check")) == "true"
-	notify := strings.ToLower(r.URL.Query().Get("notify")) == "true"
+	notify := strings.ToLower(r.URL.Query().Get("notify")) == "true" //TODO not done in ngs
 	decode := strings.ToLower(r.URL.Query().Get("decode")) == "true"
 	text := strings.ToLower(r.URL.Query().Get("text")) == "true"
 
-	theJWT, err := server.loadJWT(pubKey, "jwt/v1/accounts")
+	theJWT, err := h.jwtStore.LoadAcc(pubKey)
 
 	if err != nil {
-		if server.systemAccountClaims != nil && pubKey == server.systemAccountClaims.Subject && server.systemAccountJWT != "" {
-			theJWT = server.systemAccountJWT
-			server.logger.Tracef("returning system JWT from configuration")
+		if pubKey == h.sysAccSubject && h.sysAccJWT != "" {
+			theJWT = h.sysAccJWT
+			h.logger.Tracef("returning system JWT from configuration")
 		} else {
-			server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
+			h.sendErrorResponse(http.StatusNotFound, "no matching account JWT", shortCode, err, w)
 			return
 		}
 	}
 
 	if text {
-		server.writeJWTAsText(w, pubKey, theJWT)
+		h.writeJWTAsText(w, pubKey, theJWT)
 		return
 	}
 
 	if decode {
-		server.writeDecodedJWT(w, pubKey, theJWT)
+		h.writeDecodedJWT(w, pubKey, theJWT)
 		return
 	}
 
 	decoded, err := jwt.DecodeAccountClaims(theJWT)
 
 	if err != nil {
-		server.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
+		h.sendErrorResponse(http.StatusInternalServerError, "error loading JWT", shortCode, err, w)
 		return
 	}
 
@@ -183,16 +247,16 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 
 	// send notification if requested, even though this is a GET request
 	if notify {
-		server.logger.Tracef("trying to send notification for - %s", shortCode)
-		if err := server.sendAccountNotification(decoded, []byte(theJWT)); err != nil {
-			server.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
+		h.logger.Tracef("trying to send notification for - %s", shortCode)
+		if err := h.sendAccountNotification(decoded.Subject, []byte(theJWT)); err != nil {
+			h.sendErrorResponse(http.StatusInternalServerError, "error sending notification of change", shortCode, err, w)
 			return
 		}
 	}
 
 	w.Header().Set("Etag", e)
 
-	cacheControl := server.cacheControlForExpiration(pubKey, decoded.Expires)
+	cacheControl := cacheControlForExpiration(pubKey, decoded.Expires)
 
 	if cacheControl != "" {
 		w.Header().Set("Cache-Control", cacheControl)
@@ -203,8 +267,8 @@ func (server *AccountServer) GetAccountJWT(w http.ResponseWriter, r *http.Reques
 	_, err = w.Write([]byte(theJWT))
 
 	if err != nil {
-		server.logger.Errorf("error writing JWT for %s - %s", shortCode, err.Error())
+		h.logger.Errorf("error writing JWT for %s - %s", shortCode, err.Error())
 	} else {
-		server.logger.Tracef("returning JWT for - %s", shortCode)
+		h.logger.Tracef("returning JWT for - %s", shortCode)
 	}
 }

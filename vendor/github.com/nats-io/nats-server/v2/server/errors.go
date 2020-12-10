@@ -43,6 +43,12 @@ var (
 	// ErrBadPublishSubject represents an error condition for an invalid publish subject.
 	ErrBadPublishSubject = errors.New("invalid publish subject")
 
+	// ErrBadSubject represents an error condition for an invalid subject.
+	ErrBadSubject = errors.New("invalid subject")
+
+	// ErrBadQualifier is used to error on a bad qualifier for a transform.
+	ErrBadQualifier = errors.New("bad qualifier")
+
 	// ErrBadClientProtocol signals a client requested an invalid client protocol.
 	ErrBadClientProtocol = errors.New("invalid client protocol")
 
@@ -119,6 +125,12 @@ var (
 	// ErrServiceImportAuthorization is returned when a service import is not authorized.
 	ErrServiceImportAuthorization = errors.New("service import not authorized")
 
+	// ErrImportFormsCycle is returned when an import would form a cycle.
+	ErrImportFormsCycle = errors.New("import forms a cycle")
+
+	// ErrCycleSearchDepth is returned when we have exceeded our maximum search depth..
+	ErrCycleSearchDepth = errors.New("search cycle depth exhausted")
+
 	// ErrClientOrRouteConnectedToGatewayPort represents an error condition when
 	// a client or route attempted to connect to the Gateway port.
 	ErrClientOrRouteConnectedToGatewayPort = errors.New("attempted to connect to gateway port")
@@ -144,6 +156,34 @@ var (
 	// ErrMsgHeadersNotSupported signals the parser detected a message header
 	// but they are not supported on this server.
 	ErrMsgHeadersNotSupported = errors.New("message headers not supported")
+
+	// ErrNoRespondersRequiresHeaders signals that a client needs to have headers
+	// on if they want no responders behavior.
+	ErrNoRespondersRequiresHeaders = errors.New("no responders requires headers support")
+
+	// ErrClusterNameConfigConflict signals that the options for cluster name in cluster and gateway are in conflict.
+	ErrClusterNameConfigConflict = errors.New("cluster name conflicts between cluster and gateway definitions")
+
+	// ErrClusterNameRemoteConflict signals that a remote server has a different cluster name.
+	ErrClusterNameRemoteConflict = errors.New("cluster name from remote server conflicts")
+
+	// ErrMalformedSubject is returned when a subscription is made with a subject that does not conform to subject rules.
+	ErrMalformedSubject = errors.New("malformed subject")
+
+	// ErrSubscribePermissionViolation is returned when processing of a subscription fails due to permissions.
+	ErrSubscribePermissionViolation = errors.New("subscribe permission viloation")
+
+	// ErrNoTransforms signals no subject transforms are available to map this subject.
+	ErrNoTransforms = errors.New("no matching transforms available")
+
+	// ErrJetStreamNotEnabled is returned when JetStream is not enabled.
+	ErrJetStreamNotEnabled = errors.New("jetstream not enabled")
+
+	// ErrJetStreamStreamNotFound is returned when a stream can not be found.
+	ErrJetStreamStreamNotFound = errors.New("stream not found")
+
+	// ErrJetStreamNotEnabledForAccount is returned JetStream is not enabled for this account.
+	ErrJetStreamNotEnabledForAccount = errors.New("jetstream not enabled for account")
 )
 
 // configErr is a configuration error.

@@ -47,11 +47,9 @@ func expandPath(p string) string {
 
 func main() {
 	var server *core.AccountServer
-	var err error
 
 	flags := core.Flags{}
 	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
-	flag.StringVar(&flags.NSCFolder, "nsc", "", "the nsc folder to host accounts from, mutually exclusive from dir, and makes the server read-only")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
 	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
 	flag.StringVar(&flags.Creds, "creds", "", "the creds file for connecting to NATS")
@@ -60,14 +58,27 @@ func main() {
 	flag.BoolVar(&flags.Verbose, "V", false, "turn on verbose logging")
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
 	flag.StringVar(&flags.HostPort, "hp", "", "http hostport, defaults to localhost:9090")
-	flag.BoolVar(&flags.ReadOnly, "ro", false, "exclusive to -dir flag, makes the server run in read-only mode, file changes will trigger nats updates (if configured)")
 	flag.Parse()
 
 	// resolve paths with dots/tildes
 	flags.ConfigFile = expandPath(flags.ConfigFile)
 	flags.Creds = expandPath(flags.Creds)
 	flags.Directory = expandPath(flags.Directory)
-	flags.NSCFolder = expandPath(flags.NSCFolder)
+
+	logStopExit := func(server *core.AccountServer, err error) {
+		if _, ok := server.Logger().(*core.NilLogger); !ok {
+			server.Logger().Errorf("%s", err.Error())
+		} else {
+			log.Printf("%s", err.Error())
+		}
+		server.Stop()
+		os.Exit(1)
+	}
+
+	server = core.NewAccountServer()
+	if err := server.InitializeFromFlags(flags); err != nil {
+		logStopExit(server, err)
+	}
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
@@ -77,68 +88,32 @@ func main() {
 			signal := <-sigChan
 
 			if signal == os.Interrupt {
-				if server.Logger() != nil {
+				if _, ok := server.Logger().(*core.NilLogger); !ok {
 					fmt.Println() // clear the line for the control-C
-					server.Logger().Noticef("received sig-interrupt, shutting down")
 				}
+				server.Logger().Noticef("received sig-interrupt, shutting down")
 				server.Stop()
 				os.Exit(0)
 			}
 
 			if signal == syscall.SIGHUP {
-				if server.Logger() != nil {
-					server.Logger().Errorf("received sig-hup, restarting")
-				}
+				server.Logger().Errorf("received sig-hup, restarting")
 				server.Stop()
 				server := core.NewAccountServer()
-				err = server.InitializeFromFlags(flags)
 
-				if err != nil {
-					if server.Logger() != nil {
-						server.Logger().Errorf("%s", err.Error())
-					} else {
-						log.Printf("%s", err.Error())
-					}
-					server.Stop()
-					os.Exit(1)
+				if err := server.InitializeFromFlags(flags); err != nil {
+					logStopExit(server, err)
 				}
 
-				err = server.Start()
-
-				if err != nil {
-					if server.Logger() != nil {
-						server.Logger().Errorf("%s", err.Error())
-					} else {
-						log.Printf("%s", err.Error())
-					}
-					server.Stop()
-					os.Exit(1)
+				if err := server.Start(); err != nil {
+					logStopExit(server, err)
 				}
 			}
 		}
 	}()
 
-	server = core.NewAccountServer()
-	err = server.InitializeFromFlags(flags)
-
-	if err != nil {
-		if server.Logger() != nil {
-			server.Logger().Errorf("%s", err.Error())
-		} else {
-			log.Printf("%s", err.Error())
-		}
-		server.Stop()
-		os.Exit(1)
-	}
-
 	if err := core.Run(server); err != nil {
-		if server.Logger() != nil {
-			server.Logger().Errorf("%s", err.Error())
-		} else {
-			log.Printf("%s", err.Error())
-		}
-		server.Stop()
-		os.Exit(1)
+		logStopExit(server, err)
 	}
 
 	// exit main but keep running goroutines

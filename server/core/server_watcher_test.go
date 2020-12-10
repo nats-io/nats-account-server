@@ -21,10 +21,11 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
@@ -32,7 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestServerFileWatchNotification(t *testing.T) {
+func TestServerReloadNotification(t *testing.T) {
 
 	// Skip the file notification test on travis
 	if os.Getenv("TRAVIS_GO_VERSION") != "" {
@@ -42,17 +43,16 @@ func TestServerFileWatchNotification(t *testing.T) {
 
 	_, _, kp := CreateOperatorKey(t)
 	_, apub, _ := CreateAccountKey(t)
-	s, path := CreateTestStoreForOperator(t, "x", kp)
+	path, store := CreateTestStoreForOperator(t, "x")
 
 	c := jwt.NewAccountClaims(apub)
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
+	store(apub, cd)
 
 	config := conf.DefaultServerConfig()
-	config.Store.NSC = filepath.Join(path, "x")
+	config.Store.Dir = path
 
 	testEnv, err := SetupTestServer(config, false, true)
 	defer testEnv.Cleanup()
@@ -81,8 +81,9 @@ func TestServerFileWatchNotification(t *testing.T) {
 	c.Tags.Add("red")
 	cd, err = c.Encode(kp)
 	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
+	store(apub, cd)
+
+	testEnv.Server.JWTStore.(*natsserver.DirJWTStore).Reload()
 
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)

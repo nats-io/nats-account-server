@@ -5,11 +5,7 @@ package core
 type Flags struct {
 	ConfigFile string
 
-	NSCFolder string
-
 	Directory string
-
-	ReadOnly bool
 
 	NATSURL string
 	Creds   string
@@ -20,5 +16,5 @@ type Flags struct {
 
 	HostPort string
 
-	Primary string
+	Primary string // Only used to copy jwt from old account server
 }

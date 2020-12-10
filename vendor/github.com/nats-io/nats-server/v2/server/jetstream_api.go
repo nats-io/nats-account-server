@@ -112,7 +112,7 @@ const (
 	JSApiConsumerCreate  = "$JS.API.CONSUMER.CREATE.*"
 	JSApiConsumerCreateT = "$JS.API.CONSUMER.CREATE.%s"
 
-	// JSApiDurableCreate is the endpoint to create ephemeral consumers for streams.
+	// JSApiDurableCreate is the endpoint to create durable consumers for streams.
 	// You need to include the stream and consumer name in the subject.
 	JSApiDurableCreate  = "$JS.API.CONSUMER.DURABLE.CREATE.*.*"
 	JSApiDurableCreateT = "$JS.API.CONSUMER.DURABLE.CREATE.%s.%s"
@@ -143,13 +143,8 @@ const (
 	jsSnapshotAckT    = "$JS.SNAPSHOT.ACK.%s.%s"
 	jsRestoreDeliverT = "$JS.SNAPSHOT.RESTORE.%s.%s"
 
-	///////////////////////
-	// FIXME(dlc)
-	///////////////////////
-
-	// JetStreamAckT is the template for the ack message stream coming back from a consumer
+	// jsAckT is the template for the ack message stream coming back from a consumer
 	// when they ACK/NAK, etc a message.
-	// FIXME(dlc) - What do we really need here??
 	jsAckT   = "$JS.ACK.%s.%s"
 	jsAckPre = "$JS.ACK."
 
@@ -269,6 +264,8 @@ const JSApiListLimit = 256
 
 type JSApiStreamNamesRequest struct {
 	ApiPagedRequest
+	// These are filters that can be applied to the list.
+	Subject string `json:"subject,omitempty"`
 }
 
 // JSApiStreamNamesResponse list of streams.
@@ -295,7 +292,7 @@ const JSApiStreamListResponseType = "io.nats.jetstream.api.v1.stream_list_respon
 type JSApiStreamPurgeResponse struct {
 	ApiResponse
 	Success bool   `json:"success,omitempty"`
-	Purged  uint64 `json:"purged,omitempty"`
+	Purged  uint64 `json:"purged"`
 }
 
 const JSApiStreamPurgeResponseType = "io.nats.jetstream.api.v1.stream_purge_response"
@@ -366,6 +363,9 @@ type JSApiMsgGetResponse struct {
 
 const JSApiMsgGetResponseType = "io.nats.jetstream.api.v1.stream_msg_get_response"
 
+// JSWaitQueueDefaultMax is the default max number of outstanding requests for pull consumers.
+const JSWaitQueueDefaultMax = 512
+
 // JSApiConsumerCreateResponse.
 type JSApiConsumerCreateResponse struct {
 	ApiResponse
@@ -412,6 +412,13 @@ type JSApiConsumerListResponse struct {
 }
 
 const JSApiConsumerListResponseType = "io.nats.jetstream.api.v1.consumer_list_response"
+
+// JSApiConsumerGetNextRequest is for getting next messages for pull based consumers.
+type JSApiConsumerGetNextRequest struct {
+	Expires time.Time `json:"expires,omitempty"`
+	Batch   int       `json:"batch,omitempty"`
+	NoWait  bool      `json:"no_wait,omitempty"`
+}
 
 // JSApiStreamTemplateCreateResponse for creating templates.
 type JSApiStreamTemplateCreateResponse struct {
@@ -522,7 +529,7 @@ func (s *Server) setJetStreamExportSubs() error {
 }
 
 func (s *Server) sendAPIResponse(c *client, subject, reply, request, response string) {
-	s.sendInternalAccountMsg(c.acc, reply, response)
+	s.sendInternalAccountMsg(nil, reply, response)
 	s.sendJetStreamAPIAuditAdvisory(c, subject, request, response)
 }
 
@@ -629,6 +636,11 @@ func (s *Server) jsTemplateNamesRequest(sub *subscription, c *client, subject, r
 		return strings.Compare(ts[i].StreamTemplateConfig.Name, ts[j].StreamTemplateConfig.Name) < 0
 	})
 
+	tcnt := len(ts)
+	if offset > tcnt {
+		offset = tcnt
+	}
+
 	for _, t := range ts[offset:] {
 		t.mu.Lock()
 		name := t.Name
@@ -638,7 +650,7 @@ func (s *Server) jsTemplateNamesRequest(sub *subscription, c *client, subject, r
 			break
 		}
 	}
-	resp.Total = len(ts)
+	resp.Total = tcnt
 	resp.Limit = JSApiNamesLimit
 	resp.Offset = offset
 	if resp.Templates == nil {
@@ -823,6 +835,8 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, subject, rep
 	}
 
 	var offset int
+	var filter string
+
 	if !isEmptyRequest(msg) {
 		var req JSApiStreamNamesRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
@@ -831,14 +845,23 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, subject, rep
 			return
 		}
 		offset = req.Offset
+		if req.Subject != _EMPTY_ {
+			filter = req.Subject
+		}
 	}
 
 	// TODO(dlc) - Maybe hold these results for large results that we expect to be paged.
 	// TODO(dlc) - If this list is long maybe do this in a Go routine?
-	msets := c.acc.Streams()
+	msets := c.acc.filteredStreams(filter)
+	// Since we page results order matters.
 	sort.Slice(msets, func(i, j int) bool {
 		return strings.Compare(msets[i].config.Name, msets[j].config.Name) < 0
 	})
+
+	scnt := len(msets)
+	if offset > scnt {
+		offset = scnt
+	}
 
 	for _, mset := range msets[offset:] {
 		resp.Streams = append(resp.Streams, mset.config.Name)
@@ -846,7 +869,7 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, subject, rep
 			break
 		}
 	}
-	resp.Total = len(msets)
+	resp.Total = scnt
 	resp.Limit = JSApiNamesLimit
 	resp.Offset = offset
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
@@ -888,13 +911,18 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, subject, repl
 		return strings.Compare(msets[i].config.Name, msets[j].config.Name) < 0
 	})
 
+	scnt := len(msets)
+	if offset > scnt {
+		offset = scnt
+	}
+
 	for _, mset := range msets[offset:] {
 		resp.Streams = append(resp.Streams, &StreamInfo{Created: mset.Created(), State: mset.State(), Config: mset.Config()})
 		if len(resp.Streams) >= JSApiListLimit {
 			break
 		}
 	}
-	resp.Total = len(msets)
+	resp.Total = scnt
 	resp.Limit = JSApiListLimit
 	resp.Offset = offset
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
@@ -924,7 +952,14 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, subject, repl
 		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	resp.StreamInfo = &StreamInfo{Created: mset.Created(), State: mset.State(), Config: mset.Config()}
+	config := mset.Config()
+	// Some streams are created without subject (for instance MQTT streams),
+	// but "nats" tooling would then fail to display them since it uses
+	// validation and expect the config's Subjects to not be empty.
+	if config.allowNoSubject && len(config.Subjects) == 0 {
+		config.Subjects = []string{">"}
+	}
+	resp.StreamInfo = &StreamInfo{Created: mset.Created(), State: mset.State(), Config: config}
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
 }
 
@@ -968,6 +1003,11 @@ func (s *Server) jsStreamDeleteRequest(sub *subscription, c *client, subject, re
 	mset, err := c.acc.LookupStream(stream)
 	if err != nil {
 		resp.Error = jsNotFoundError(err)
+		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+	if mset.Config().internal {
+		resp.Error = &ApiError{Code: 403, Description: "not allowed to delete internal stream"}
 		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -1099,8 +1139,13 @@ func (s *Server) jsStreamPurgeRequest(sub *subscription, c *client, subject, rep
 		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	resp.Purged = mset.Purge()
-	resp.Success = true
+	purged, err := mset.Purge()
+	if err != nil {
+		resp.Error = jsError(err)
+	} else {
+		resp.Purged = purged
+		resp.Success = true
+	}
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
 }
 
@@ -1129,15 +1174,14 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, subject, r
 		return
 	}
 
+	// FIXME(dlc) - Need to close these up if we fail for some reason.
+	// TODO(dlc) - Might need to make configurable or stream direct to storage dir.
 	tfile, err := ioutil.TempFile("", "jetstream-restore-")
 	if err != nil {
 		resp.Error = &ApiError{Code: 500, Description: "jetstream unable to open temp storage for restore"}
 		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-
-	// Create our internal subscription to accept the snapshot.
-	restoreSubj := fmt.Sprintf(jsRestoreDeliverT, stream, nuid.Next())
 
 	s.Noticef("Starting restore for stream %q in account %q", stream, c.acc.Name)
 	start := time.Now()
@@ -1154,19 +1198,37 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, subject, r
 		Client: caudit,
 	})
 
+	// Create our internal subscription to accept the snapshot.
+	restoreSubj := fmt.Sprintf(jsRestoreDeliverT, stream, nuid.Next())
+
 	// FIXME(dlc) - Can't recover well here if something goes wrong. Could use channels and at least time
 	// things out. Note that this is tied to the requesting client, so if it is a tool this goes away when
 	// the client does. Only thing leaking here is the sub on strange failure.
-	acc.subscribeInternal(c, restoreSubj, func(sub *subscription, c *client, _, _ string, msg []byte) {
-		if len(msg) == 0 {
-			tfile.Seek(0, 0)
-			// TODO(dlc) - no way right now to communicate back.
-			acc.RestoreStream(stream, tfile)
+	acc.subscribeInternal(restoreSubj, func(sub *subscription, c *client, subject, reply string, msg []byte) {
+		// We require reply subjects to communicate back failures, flow etc. If they do not have one log and cancel.
+		if reply == _EMPTY_ {
 			tfile.Close()
 			os.Remove(tfile.Name())
-			c.processUnsub(sub.sid)
+			sub.client.processUnsub(sub.sid)
+			s.Warnf("Restore for stream %q in account %q requires reply subject for each chunk", stream, c.acc.Name)
+			return
+		}
+		// Account client messages have \r\n on end.
+		if len(msg) < LEN_CR_LF {
+			return
+		}
+		msg = msg[:len(msg)-LEN_CR_LF]
+
+		if len(msg) == 0 {
+			tfile.Seek(0, 0)
+			mset, err := acc.RestoreStream(stream, tfile)
+			tfile.Close()
+			os.Remove(tfile.Name())
+			sub.client.processUnsub(sub.sid)
 
 			end := time.Now()
+
+			// TODO(rip) - Should this have the error code in it??
 			s.publishAdvisory(c.acc, JSAdvisoryStreamRestoreCompletePre+"."+stream, &JSRestoreCompleteAdvisory{
 				TypedEvent: TypedEvent{
 					Type: JSRestoreCompleteAdvisoryType,
@@ -1180,13 +1242,34 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, subject, r
 				Client: caudit,
 			})
 
-			s.Noticef("Completed %s restore for stream %q in account %q in %v", FriendlyBytes(int64(received)), stream, c.acc.Name, end.Sub(start))
+			s.Noticef("Completed %s restore for stream %q in account %q in %v",
+				FriendlyBytes(int64(received)), stream, c.acc.Name, end.Sub(start))
+
+			// On the last EOF, send back the stream info or error status.
+			var resp = JSApiStreamCreateResponse{ApiResponse: ApiResponse{Type: JSApiStreamCreateResponseType}}
+			if err != nil {
+				resp.Error = jsError(err)
+			} else {
+				resp.StreamInfo = &StreamInfo{Created: mset.Created(), State: mset.State(), Config: mset.Config()}
+			}
+			s.sendInternalAccountMsg(acc, reply, s.jsonResponse(&resp))
 
 			return
 		}
-		// Append chunk to temp file.
-		tfile.Write(msg)
+		// Append chunk to temp file. Mark as issue if we encounter an error.
+		if n, err := tfile.Write(msg); n != len(msg) || err != nil {
+			s.Warnf("Storage failure for restore at %s for stream in account %q: %v",
+				FriendlyBytes(int64(received)), stream, c.acc.Name, err)
+			tfile.Close()
+			os.Remove(tfile.Name())
+			sub.client.processUnsub(sub.sid)
+			if reply != _EMPTY_ {
+				s.sendInternalAccountMsg(acc, reply, "-ERR 'storage failure during restore'")
+			}
+			return
+		}
 		received += len(msg)
+		s.sendInternalAccountMsg(acc, reply, nil)
 	})
 
 	resp.DeliverSubject = restoreSubj
@@ -1286,7 +1369,11 @@ func (s *Server) jsStreamSnapshotRequest(sub *subscription, c *client, subject, 
 			Client: caudit,
 		})
 
-		s.Noticef("Completed %s snapshot for stream %q in account %q in %v", FriendlyBytes(int64(resp.NumBlks*resp.BlkSize)), mset.Name(), mset.jsa.account.Name, end.Sub(start))
+		s.Noticef("Completed %s snapshot for stream %q in account %q in %v",
+			FriendlyBytes(int64(resp.NumBlks*resp.BlkSize)),
+			mset.Name(),
+			mset.jsa.account.Name,
+			end.Sub(start))
 	}()
 }
 
@@ -1500,13 +1587,19 @@ func (s *Server) jsConsumerNamesRequest(sub *subscription, c *client, subject, r
 	sort.Slice(obs, func(i, j int) bool {
 		return strings.Compare(obs[i].name, obs[j].name) < 0
 	})
+
+	ocnt := len(obs)
+	if offset > ocnt {
+		offset = ocnt
+	}
+
 	for _, o := range obs[offset:] {
 		resp.Consumers = append(resp.Consumers, o.Name())
 		if len(resp.Consumers) >= JSApiNamesLimit {
 			break
 		}
 	}
-	resp.Total = len(obs)
+	resp.Total = ocnt
 	resp.Limit = JSApiNamesLimit
 	resp.Offset = offset
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
@@ -1552,13 +1645,19 @@ func (s *Server) jsConsumerListRequest(sub *subscription, c *client, subject, re
 	sort.Slice(obs, func(i, j int) bool {
 		return strings.Compare(obs[i].name, obs[j].name) < 0
 	})
+
+	ocnt := len(obs)
+	if offset > ocnt {
+		offset = ocnt
+	}
+
 	for _, o := range obs[offset:] {
 		resp.Consumers = append(resp.Consumers, o.Info())
 		if len(resp.Consumers) >= JSApiListLimit {
 			break
 		}
 	}
-	resp.Total = len(obs)
+	resp.Total = ocnt
 	resp.Limit = JSApiListLimit
 	resp.Offset = offset
 	s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(resp))
@@ -1621,6 +1720,11 @@ func (s *Server) jsConsumerDeleteRequest(sub *subscription, c *client, subject, 
 	mset, err := c.acc.LookupStream(stream)
 	if err != nil {
 		resp.Error = jsNotFoundError(err)
+		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+	if mset.Config().internal {
+		resp.Error = &ApiError{Code: 403, Description: "not allowed to delete consumer of internal stream"}
 		s.sendAPIResponse(c, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
@@ -1692,7 +1796,7 @@ func (c *client) auditUser() string {
 
 // Returns the audit client name, which will just be IP:Port
 func (c *client) auditClient() (string, int) {
-	parts := strings.Split(c.ncs, " ")
+	parts := strings.Split(c.String(), " ")
 	h, p, _ := net.SplitHostPort(parts[0])
 	port, _ := strconv.Atoi(p)
 	return h, port

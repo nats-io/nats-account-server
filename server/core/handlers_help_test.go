@@ -103,8 +103,8 @@ func TestOperatorJWT(t *testing.T) {
 	require.NoError(t, err)
 
 	operator := string(body)
-	require.Equal(t, testEnv.Server.operatorJWT, operator)
-	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)
@@ -114,7 +114,7 @@ func TestOperatorJWT(t *testing.T) {
 	body, err = ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
-	require.Equal(t, testEnv.Server.operatorJWT, operator)
+	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
 
 	path = "/jwt/v1/operator?decode=true"
 	url = testEnv.URLForPath(path)
@@ -142,8 +142,8 @@ func TestOperatorJWTV1(t *testing.T) {
 	require.NoError(t, err)
 
 	operator := string(body)
-	require.Equal(t, testEnv.Server.operatorJWT, operator)
-	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
+	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
+	require.True(t, strings.HasPrefix(operator, "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
 	path = "/jwt/v1/operator?text=true"
 	url = testEnv.URLForPath(path)
@@ -153,7 +153,7 @@ func TestOperatorJWTV1(t *testing.T) {
 	body, err = ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
-	require.Equal(t, testEnv.Server.operatorJWT, operator)
+	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
 
 	path = "/jwt/v1/operator?decode=true"
 	url = testEnv.URLForPath(path)
@@ -181,5 +181,5 @@ func TestOperatorJWTTLS(t *testing.T) {
 	require.NoError(t, err)
 
 	operator := string(body)
-	require.Equal(t, testEnv.Server.operatorJWT, operator)
+	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
 }

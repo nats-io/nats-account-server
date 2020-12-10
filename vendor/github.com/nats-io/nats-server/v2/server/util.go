@@ -14,6 +14,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +25,10 @@ import (
 	"strings"
 	"time"
 )
+
+// This map is used to store URLs string as the key with a reference count as
+// the value. This is used to handle gossiped URLs such as connect_urls, etc..
+type refCountedUrlSet map[string]int
 
 // Ascii numbers 0-9
 const (
@@ -149,4 +154,70 @@ func comma(v int64) string {
 	}
 	parts[j] = strconv.Itoa(int(v))
 	return sign + strings.Join(parts[j:], ",")
+}
+
+// Adds urlStr to the given map. If the string was already present, simply
+// bumps the reference count.
+// Returns true only if it was added for the first time.
+func (m refCountedUrlSet) addUrl(urlStr string) bool {
+	m[urlStr]++
+	return m[urlStr] == 1
+}
+
+// Removes urlStr from the given map. If the string is not present, nothing
+// is done and false is returned.
+// If the string was present, its reference count is decreased. Returns true
+// if this was the last reference, false otherwise.
+func (m refCountedUrlSet) removeUrl(urlStr string) bool {
+	removed := false
+	if ref, ok := m[urlStr]; ok {
+		if ref == 1 {
+			removed = true
+			delete(m, urlStr)
+		} else {
+			m[urlStr]--
+		}
+	}
+	return removed
+}
+
+// Returns the unique URLs in this map as a slice
+func (m refCountedUrlSet) getAsStringSlice() []string {
+	a := make([]string, 0, len(m))
+	for u := range m {
+		a = append(a, u)
+	}
+	return a
+}
+
+// natsListenConfig provides a common configuration to match the one used by
+// net.Listen() but with our own defaults.
+// Go 1.13 introduced default-on TCP keepalives with aggressive timings and
+// there's no sane portable way in Go with stdlib to split the initial timer
+// from the retry timer.  Linux/BSD defaults are 2hrs/75s and Go sets both
+// to 15s; the issue re making them indepedently tunable has been open since
+// 2014 and this code here is being written in 2020.
+// The NATS protocol has its own L7 PING/PONG keepalive system and the Go
+// defaults are inappropriate for IoT deployment scenarios.
+// Replace any NATS-protocol calls to net.Listen(...) with
+// natsListenConfig.Listen(ctx,...) or use natsListen(); leave calls for HTTP
+// monitoring, etc, on the default.
+var natsListenConfig = &net.ListenConfig{
+	KeepAlive: -1,
+}
+
+// natsListen() is the same as net.Listen() except that TCP keepalives are
+// disabled (to match Go's behavior before Go 1.13).
+func natsListen(network, address string) (net.Listener, error) {
+	return natsListenConfig.Listen(context.Background(), network, address)
+}
+
+// natsDialTimeout is the same as net.DialTimeout() except the TCP keepalives
+// are disabled (to match Go's behavior before Go 1.13).
+func natsDialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: -1,
+	}
+	return d.Dial(network, address)
 }

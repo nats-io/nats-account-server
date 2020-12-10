@@ -264,6 +264,14 @@ func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats b
 		UserCredentials: testSetup.SystemUserCredsFile,
 	}
 
+	// make sure to use a temp directory
+	if config.Store.Dir == "" || config.Store.Dir == "." {
+		config.Store.Dir, err = ioutil.TempDir(os.TempDir(), "store")
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if useTLS {
 		config.HTTP.TLS = conf.TLSConf{
 			Key:  keyFile,

@@ -24,6 +24,8 @@ type v1User struct {
 	Permissions
 	Limits
 	BearerToken bool `json:"bearer_token,omitempty"`
+	// Limit values deprecated inv v2
+	Max int64 `json:"max,omitempty"`
 }
 
 type v1UserClaimsDataDeletedFields struct {
@@ -41,6 +43,8 @@ func loadUser(data []byte, version int) (*UserClaims, error) {
 	switch version {
 	case 1:
 		var v1a v1UserClaims
+		v1a.Limits = Limits{NatsLimits: NatsLimits{NoLimit, NoLimit, NoLimit}}
+		v1a.Max = NoLimit
 		if err := json.Unmarshal(data, &v1a); err != nil {
 			return nil, err
 		}
@@ -72,5 +76,6 @@ func (oa v1UserClaims) migrateV1() (*UserClaims, error) {
 	u.User.Permissions = oa.v1User.Permissions
 	u.User.Limits = oa.v1User.Limits
 	u.User.BearerToken = oa.v1User.BearerToken
+	u.Version = 1
 	return &u, nil
 }

@@ -26,16 +26,47 @@ import (
 // NoLimit is used to indicate a limit field is unlimited in value.
 const NoLimit = -1
 
-// OperatorLimits are used to limit access by an account
-type OperatorLimits struct {
-	Subs            int64 `json:"subs,omitempty"`      // Max number of subscriptions
-	Conn            int64 `json:"conn,omitempty"`      // Max number of active connections
-	LeafNodeConn    int64 `json:"leaf,omitempty"`      // Max number of active leaf node connections
+type AccountLimits struct {
 	Imports         int64 `json:"imports,omitempty"`   // Max number of imports
 	Exports         int64 `json:"exports,omitempty"`   // Max number of exports
-	Data            int64 `json:"data,omitempty"`      // Max number of bytes
-	Payload         int64 `json:"payload,omitempty"`   // Max message payload
 	WildcardExports bool  `json:"wildcards,omitempty"` // Are wildcards allowed in exports
+	Conn            int64 `json:"conn,omitempty"`      // Max number of active connections
+	LeafNodeConn    int64 `json:"leaf,omitempty"`      // Max number of active leaf node connections
+}
+
+// IsUnlimited returns true if all limits are unlimited
+func (a *AccountLimits) IsUnlimited() bool {
+	return *a == AccountLimits{NoLimit, NoLimit, true, NoLimit, NoLimit}
+}
+
+type NatsLimits struct {
+	Subs    int64 `json:"subs,omitempty"`    // Max number of subscriptions
+	Data    int64 `json:"data,omitempty"`    // Max number of bytes
+	Payload int64 `json:"payload,omitempty"` // Max message payload
+}
+
+// IsUnlimited returns true if all limits are unlimited
+func (n *NatsLimits) IsUnlimited() bool {
+	return *n == NatsLimits{NoLimit, NoLimit, NoLimit}
+}
+
+type JetStreamLimits struct {
+	MemoryStorage int64 `json:"mem_storage,omitempty"`  // Max number of bytes stored in memory across all streams. (0 means disabled)
+	DiskStorage   int64 `json:"disk_storage,omitempty"` // Max number of bytes stored on disk across all streams. (0 means disabled)
+	Streams       int64 `json:"streams,omitempty"`      // Max number of streams
+	Consumer      int64 `json:"consumer,omitempty"`     // Max number of consumer
+}
+
+// IsUnlimited returns true if all limits are unlimited
+func (j *JetStreamLimits) IsUnlimited() bool {
+	return *j == JetStreamLimits{NoLimit, NoLimit, NoLimit, NoLimit}
+}
+
+// OperatorLimits are used to limit access by an account
+type OperatorLimits struct {
+	NatsLimits
+	AccountLimits
+	JetStreamLimits
 }
 
 // IsEmpty returns true if all of the limits are 0/false.
@@ -43,9 +74,9 @@ func (o *OperatorLimits) IsEmpty() bool {
 	return *o == OperatorLimits{}
 }
 
-// IsUnlimited returns true if all limits are
+// IsUnlimited returns true if all limits are unlimited
 func (o *OperatorLimits) IsUnlimited() bool {
-	return *o == OperatorLimits{NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, true}
+	return o.AccountLimits.IsUnlimited() && o.NatsLimits.IsUnlimited() && o.JetStreamLimits.IsUnlimited()
 }
 
 // Validate checks that the operator limits contain valid values
@@ -57,7 +88,6 @@ func (o *OperatorLimits) Validate(_ *ValidationResults) {
 type Account struct {
 	Imports            Imports        `json:"imports,omitempty"`
 	Exports            Exports        `json:"exports,omitempty"`
-	Identities         []Identity     `json:"identity,omitempty"`
 	Limits             OperatorLimits `json:"limits,omitempty"`
 	SigningKeys        StringList     `json:"signing_keys,omitempty"`
 	Revocations        RevocationList `json:"revocations,omitempty"`
@@ -71,10 +101,6 @@ func (a *Account) Validate(acct *AccountClaims, vr *ValidationResults) {
 	a.Exports.Validate(vr)
 	a.Limits.Validate(vr)
 	a.DefaultPermissions.Validate(vr)
-
-	for _, i := range a.Identities {
-		i.Validate(vr)
-	}
 
 	if !a.Limits.IsEmpty() && a.Limits.Imports >= 0 && int64(len(a.Imports)) > a.Limits.Imports {
 		vr.AddError("the account contains more imports than allowed by the operator")
@@ -121,7 +147,10 @@ func NewAccountClaims(subject string) *AccountClaims {
 	c := &AccountClaims{}
 	// Set to unlimited to start. We do it this way so we get compiler
 	// errors if we add to the OperatorLimits.
-	c.Limits = OperatorLimits{NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, NoLimit, true}
+	c.Limits = OperatorLimits{
+		NatsLimits{NoLimit, NoLimit, NoLimit},
+		AccountLimits{NoLimit, NoLimit, true, NoLimit, NoLimit},
+		JetStreamLimits{NoLimit, NoLimit, NoLimit, NoLimit}}
 	c.Subject = subject
 	return c
 }
@@ -134,7 +163,7 @@ func (a *AccountClaims) Encode(pair nkeys.KeyPair) (string, error) {
 	sort.Sort(a.Exports)
 	sort.Sort(a.Imports)
 	a.Type = AccountClaim
-	return a.ClaimsData.Encode(pair, a)
+	return a.ClaimsData.encode(pair, a)
 }
 
 // DecodeAccountClaims decodes account claims from a JWT string
@@ -165,9 +194,6 @@ func (a *AccountClaims) Validate(vr *ValidationResults) {
 	a.Account.Validate(a, vr)
 
 	if nkeys.IsValidPublicAccountKey(a.ClaimsData.Issuer) {
-		if len(a.Identities) > 0 {
-			vr.AddWarning("self-signed account JWTs shouldn't contain identity proofs")
-		}
 		if !a.Limits.IsEmpty() {
 			vr.AddWarning("self-signed account JWTs shouldn't contain operator limits")
 		}
@@ -209,7 +235,8 @@ func (a *AccountClaims) Revoke(pubKey string) {
 	a.RevokeAt(pubKey, time.Now())
 }
 
-// RevokeAt enters a revocation by public key and timestamp into this export
+// RevokeAt enters a revocation by public key and timestamp into this account
+// This will revoke all jwt issued for pubKey, prior to timestamp
 // If there is already a revocation for this public key that is newer, it is kept.
 func (a *AccountClaims) RevokeAt(pubKey string, timestamp time.Time) {
 	if a.Revocations == nil {
@@ -224,14 +251,18 @@ func (a *AccountClaims) ClearRevocation(pubKey string) {
 	a.Revocations.ClearRevocation(pubKey)
 }
 
-// IsRevokedAt checks if the public key is in the revoked list with a timestamp later than
-// the one passed in. Generally this method is called with time.Now() but other time's can
-// be used for testing.
-func (a *AccountClaims) IsRevokedAt(pubKey string, timestamp time.Time) bool {
-	return a.Revocations.IsRevoked(pubKey, timestamp)
+// isRevoked checks if the public key is in the revoked list with a timestamp later than the one passed in.
+// Generally this method is called with the subject and issue time of the jwt to be tested.
+// DO NOT pass time.Now(), it will not produce a stable/expected response.
+func (a *AccountClaims) isRevoked(pubKey string, claimIssuedAt time.Time) bool {
+	return a.Revocations.IsRevoked(pubKey, claimIssuedAt)
 }
 
-// IsRevoked checks if the public key is in the revoked list with time.Now()
-func (a *AccountClaims) IsRevoked(pubKey string) bool {
-	return a.Revocations.IsRevoked(pubKey, time.Now())
+// IsClaimRevoked checks if the account revoked the claim passed in.
+// Invalid claims (nil, no Subject or IssuedAt) will return true.
+func (a *AccountClaims) IsClaimRevoked(claim *UserClaims) bool {
+	if claim == nil || claim.IssuedAt == 0 || claim.Subject == "" {
+		return true
+	}
+	return a.isRevoked(claim.Subject, time.Unix(claim.IssuedAt, 0))
 }

@@ -56,6 +56,8 @@ var (
 	aUnsubBytes = []byte{'A', '-', ' '}
 	rSubBytes   = []byte{'R', 'S', '+', ' '}
 	rUnsubBytes = []byte{'R', 'S', '-', ' '}
+	lSubBytes   = []byte{'L', 'S', '+', ' '}
+	lUnsubBytes = []byte{'L', 'S', '-', ' '}
 )
 
 // Used by tests
@@ -68,6 +70,7 @@ type route struct {
 	remoteName   string
 	didSolicit   bool
 	retry        bool
+	lnoc         bool
 	routeType    RouteType
 	url          *url.URL
 	authRequired bool
@@ -89,6 +92,9 @@ type connectInfo struct {
 	TLS      bool   `json:"tls_required"`
 	Headers  bool   `json:"headers"`
 	Name     string `json:"name"`
+	Cluster  string `json:"cluster"`
+	Dynamic  bool   `json:"cluster_dynamic,omitempty"`
+	LNOC     bool   `json:"lnoc,omitempty"`
 	Gateway  string `json:"gateway,omitempty"`
 }
 
@@ -118,8 +124,8 @@ func (c *client) removeReplySub(sub *subscription) {
 	// Lookup the account based on sub.sid.
 	if i := bytes.Index(sub.sid, []byte(" ")); i > 0 {
 		// First part of SID for route is account name.
-		if acc, _ := c.srv.LookupAccount(string(sub.sid[:i])); acc != nil {
-			acc.sl.Remove(sub)
+		if v, ok := c.srv.accounts.Load(string(sub.sid[:i])); ok {
+			(v.(*Account)).sl.Remove(sub)
 		}
 		c.mu.Lock()
 		c.removeReplySubTimeout(sub)
@@ -154,6 +160,96 @@ func (c *client) processAccountUnsub(arg []byte) {
 	if c.kind == GATEWAY {
 		c.processGatewayAccountUnsub(accName)
 	}
+}
+
+// Process an inbound LMSG specification from the remote route. This means
+// we have an origin cluster and we force header semantics.
+func (c *client) processRoutedOriginClusterMsgArgs(arg []byte) error {
+	// Unroll splitArgs to avoid runtime/heap issues
+	a := [MAX_HMSG_ARGS + 1][]byte{}
+	args := a[:0]
+	start := -1
+	for i, b := range arg {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			if start >= 0 {
+				args = append(args, arg[start:i])
+				start = -1
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		args = append(args, arg[start:])
+	}
+
+	c.pa.arg = arg
+	switch len(args) {
+	case 0, 1, 2, 3, 4:
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Parse Error: '%s'", args)
+	case 5:
+		c.pa.reply = nil
+		c.pa.queues = nil
+		c.pa.hdb = args[3]
+		c.pa.hdr = parseSize(args[3])
+		c.pa.szb = args[4]
+		c.pa.size = parseSize(args[4])
+	case 6:
+		c.pa.reply = args[3]
+		c.pa.queues = nil
+		c.pa.hdb = args[4]
+		c.pa.hdr = parseSize(args[4])
+		c.pa.szb = args[5]
+		c.pa.size = parseSize(args[5])
+	default:
+		// args[2] is our reply indicator. Should be + or | normally.
+		if len(args[3]) != 1 {
+			return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Reply Indicator: '%s'", args[3])
+		}
+		switch args[3][0] {
+		case '+':
+			c.pa.reply = args[4]
+		case '|':
+			c.pa.reply = nil
+		default:
+			return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Reply Indicator: '%s'", args[3])
+		}
+
+		// Grab header size.
+		c.pa.hdb = args[len(args)-2]
+		c.pa.hdr = parseSize(c.pa.hdb)
+
+		// Grab size.
+		c.pa.szb = args[len(args)-1]
+		c.pa.size = parseSize(c.pa.szb)
+
+		// Grab queue names.
+		if c.pa.reply != nil {
+			c.pa.queues = args[5 : len(args)-2]
+		} else {
+			c.pa.queues = args[4 : len(args)-2]
+		}
+	}
+	if c.pa.hdr < 0 {
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Header Size: '%s'", arg)
+	}
+	if c.pa.size < 0 {
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Size: '%s'", args)
+	}
+	if c.pa.hdr > c.pa.size {
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Header Size larger then TotalSize: '%s'", arg)
+	}
+
+	// Common ones processed after check for arg length
+	c.pa.origin = args[0]
+	c.pa.account = args[1]
+	c.pa.subject = args[2]
+	c.pa.pacache = arg[len(args[0])+1 : len(args[0])+len(args[1])+len(args[2])+2]
+
+	return nil
 }
 
 // Process an inbound HMSG specification from the remote route.
@@ -243,7 +339,7 @@ func (c *client) processRoutedHeaderMsgArgs(arg []byte) error {
 	return nil
 }
 
-// Process an inbound RMSG specification from the remote route.
+// Process an inbound RMSG or LMSG specification from the remote route.
 func (c *client) processRoutedMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
 	a := [MAX_RMSG_ARGS][]byte{}
@@ -351,12 +447,13 @@ func (c *client) processInboundRoutedMsg(msg []byte) {
 }
 
 // Lock should be held entering here.
-func (c *client) sendRouteConnect(tlsRequired bool) {
+func (c *client) sendRouteConnect(clusterName string, tlsRequired bool) error {
 	var user, pass string
 	if userInfo := c.route.url.User; userInfo != nil {
 		user = userInfo.Username()
 		pass, _ = userInfo.Password()
 	}
+	s := c.srv
 	cinfo := connectInfo{
 		Echo:     true,
 		Verbose:  false,
@@ -364,17 +461,20 @@ func (c *client) sendRouteConnect(tlsRequired bool) {
 		User:     user,
 		Pass:     pass,
 		TLS:      tlsRequired,
-		Name:     c.srv.info.ID,
-		Headers:  c.srv.supportsHeaders(),
+		Name:     s.info.ID,
+		Headers:  s.supportsHeaders(),
+		Cluster:  clusterName,
+		Dynamic:  s.isClusterNameDynamic(),
+		LNOC:     true,
 	}
 
 	b, err := json.Marshal(cinfo)
 	if err != nil {
 		c.Errorf("Error marshaling CONNECT to route: %v\n", err)
-		c.closeConnection(ProtocolViolation)
-		return
+		return err
 	}
 	c.enqueueProto([]byte(fmt.Sprintf(ConProto, b)))
+	return nil
 }
 
 // Process the info message if we are a route.
@@ -390,6 +490,8 @@ func (c *client) processRouteInfo(info *Info) {
 	gacc.mu.RUnlock()
 
 	supportsHeaders := c.srv.supportsHeaders()
+	clusterName := c.srv.ClusterName()
+	srvName := c.srv.Name()
 
 	c.mu.Lock()
 	// Connection can be closed at any time (by auth timeout, etc).
@@ -408,6 +510,21 @@ func (c *client) processRouteInfo(info *Info) {
 		c.mu.Unlock()
 		c.closeConnection(DuplicateRoute)
 		return
+	}
+
+	// Detect if we have a mismatch of cluster names.
+	if info.Cluster != "" && info.Cluster != clusterName {
+		c.mu.Unlock()
+		// If we are dynamic we may update our cluster name.
+		// Use other if remote is non dynamic or their name is "bigger"
+		if s.isClusterNameDynamic() && (!info.Dynamic || (strings.Compare(clusterName, info.Cluster) < 0)) {
+			s.setClusterName(info.Cluster)
+			s.removeAllRoutesExcept(c)
+			c.mu.Lock()
+		} else {
+			c.closeConnection(ClusterNameConflict)
+			return
+		}
 	}
 
 	// If this is an async INFO from an existing route...
@@ -462,6 +579,12 @@ func (c *client) processRouteInfo(info *Info) {
 		return
 	}
 
+	// Check if remote has same server name than this server.
+	if !c.route.didSolicit && info.Name == srvName {
+		// For now simply report as a warning.
+		c.Warnf("Remote server has a duplicate name: %q", info.Name)
+	}
+
 	// Mark that the INFO protocol has been received, so we can detect updates.
 	c.flags.set(infoReceived)
 
@@ -477,6 +600,8 @@ func (c *client) processRouteInfo(info *Info) {
 	c.route.tlsRequired = info.TLSRequired
 	c.route.gatewayURL = info.GatewayURL
 	c.route.remoteName = info.Name
+	c.route.lnoc = info.LNOC
+
 	// When sent through route INFO, if the field is set, it should be of size 1.
 	if len(info.LeafNodeURLs) == 1 {
 		c.route.leafnodeURL = info.LeafNodeURLs[0]
@@ -601,7 +726,7 @@ func (s *Server) sendAsyncInfoToClients(regCli, wsCli bool) {
 		// registered (server has received CONNECT and first PING). For
 		// clients that are not at this stage, this will happen in the
 		// processing of the first PING (see client.processPing)
-		if ((regCli && c.ws == nil) || (wsCli && c.ws != nil)) &&
+		if ((regCli && !c.isWebsocket()) || (wsCli && c.isWebsocket())) &&
 			c.opts.Protocol >= ClientProtoInfo &&
 			c.flags.isSet(firstPongSent) {
 			// sendInfo takes care of checking if the connection is still
@@ -751,11 +876,11 @@ func (c *client) removeRemoteSubs() {
 		accountName := strings.Fields(key)[0]
 		ase := as[accountName]
 		if ase == nil {
-			acc, _ := srv.LookupAccount(accountName)
-			if acc == nil {
+			if v, ok := srv.accounts.Load(accountName); ok {
+				as[accountName] = &asubs{acc: v.(*Account), subs: []*subscription{sub}}
+			} else {
 				continue
 			}
-			as[accountName] = &asubs{acc: acc, subs: []*subscription{sub}}
 		} else {
 			ase.subs = append(ase.subs, sub)
 		}
@@ -799,11 +924,11 @@ func (c *client) processRemoteUnsub(arg []byte) (err error) {
 		return fmt.Errorf("processRemoteUnsub %s", err.Error())
 	}
 	// Lookup the account
-	acc, _ := c.srv.LookupAccount(accountName)
-	if acc == nil {
+	var acc *Account
+	if v, ok := srv.accounts.Load(accountName); ok {
+		acc = v.(*Account)
+	} else {
 		c.Debugf("Unknown account %q for subject %q", accountName, subject)
-		// Mark this account as not interested since we received a RS- and we
-		// do not have any record of it.
 		return nil
 	}
 
@@ -839,7 +964,7 @@ func (c *client) processRemoteUnsub(arg []byte) (err error) {
 	return nil
 }
 
-func (c *client) processRemoteSub(argo []byte) (err error) {
+func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 	// Indicate activity.
 	c.in.subs++
 
@@ -855,27 +980,64 @@ func (c *client) processRemoteSub(argo []byte) (err error) {
 	args := splitArg(arg)
 	sub := &subscription{client: c}
 
+	var off int
+	if hasOrigin {
+		off = 1
+		sub.origin = args[0]
+	}
+
 	switch len(args) {
-	case 2:
+	case 2 + off:
 		sub.queue = nil
-	case 4:
-		sub.queue = args[2]
-		sub.qw = int32(parseSize(args[3]))
+	case 4 + off:
+		sub.queue = args[2+off]
+		sub.qw = int32(parseSize(args[3+off]))
 	default:
 		return fmt.Errorf("processRemoteSub Parse Error: '%s'", arg)
 	}
-	sub.subject = args[1]
+	sub.subject = args[1+off]
 
 	// Lookup the account
 	// FIXME(dlc) - This may start having lots of contention?
-	accountName := string(args[0])
-	acc, _ := c.srv.LookupAccount(accountName)
-	if acc == nil {
-		if !srv.NewAccountsAllowed() {
-			c.Debugf("Unknown account %q for subject %q", accountName, sub.subject)
-			return nil
+	accountName := string(args[0+off])
+	// Lookup account while avoiding fetch.
+	// A slow fetch delays subsequent remote messages. It also avoids the expired check (see below).
+	// With all but memory resolver lookup can be delayed or fail.
+	// It is also possible that the account can't be resolved yet.
+	// This does not apply to the memory resolver.
+	// When used, perform the fetch.
+	staticResolver := true
+	if res := srv.AccountResolver(); res != nil {
+		if _, ok := res.(*MemAccResolver); !ok {
+			staticResolver = false
 		}
-		acc, _ = srv.LookupOrRegisterAccount(accountName)
+	}
+	var acc *Account
+	if staticResolver {
+		acc, _ = srv.LookupAccount(accountName)
+	} else if v, ok := srv.accounts.Load(accountName); ok {
+		acc = v.(*Account)
+	}
+	if acc == nil {
+		expire := false
+		isNew := false
+		if !srv.NewAccountsAllowed() {
+			// if the option of retrieving accounts later exists, create an expired one.
+			// When a client comes along, expiration will prevent it from being used,
+			// cause a fetch and update the account to what is should be.
+			if staticResolver {
+				c.Errorf("Unknown account %q for remote subject %q", accountName, sub.subject)
+				return
+			}
+			c.Debugf("Unknown account %q for remote subject %q", accountName, sub.subject)
+			expire = true
+		}
+		if acc, isNew = srv.LookupOrRegisterAccount(accountName); isNew && expire {
+			acc.mu.Lock()
+			acc.expired = true
+			acc.incomplete = true
+			acc.mu.Unlock()
+		}
 	}
 
 	c.mu.Lock()
@@ -901,11 +1063,12 @@ func (c *client) processRemoteSub(argo []byte) (err error) {
 	// We store local subs by account and subject and optionally queue name.
 	// If we have a queue it will have a trailing weight which we do not want.
 	if sub.queue != nil {
-		sub.sid = arg[:len(arg)-len(args[3])-1]
+		sub.sid = arg[:len(arg)-len(args[3+off])-1]
 	} else {
 		sub.sid = arg
 	}
 	key := string(sub.sid)
+
 	osub := c.subs[key]
 	updateGWs := false
 	if osub == nil {
@@ -1035,6 +1198,7 @@ func (c *client) sendRouteUnSubProtos(subs []*subscription, trace bool, filter f
 }
 
 // Low-level function that sends RS+ or RS- protocols for the given subscriptions.
+// This can now also send LS+ and LS- for origin cluster based leafnode subscriptions for cluster no-echo.
 // Use sendRouteSubProtos or sendRouteUnSubProtos instead for clarity.
 // Lock is held on entry.
 func (c *client) sendRouteSubOrUnSubProtos(subs []*subscription, isSubProto, trace bool, filter func(sub *subscription) bool) {
@@ -1066,10 +1230,23 @@ func (c *client) sendRouteSubOrUnSubProtos(subs []*subscription, isSubProto, tra
 		}
 
 		as := len(buf)
-		if isSubProto {
-			buf = append(buf, rSubBytes...)
+
+		// If we have an origin cluster and the other side supports leafnode origin clusters
+		// send an LS+/LS- version instead.
+		if len(sub.origin) > 0 && c.route.lnoc {
+			if isSubProto {
+				buf = append(buf, lSubBytes...)
+				buf = append(buf, sub.origin...)
+			} else {
+				buf = append(buf, lUnsubBytes...)
+			}
+			buf = append(buf, ' ')
 		} else {
-			buf = append(buf, rUnsubBytes...)
+			if isSubProto {
+				buf = append(buf, rSubBytes...)
+			} else {
+				buf = append(buf, rUnsubBytes...)
+			}
 		}
 		buf = append(buf, accName...)
 		buf = append(buf, ' ')
@@ -1094,8 +1271,8 @@ func (c *client) sendRouteSubOrUnSubProtos(subs []*subscription, isSubProto, tra
 		}
 		buf = append(buf, CR_LF...)
 	}
-	c.queueOutbound(buf)
-	c.flushSignal()
+
+	c.enqueueProto(buf)
 }
 
 func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
@@ -1125,6 +1302,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	infoJSON := s.routeInfoJSON
 	authRequired := s.routeInfo.AuthRequired
 	tlsRequired := s.routeInfo.TLSRequired
+	clusterName := s.info.Cluster
 	s.mu.Unlock()
 
 	// Grab lock
@@ -1222,7 +1400,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	}
 
 	// Spin up the read loop.
-	s.startGoRoutine(func() { c.readLoop() })
+	s.startGoRoutine(func() { c.readLoop(nil) })
 
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })
@@ -1236,7 +1414,11 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	// Queue Connect proto if we solicited the connection.
 	if didSolicit {
 		c.Debugf("Route connect msg sent")
-		c.sendRouteConnect(tlsRequired)
+		if err := c.sendRouteConnect(clusterName, tlsRequired); err != nil {
+			c.mu.Unlock()
+			c.closeConnection(ProtocolViolation)
+			return nil
+		}
 	}
 
 	// Send our info to the other side.
@@ -1321,6 +1503,7 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 			// If we upgrade to solicited, we still want to keep the remote's
 			// connectURLs. So transfer those.
 			r.connectURLs = remote.route.connectURLs
+			r.wsConnURLs = remote.route.wsConnURLs
 			remote.route = r
 		}
 		// This is to mitigate the issue where both sides add the route
@@ -1360,7 +1543,7 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 		// Not required for code correctness, but helps reduce the number of
 		// updates sent to the routes when processing high number of concurrent
 		// queue subscriptions updates (sub/unsub).
-		// See https://github.com/nats-io/nats-server/pull/1126 ffor more details.
+		// See https://github.com/nats-io/nats-server/pull/1126 for more details.
 		if isq {
 			acc.sqmu.Lock()
 		}
@@ -1472,13 +1655,10 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 	}
 }
 
-func (s *Server) routeAcceptLoop(ch chan struct{}) {
-	defer func() {
-		if ch != nil {
-			close(ch)
-		}
-	}()
-
+// This starts the route accept loop in a go routine, unless it
+// is detected that the server has already been shutdown.
+// It will also start soliciting explicit routes.
+func (s *Server) startRouteAcceptLoop() {
 	// Snapshot server options.
 	opts := s.getOpts()
 
@@ -1489,16 +1669,29 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 		port = 0
 	}
 
+	// This requires lock, so do this outside of may block.
+	clusterName := s.ClusterName()
+
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return
+	}
+	s.Noticef("Cluster name is %s", clusterName)
+	if s.isClusterNameDynamic() {
+		s.Warnf("Cluster name was dynamically generated, consider setting one")
+	}
+
 	hp := net.JoinHostPort(opts.Cluster.Host, strconv.Itoa(port))
-	l, e := net.Listen("tcp", hp)
+	l, e := natsListen("tcp", hp)
 	if e != nil {
+		s.mu.Unlock()
 		s.Fatalf("Error listening on router port: %d - %v", opts.Cluster.Port, e)
 		return
 	}
 	s.Noticef("Listening for route connections on %s",
 		net.JoinHostPort(opts.Cluster.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
 
-	s.mu.Lock()
 	proto := RouteProtoV2
 	// For tests, we want to be able to make this server behave
 	// as an older server so check this option to see if we should override
@@ -1524,6 +1717,9 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 		Proto:        proto,
 		GatewayURL:   s.getGatewayURL(),
 		Headers:      s.supportsHeaders(),
+		Cluster:      s.info.Cluster,
+		Dynamic:      s.isClusterNameDynamic(),
+		LNOC:         true,
 	}
 	// Set this if only if advertise is not disabled
 	if !opts.Cluster.NoAdvertise {
@@ -1566,28 +1762,31 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 	if tlsReq && opts.Cluster.TLSConfig.InsecureSkipVerify {
 		s.Warnf(clusterTLSInsecureWarning)
 	}
-	s.mu.Unlock()
 
-	// Let them know we are up
-	close(ch)
-	ch = nil
-
-	tmpDelay := ACCEPT_MIN_SLEEP
-
-	for s.isRunning() {
-		conn, err := l.Accept()
-		if err != nil {
-			tmpDelay = s.acceptError("Route", err, tmpDelay)
-			continue
+	// Now that we have the port, keep track of all ip:port that resolve to this server.
+	if interfaceAddr, err := net.InterfaceAddrs(); err == nil {
+		var localIPs []string
+		for i := 0; i < len(interfaceAddr); i++ {
+			interfaceIP, _, _ := net.ParseCIDR(interfaceAddr[i].String())
+			ipStr := interfaceIP.String()
+			if net.ParseIP(ipStr) != nil {
+				localIPs = append(localIPs, ipStr)
+			}
 		}
-		tmpDelay = ACCEPT_MIN_SLEEP
-		s.startGoRoutine(func() {
-			s.createRoute(conn, nil)
-			s.grWG.Done()
-		})
+		var portStr = strconv.FormatInt(int64(s.routeInfo.Port), 10)
+		for _, ip := range localIPs {
+			ipPort := net.JoinHostPort(ip, portStr)
+			s.routesToSelf[ipPort] = struct{}{}
+		}
 	}
-	s.Debugf("Router accept loop exiting..")
-	s.done <- true
+
+	// Start the accept loop in a different go routine.
+	go s.acceptConnections(l, "Route", func(conn net.Conn) { s.createRoute(conn, nil) }, nil)
+
+	// Solicit Routes if applicable. This will not block.
+	s.solicitRoutes(opts.Routes)
+
+	s.mu.Unlock()
 }
 
 // Similar to setInfoHostPortAndGenerateJSON, but for routeInfo.
@@ -1615,17 +1814,13 @@ func (s *Server) setRouteInfoHostPortAndIP() error {
 func (s *Server) StartRouting(clientListenReady chan struct{}) {
 	defer s.grWG.Done()
 
-	// Wait for the client listen port to be opened, and
-	// the possible ephemeral port to be selected.
+	// Wait for the client and and leafnode listen ports to be opened,
+	// and the possible ephemeral ports to be selected.
 	<-clientListenReady
 
-	// Spin up the accept loop
-	ch := make(chan struct{})
-	go s.routeAcceptLoop(ch)
-	<-ch
+	// Start the accept loop and solicitation of explicit routes (if applicable)
+	s.startRouteAcceptLoop()
 
-	// Solicit Routes if needed.
-	s.solicitRoutes(s.getOpts().Routes)
 }
 
 func (s *Server) reConnectToRoute(rURL *url.URL, rtype RouteType) {
@@ -1666,13 +1861,26 @@ func (s *Server) connectToRoute(rURL *url.URL, tryForEver, firstConnect bool) {
 
 	const connErrFmt = "Error trying to connect to route (attempt %v): %v"
 
+	s.mu.Lock()
+	resolver := s.routeResolver
+	excludedAddresses := s.routesToSelf
+	s.mu.Unlock()
+
 	attempts := 0
 	for s.isRunning() && rURL != nil {
 		if tryForEver && !s.routeStillValid(rURL) {
 			return
 		}
-		s.Debugf("Trying to connect to route on %s", rURL.Host)
-		conn, err := net.DialTimeout("tcp", rURL.Host, DEFAULT_ROUTE_DIAL)
+		var conn net.Conn
+		address, err := s.getRandomIP(resolver, rURL.Host, excludedAddresses)
+		if err == errNoIPAvail {
+			// This is ok, we are done.
+			return
+		}
+		if err == nil {
+			s.Debugf("Trying to connect to route on %s (%s)", rURL.Host, address)
+			conn, err = natsDialTimeout("tcp", address, DEFAULT_ROUTE_DIAL)
+		}
 		if err != nil {
 			attempts++
 			if s.shouldReportConnectErr(firstConnect, attempts) {
@@ -1731,6 +1939,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	}
 	// Unmarshal as a route connect protocol
 	proto := &connectInfo{}
+
 	if err := json.Unmarshal(arg, proto); err != nil {
 		return err
 	}
@@ -1748,15 +1957,58 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 		perms = srv.getOpts().Cluster.Permissions
 	}
 
+	clusterName := srv.ClusterName()
+
+	// If we have a cluster name set, make sure it matches ours.
+	if proto.Cluster != clusterName {
+		shouldReject := true
+		// If we have a dynamic name we will do additional checks.
+		if srv.isClusterNameDynamic() {
+			if !proto.Dynamic || strings.Compare(clusterName, proto.Cluster) < 0 {
+				// We will take on their name since theirs is configured or higher then ours.
+				srv.setClusterName(proto.Cluster)
+				if !proto.Dynamic {
+					srv.getOpts().Cluster.Name = proto.Cluster
+				}
+				srv.removeAllRoutesExcept(c)
+				shouldReject = false
+			}
+		}
+		if shouldReject {
+			errTxt := fmt.Sprintf("Rejecting connection, cluster name %q does not match %q", proto.Cluster, srv.info.Cluster)
+			c.Errorf(errTxt)
+			c.sendErr(errTxt)
+			c.closeConnection(ClusterNameConflict)
+			return ErrClusterNameRemoteConflict
+		}
+	}
+
 	supportsHeaders := c.srv.supportsHeaders()
 
 	// Grab connection name of remote route.
 	c.mu.Lock()
 	c.route.remoteID = c.opts.Name
+	c.route.lnoc = proto.LNOC
 	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
 	c.mu.Unlock()
 	return nil
+}
+
+// Called when we update our cluster name during negotiations with remotes.
+func (s *Server) removeAllRoutesExcept(c *client) {
+	s.mu.Lock()
+	routes := make([]*client, 0, len(s.routes))
+	for _, r := range s.routes {
+		if r != c {
+			routes = append(routes, r)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, r := range routes {
+		r.closeConnection(ClusterNameConflict)
+	}
 }
 
 func (s *Server) removeRoute(c *client) {

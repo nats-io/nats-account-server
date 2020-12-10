@@ -32,8 +32,7 @@ If the server is configured with an operator JWT path, this URL will return the 
 
 ## GET /jwt/v1/accounts/<pubkey>
 
-Retieve an account JWT by the public key. The result is either an error
-or the encoded JWT.
+Retrieve an account JWT by the public key. The result is either an error or the encoded JWT.
 
 The response contains cache control headers, and uses the JTI as the ETag.
 
@@ -61,6 +60,9 @@ The JWT must be signed by the operator specified in the server's configuration.
 A status 400 is returned if there is a problem with the JWT or the server is in read-only mode. In rare
 cases a status 500 may be returned if there was an issue saving the JWT.
 
+If the JWT is self signed and the account server is enabled to do so, the JWT may be signed.
+Optionally a status of 202 can be returned, signifying that signing happens out of band.
+
 ## GET /jwt/v1/activations/<hash>
 
 Retrieve an activation token by its hash.
@@ -74,7 +76,7 @@ Three optional query parameters are supported:
 
   * text - can be set to "true" to change the content type to text/plain
   * decode - can be set to "true" to display the JSON for the JWT header and body
-  * noticy - can be set to "true" to trigger a notification event if NATS is configured
+  * notify - can be set to "true" to trigger a notification event if NATS is configured
 
 The response contains cache control headers, and uses the JTI as the ETag.
 

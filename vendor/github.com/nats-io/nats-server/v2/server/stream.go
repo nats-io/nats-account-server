@@ -15,8 +15,10 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -48,13 +50,29 @@ type StreamConfig struct {
 	Replicas     int             `json:"num_replicas"`
 	NoAck        bool            `json:"no_ack,omitempty"`
 	Template     string          `json:"template_owner,omitempty"`
+	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
+
+	// These are non public configuration options.
+	// If you add new options, check fileStreamInfoJSON in order for them to
+	// be properly persisted/recovered, if needed.
+	internal       bool
+	allowNoSubject bool
+}
+
+const JSApiPubAckResponseType = "io.nats.jetstream.api.v1.pub_ack_response"
+
+// JSPubAckResponse is a formal response to a publish operation.
+type JSPubAckResponse struct {
+	Error *ApiError `json:"error,omitempty"`
+	*PubAck
 }
 
 // PubAck is the detail you get back from a publish to a stream that was successful.
 // e.g. +OK {"stream": "Orders", "seq": 22}
 type PubAck struct {
-	Stream string `json:"stream"`
-	Seq    uint64 `json:"seq"`
+	Stream    string `json:"stream"`
+	Sequence  uint64 `json:"seq"`
+	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -68,22 +86,43 @@ type StreamInfo struct {
 // for a Stream we will direct link from the client to this Stream structure.
 type Stream struct {
 	mu        sync.RWMutex
-	sg        *sync.Cond
-	sgw       int
 	jsa       *jsAccount
 	client    *client
 	sid       int
 	pubAck    []byte
 	sendq     chan *jsPubMsg
 	store     StreamStore
+	lseq      uint64
+	lmsgId    string
 	consumers map[string]*Consumer
+	numFilter int
 	config    StreamConfig
 	created   time.Time
+	ddmap     map[string]*ddentry
+	ddarr     []*ddentry
+	ddindex   int
+	ddtmr     *time.Timer
 }
 
+// Headers for published messages.
+const (
+	JSMsgId             = "Nats-Msg-Id"
+	JSExpectedStream    = "Nats-Expected-Stream"
+	JSExpectedLastSeq   = "Nats-Expected-Last-Sequence"
+	JSExpectedLastMsgId = "Nats-Expected-Last-Msg-Id"
+)
+
+// Dedupe entry
+type ddentry struct {
+	id  string
+	seq uint64
+	ts  int64
+}
+
+// Replicas Range
 const (
 	StreamDefaultReplicas = 1
-	StreamMaxReplicas     = 8
+	StreamMaxReplicas     = 7
 )
 
 // AddStream adds a stream for the given account.
@@ -137,7 +176,6 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 	// Setup the internal client.
 	c := s.createInternalJetStreamClient()
 	mset := &Stream{jsa: jsa, config: cfg, client: c, consumers: make(map[string]*Consumer)}
-	mset.sg = sync.NewCond(&mset.mu)
 
 	jsa.streams[cfg.Name] = mset
 	storeDir := path.Join(jsa.storeDir, streamsDir, cfg.Name)
@@ -150,6 +188,11 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 	fsCfg := fsConfig
 	if fsCfg == nil {
 		fsCfg = &FileStoreConfig{}
+		// If we are file based and not explicitly configured
+		// we may be able to auto-tune based on max msgs or bytes.
+		if cfg.Storage == FileStorage {
+			mset.autoTuneFileStorageBlockSize(fsCfg)
+		}
 	}
 	fsCfg.StoreDir = storeDir
 	if err := mset.setupStore(fsCfg); err != nil {
@@ -159,23 +202,117 @@ func (a *Account) AddStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 	// Setup our internal send go routine.
 	mset.setupSendCapabilities()
 
+	// Create our pubAck template here. Better than json marshal each time on success.
+	b, _ := json.Marshal(&JSPubAckResponse{PubAck: &PubAck{Stream: cfg.Name, Sequence: math.MaxUint64}})
+	end := bytes.Index(b, []byte(strconv.FormatUint(math.MaxUint64, 10)))
+	// We need to force cap here to make sure this is a copy when sending a response.
+	mset.pubAck = b[:end:end]
+
+	// Rebuild dedupe as needed.
+	mset.rebuildDedupe()
+
 	// Setup subscriptions
 	if err := mset.subscribeToStream(); err != nil {
 		mset.Delete()
 		return nil, err
 	}
 
-	// Create our pubAck here. This will be reused and for +OK will contain JSON
-	// for stream name and sequence.
-	longestSeq := strconv.FormatUint(math.MaxUint64, 10)
-	lpubAck := len(OK) + len(cfg.Name) + len("{\"stream\": ,\"seq\": }") + len(longestSeq)
-	mset.pubAck = make([]byte, 0, lpubAck)
-	mset.pubAck = append(mset.pubAck, OK...)
-	mset.pubAck = append(mset.pubAck, fmt.Sprintf(" {\"stream\": %q, \"seq\": ", cfg.Name)...)
-
+	// Send advisory.
 	mset.sendCreateAdvisory()
 
 	return mset, nil
+}
+
+// Helper to determine the max msg size for this stream if file based.
+func (mset *Stream) maxMsgSize() uint64 {
+	maxMsgSize := mset.config.MaxMsgSize
+	if maxMsgSize <= 0 {
+		// Pull from the account.
+		if mset.jsa != nil {
+			if acc := mset.jsa.acc(); acc != nil {
+				acc.mu.RLock()
+				maxMsgSize = acc.mpay
+				acc.mu.RUnlock()
+			}
+		}
+		// If all else fails use default.
+		if maxMsgSize <= 0 {
+			maxMsgSize = MAX_PAYLOAD_SIZE
+		}
+	}
+	// Now determine an estimation for the subjects etc.
+	maxSubject := -1
+	for _, subj := range mset.config.Subjects {
+		if subjectIsLiteral(subj) {
+			if len(subj) > maxSubject {
+				maxSubject = len(subj)
+			}
+		}
+	}
+	if maxSubject < 0 {
+		const defaultMaxSubject = 256
+		maxSubject = defaultMaxSubject
+	}
+	// filestore will add in estimates for record headers, etc.
+	return fileStoreMsgSizeEstimate(maxSubject, int(maxMsgSize))
+}
+
+// If we are file based and the file storage config was not explicitly set
+// we can autotune block sizes to better match. Our target will be to store 125%
+// of the theoretical limit. We will round up to nearest 100 bytes as well.
+func (mset *Stream) autoTuneFileStorageBlockSize(fsCfg *FileStoreConfig) {
+	var totalEstSize uint64
+
+	// MaxBytes will take precedence for now.
+	if mset.config.MaxBytes > 0 {
+		totalEstSize = uint64(mset.config.MaxBytes)
+	} else if mset.config.MaxMsgs > 0 {
+		// Determine max message size to estimate.
+		totalEstSize = mset.maxMsgSize() * uint64(mset.config.MaxMsgs)
+	} else {
+		// If nothing set will let underlying filestore determine blkSize.
+		return
+	}
+
+	blkSize := (totalEstSize / 4) + 1 // (25% overhead)
+	// Round up to nearest 100
+	if m := blkSize % 100; m != 0 {
+		blkSize += 100 - m
+	}
+	if blkSize < FileStoreMinBlkSize {
+		blkSize = FileStoreMinBlkSize
+	}
+	if blkSize > FileStoreMaxBlkSize {
+		blkSize = FileStoreMaxBlkSize
+	}
+	fsCfg.BlockSize = uint64(blkSize)
+}
+
+// rebuildDedupe will rebuild any dedupe structures needed after recovery of a stream.
+// TODO(dlc) - Might be good to know if this should be checked at all for streams with no
+// headers and msgId in them. Would need signaling from the storage layer.
+func (mset *Stream) rebuildDedupe() {
+	state := mset.store.State()
+	mset.lseq = state.LastSeq
+
+	// We have some messages. Lookup starting sequence by duplicate time window.
+	sseq := mset.store.GetSeqFromTime(time.Now().Add(-mset.config.Duplicates))
+	if sseq == 0 {
+		return
+	}
+
+	for seq := sseq; seq <= state.LastSeq; seq++ {
+		_, hdr, _, ts, err := mset.store.LoadMsg(seq)
+		var msgId string
+		if err == nil && len(hdr) > 0 {
+			if msgId = getMsgId(hdr); msgId != _EMPTY_ {
+				mset.storeMsgId(&ddentry{msgId, seq, ts})
+			}
+		}
+		if seq == state.LastSeq {
+			mset.lmsgId = msgId
+		}
+	}
 }
 
 func (mset *Stream) sendCreateAdvisory() {
@@ -283,6 +420,9 @@ func (jsa *jsAccount) subjectsOverlap(subjects []string) bool {
 	return false
 }
 
+// Default duplicates window.
+const StreamDefaultDuplicatesWindow = 2 * time.Minute
+
 func checkStreamCfg(config *StreamConfig) (StreamConfig, error) {
 	if config == nil {
 		return StreamConfig{}, fmt.Errorf("stream configuration invalid")
@@ -318,8 +458,24 @@ func checkStreamCfg(config *StreamConfig) (StreamConfig, error) {
 	if cfg.MaxConsumers == 0 {
 		cfg.MaxConsumers = -1
 	}
+	if cfg.Duplicates == 0 {
+		if cfg.MaxAge != 0 && cfg.MaxAge < StreamDefaultDuplicatesWindow {
+			cfg.Duplicates = cfg.MaxAge
+		} else {
+			cfg.Duplicates = StreamDefaultDuplicatesWindow
+		}
+	} else if cfg.Duplicates < 0 {
+		return StreamConfig{}, fmt.Errorf("duplicates window can not be negative")
+	}
+	// Check that duplicates is not larger then age if set.
+	if cfg.MaxAge != 0 && cfg.Duplicates > cfg.MaxAge {
+		return StreamConfig{}, fmt.Errorf("duplicates window can not be larger then max age")
+	}
+
 	if len(cfg.Subjects) == 0 {
-		cfg.Subjects = append(cfg.Subjects, cfg.Name)
+		if !cfg.allowNoSubject {
+			cfg.Subjects = append(cfg.Subjects, cfg.Name)
+		}
 	} else {
 		// We can allow overlaps, but don't allow direct duplicates.
 		dset := make(map[string]struct{}, len(cfg.Subjects))
@@ -345,13 +501,23 @@ func (mset *Stream) Config() StreamConfig {
 	return mset.config
 }
 
+func (mset *Stream) FileStoreConfig() (FileStoreConfig, error) {
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+	fs, ok := mset.store.(*fileStore)
+	if !ok {
+		return FileStoreConfig{}, ErrStoreWrongType
+	}
+	return fs.fileStoreConfig(), nil
+}
+
 // Delete deletes a stream from the owning account.
 func (mset *Stream) Delete() error {
 	mset.mu.Lock()
 	jsa := mset.jsa
 	mset.mu.Unlock()
 	if jsa == nil {
-		return fmt.Errorf("jetstream not enabled for account")
+		return ErrJetStreamNotEnabledForAccount
 	}
 	jsa.mu.Lock()
 	delete(jsa.streams, mset.config.Name)
@@ -417,13 +583,13 @@ func (mset *Stream) Update(config *StreamConfig) error {
 	}
 	// Update config with new values. The store update will enforce any stricter limits.
 	mset.mu.Lock()
-	defer mset.mu.Unlock()
 
 	// Now walk new subjects. All of these need to be added, but we will check
 	// the originals first, since if it is in there we can skip, already added.
 	for _, s := range cfg.Subjects {
 		if _, ok := current[s]; !ok {
 			if _, err := mset.subscribeInternal(s, mset.processInboundJetStreamMsg); err != nil {
+				mset.mu.Unlock()
 				return err
 			}
 		}
@@ -432,53 +598,81 @@ func (mset *Stream) Update(config *StreamConfig) error {
 	// What is left in current needs to be deleted.
 	for s := range current {
 		if err := mset.unsubscribeInternal(s); err != nil {
+			mset.mu.Unlock()
 			return err
 		}
 	}
 
+	// Check for the Duplicates
+	if cfg.Duplicates != o_cfg.Duplicates && mset.ddtmr != nil {
+		// Let it fire right away, it will adjust properly on purge.
+		mset.ddtmr.Reset(time.Microsecond)
+	}
 	// Now update config and store's version of our config.
 	mset.config = cfg
-	mset.store.UpdateConfig(&cfg)
-
 	mset.sendUpdateAdvisoryLocked()
+	mset.mu.Unlock()
+
+	mset.store.UpdateConfig(&cfg)
 
 	return nil
 }
 
 // Purge will remove all messages from the stream and underlying store.
-func (mset *Stream) Purge() uint64 {
+func (mset *Stream) Purge() (uint64, error) {
 	mset.mu.Lock()
 	if mset.client == nil {
 		mset.mu.Unlock()
-		return 0
+		return 0, errors.New("stream closed")
 	}
-	purged := mset.store.Purge()
-	stats := mset.store.State()
-	var obs []*Consumer
+	// Purge dedupe.
+	mset.ddmap = nil
+	var _obs [4]*Consumer
+	obs := _obs[:0]
 	for _, o := range mset.consumers {
 		obs = append(obs, o)
 	}
 	mset.mu.Unlock()
+
+	purged, err := mset.store.Purge()
+	if err != nil {
+		return purged, err
+	}
+	stats := mset.store.State()
 	for _, o := range obs {
 		o.purge(stats.FirstSeq)
 	}
-	return purged
+	return purged, nil
 }
 
 // RemoveMsg will remove a message from a stream.
 // FIXME(dlc) - Should pick one and be consistent.
 func (mset *Stream) RemoveMsg(seq uint64) (bool, error) {
-	return mset.store.RemoveMsg(seq)
+	return mset.removeMsg(seq, false)
 }
 
 // DeleteMsg will remove a message from a stream.
 func (mset *Stream) DeleteMsg(seq uint64) (bool, error) {
-	return mset.store.RemoveMsg(seq)
+	return mset.removeMsg(seq, false)
 }
 
 // EraseMsg will securely remove a message and rewrite the data with random data.
 func (mset *Stream) EraseMsg(seq uint64) (bool, error) {
-	return mset.store.EraseMsg(seq)
+	return mset.removeMsg(seq, true)
+}
+
+func (mset *Stream) removeMsg(seq uint64, secure bool) (bool, error) {
+	mset.mu.RLock()
+	if mset.client == nil {
+		mset.mu.RUnlock()
+		return false, fmt.Errorf("invalid stream")
+	}
+	mset.mu.RUnlock()
+	if secure {
+		return mset.store.EraseMsg(seq)
+	} else {
+		return mset.store.RemoveMsg(seq)
+	}
 }
 
 // Will create internal subscriptions for the msgSet.
@@ -509,16 +703,7 @@ func (mset *Stream) subscribeInternal(subject string, cb msgHandler) (*subscript
 	mset.sid++
 
 	// Now create the subscription
-	sub, err := c.processSub([]byte(subject+" "+strconv.Itoa(mset.sid)), false)
-	if err != nil {
-		return nil, err
-	} else if sub == nil {
-		return nil, fmt.Errorf("malformed subject")
-	}
-	c.mu.Lock()
-	sub.icb = cb
-	c.mu.Unlock()
-	return sub, nil
+	return c.processSub([]byte(subject), nil, []byte(strconv.Itoa(mset.sid)), cb, false)
 }
 
 // Helper for unlocked stream.
@@ -574,27 +759,157 @@ func (mset *Stream) unsubscribeUnlocked(sub *subscription) {
 
 func (mset *Stream) setupStore(fsCfg *FileStoreConfig) error {
 	mset.mu.Lock()
-	defer mset.mu.Unlock()
-
 	mset.created = time.Now().UTC()
 
 	switch mset.config.Storage {
 	case MemoryStorage:
 		ms, err := newMemStore(&mset.config)
 		if err != nil {
+			mset.mu.Unlock()
 			return err
 		}
 		mset.store = ms
 	case FileStorage:
 		fs, err := newFileStoreWithCreated(*fsCfg, mset.config, mset.created)
 		if err != nil {
+			mset.mu.Unlock()
 			return err
 		}
 		mset.store = fs
 	}
-	jsa, st := mset.jsa, mset.config.Storage
-	mset.store.StorageBytesUpdate(func(delta int64) { jsa.updateUsage(st, delta) })
+	mset.mu.Unlock()
+
+	mset.store.RegisterStorageUpdates(mset.storeUpdates)
+
 	return nil
+}
+
+// Called for any updates to the underlying stream. We pass through the bytes to the
+// jetstream account. We do local processing for stream pending for consumers, but only
+// for removals.
+// Lock should not be held.
+func (mset *Stream) storeUpdates(md, bd int64, seq uint64, subj string) {
+	// If we have a single negative update then we will process our consumers for stream pending.
+	// Purge and Store handled separately inside individual calls.
+	if md == -1 && seq > 0 {
+		mset.mu.RLock()
+		for _, o := range mset.consumers {
+			o.decStreamPending(seq, subj)
+		}
+		mset.mu.RUnlock()
+	}
+
+	if mset.jsa != nil {
+		mset.jsa.updateUsage(mset.config.Storage, bd)
+	}
+}
+
+// NumMsgIds returns the number of message ids being tracked for duplicate suppression.
+func (mset *Stream) NumMsgIds() int {
+	mset.mu.RLock()
+	defer mset.mu.RUnlock()
+	return len(mset.ddmap)
+}
+
+// checkMsgId will process and check for duplicates.
+// Lock should be held.
+func (mset *Stream) checkMsgId(id string) *ddentry {
+	if id == "" || mset.ddmap == nil {
+		return nil
+	}
+	return mset.ddmap[id]
+}
+
+// Will purge the entries that are past the window.
+// Should be called from a timer.
+func (mset *Stream) purgeMsgIds() {
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+
+	now := time.Now().UnixNano()
+	tmrNext := mset.config.Duplicates
+	window := int64(tmrNext)
+
+	for i, dde := range mset.ddarr[mset.ddindex:] {
+		if now-dde.ts >= window {
+			delete(mset.ddmap, dde.id)
+		} else {
+			mset.ddindex += i
+			// Check if we should garbage collect here if we are 1/3 total size.
+			if cap(mset.ddarr) > 3*(len(mset.ddarr)-mset.ddindex) {
+				mset.ddarr = append([]*ddentry(nil), mset.ddarr[mset.ddindex:]...)
+				mset.ddindex = 0
+			}
+			tmrNext = time.Duration(window - (now - dde.ts))
+			break
+		}
+	}
+	if len(mset.ddmap) > 0 {
+		// Make sure to not fire too quick
+		const minFire = 50 * time.Millisecond
+		if tmrNext < minFire {
+			tmrNext = minFire
+		}
+		mset.ddtmr.Reset(tmrNext)
+	} else {
+		mset.ddtmr.Stop()
+		mset.ddtmr = nil
+	}
+}
+
+// storeMsgId will store the message id for duplicate detection.
+func (mset *Stream) storeMsgId(dde *ddentry) {
+	mset.mu.Lock()
+	if mset.ddmap == nil {
+		mset.ddmap = make(map[string]*ddentry)
+	}
+	if mset.ddtmr == nil {
+		mset.ddtmr = time.AfterFunc(mset.config.Duplicates, mset.purgeMsgIds)
+	}
+	mset.ddmap[dde.id] = dde
+	mset.ddarr = append(mset.ddarr, dde)
+	mset.mu.Unlock()
+}
+
+// Will return the value for the header denoted by key or nil if it does not exists.
+// This function ignores errors and tries to achieve speed and no additional allocations.
+func getHdrVal(key string, hdr []byte) []byte {
+	index := bytes.Index(hdr, []byte(key))
+	if index < 0 {
+		return nil
+	}
+	var value []byte
+	for i := index + len(key) + 2; i > 0 && i < len(hdr); i++ {
+		if hdr[i] == '\r' && i < len(hdr)-1 && hdr[i+1] == '\n' {
+			break
+		}
+		value = append(value, hdr[i])
+	}
+	return value
+}
+
+// Fast lookup of msgId.
+func getMsgId(hdr []byte) string {
+	return string(getHdrVal(JSMsgId, hdr))
+}
+
+// Fast lookup of expected last msgId.
+func getExpectedLastMsgId(hdr []byte) string {
+	return string(getHdrVal(JSExpectedLastMsgId, hdr))
+}
+
+// Fast lookup of expected stream.
+func getExpectedStream(hdr []byte) string {
+	return string(getHdrVal(JSExpectedStream, hdr))
+}
+
+// Fast lookup of expected stream.
+func getExpectedLastSeq(hdr []byte) uint64 {
+	bseq := getHdrVal(JSExpectedLastSeq, hdr)
+	if len(bseq) == 0 {
+		return 0
+	}
+	return uint64(parseInt64(bseq))
 }
 
 // processInboundJetStreamMsg handles processing messages bound for a stream.
@@ -606,6 +921,7 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 	if c != nil && c.acc != nil {
 		accName = c.acc.Name
 	}
+
 	doAck := !mset.config.NoAck
 	pubAck := mset.pubAck
 	jsa := mset.jsa
@@ -613,9 +929,64 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 	name := mset.config.Name
 	maxMsgSize := int(mset.config.MaxMsgSize)
 	numConsumers := len(mset.consumers)
-	mset.mu.Unlock()
+	interestRetention := mset.config.Retention == InterestPolicy
+
+	var resp = &JSPubAckResponse{}
+
+	// Process msg headers if present.
+	var msgId string
+	if pc != nil && pc.pa.hdr > 0 {
+		hdr := msg[:pc.pa.hdr]
+		msgId = getMsgId(hdr)
+		sendq := mset.sendq
+		if dde := mset.checkMsgId(msgId); dde != nil {
+			mset.mu.Unlock()
+			if doAck && len(reply) > 0 {
+				response := append(pubAck, strconv.FormatUint(dde.seq, 10)...)
+				response = append(response, ",\"duplicate\": true}"...)
+				sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, response, nil, 0}
+			}
+			return
+		}
+		// Expected stream.
+		if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
+			mset.mu.Unlock()
+			if doAck && len(reply) > 0 {
+				resp.PubAck = &PubAck{Stream: name}
+				resp.Error = &ApiError{Code: 400, Description: "expected stream does not match"}
+				b, _ := json.Marshal(resp)
+				sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, b, nil, 0}
+			}
+			return
+		}
+		// Expected last sequence.
+		if seq := getExpectedLastSeq(hdr); seq > 0 && seq != mset.lseq {
+			lseq := mset.lseq
+			mset.mu.Unlock()
+			if doAck && len(reply) > 0 {
+				resp.PubAck = &PubAck{Stream: name}
+				resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("wrong last sequence: %d", lseq)}
+				b, _ := json.Marshal(resp)
+				sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, b, nil, 0}
+			}
+			return
+		}
+		// Expected last msgId.
+		if lmsgId := getExpectedLastMsgId(hdr); lmsgId != _EMPTY_ && lmsgId != mset.lmsgId {
+			last := mset.lmsgId
+			mset.mu.Unlock()
+			if doAck && len(reply) > 0 {
+				resp.PubAck = &PubAck{Stream: name}
+				resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("wrong last msg ID: %s", last)}
+				b, _ := json.Marshal(resp)
+				sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, b, nil, 0}
+			}
+			return
+		}
+	}
 
 	if c == nil {
+		mset.mu.Unlock()
 		return
 	}
 
@@ -630,27 +1001,104 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 	// Header support.
 	var hdr []byte
 
-	// Check to see if we are over the account limit.
+	// Check to see if we are over the max msg size.
 	if maxMsgSize >= 0 && len(msg) > maxMsgSize {
-		response = []byte("-ERR 'message size exceeds maximum allowed'")
-	} else {
-		// Headers.
-		if pc != nil && pc.pa.hdr > 0 {
-			hdr = msg[:pc.pa.hdr]
-			msg = msg[pc.pa.hdr:]
+		mset.mu.Unlock()
+		if doAck && len(reply) > 0 {
+			resp.PubAck = &PubAck{Stream: name}
+			resp.Error = &ApiError{Code: 400, Description: "message size exceeds maximum allowed"}
+			b, _ := json.Marshal(resp)
+			mset.sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, b, nil, 0}
 		}
-		seq, ts, err = store.StoreMsg(subject, hdr, msg)
-		if err != nil {
-			if err != ErrStoreClosed {
-				c.Errorf("JetStream failed to store a msg on account: %q stream: %q -  %v", accName, name, err)
+		return
+	}
+
+	var noInterest bool
+
+	// If we are interest based retention and have no consumers then we can skip.
+	if interestRetention {
+		if numConsumers == 0 {
+			noInterest = true
+		} else if mset.numFilter > 0 {
+			// Assume none.
+			noInterest = true
+			for _, o := range mset.consumers {
+				if o.config.FilterSubject != _EMPTY_ && subjectIsSubsetMatch(subject, o.config.FilterSubject) {
+					noInterest = false
+					break
+				}
 			}
-			response = []byte(fmt.Sprintf("-ERR '%v'", err))
-		} else if jsa.limitsExceeded(stype) {
-			c.Warnf("JetStream resource limits exceeded for account: %q", accName)
-			response = []byte("-ERR 'resource limits exceeded for account'")
-			store.RemoveMsg(seq)
-			seq = 0
-		} else if err == nil && doAck && len(reply) > 0 {
+		}
+	}
+
+	// Skip msg here.
+	if noInterest {
+		mset.lseq = store.SkipMsg()
+		mset.lmsgId = msgId
+		mset.mu.Unlock()
+
+		if doAck && len(reply) > 0 {
+			response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
+			response = append(response, '}')
+			mset.sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, response, nil, 0}
+		}
+		// If we have a msgId make sure to save.
+		if msgId != _EMPTY_ {
+			mset.storeMsgId(&ddentry{msgId, seq, time.Now().UnixNano()})
+		}
+		return
+	}
+
+	// If here we will attempt to store the message.
+	// Check for headers.
+	if pc != nil && pc.pa.hdr > 0 {
+		hdr = msg[:pc.pa.hdr]
+		msg = msg[pc.pa.hdr:]
+	}
+
+	// Assume this will succeed.
+	olseq, olmsgId := mset.lseq, mset.lmsgId
+	mset.lseq++
+	mset.lmsgId = msgId
+
+	// We hold the lock to this point to make sure nothing gets between us since we check for pre-conditions.
+	mset.mu.Unlock()
+
+	// Store actual msg.
+	seq, ts, err = store.StoreMsg(subject, hdr, msg)
+
+	// If we did not succeed put those values back.
+	if err != nil || seq == 0 {
+		mset.mu.Lock()
+		mset.lseq = olseq
+		mset.lmsgId = olmsgId
+		mset.mu.Unlock()
+	}
+
+	if err != nil {
+		if err != ErrStoreClosed {
+			c.Errorf("JetStream failed to store a msg on account: %q stream: %q -  %v", accName, name, err)
+		}
+		if doAck && len(reply) > 0 {
+			resp.PubAck = &PubAck{Stream: name}
+			resp.Error = &ApiError{Code: 400, Description: err.Error()}
+			response, _ = json.Marshal(resp)
+		}
+	} else if jsa.limitsExceeded(stype) {
+		c.Warnf("JetStream resource limits exceeded for account: %q", accName)
+		if doAck && len(reply) > 0 {
+			resp.PubAck = &PubAck{Stream: name}
+			resp.Error = &ApiError{Code: 400, Description: "resource limits exceeded for account"}
+			response, _ = json.Marshal(resp)
+		}
+		store.RemoveMsg(seq)
+		seq = 0
+	} else {
+		// If we have a msgId make sure to save.
+		if msgId != "" {
+			mset.storeMsgId(&ddentry{msgId, seq, ts})
+		}
+		if doAck && len(reply) > 0 {
 			response = append(pubAck, strconv.FormatUint(seq, 10)...)
 			response = append(response, '}')
 		}
@@ -661,29 +1109,23 @@ func (mset *Stream) processInboundJetStreamMsg(_ *subscription, pc *client, subj
 		mset.sendq <- &jsPubMsg{reply, _EMPTY_, _EMPTY_, nil, response, nil, 0}
 	}
 
-	if err == nil && numConsumers > 0 && seq > 0 {
-		var needSignal bool
+	if err == nil && seq > 0 && numConsumers > 0 {
+		var _obs [4]*Consumer
+		obs := _obs[:0]
+
 		mset.mu.Lock()
 		for _, o := range mset.consumers {
-			if !o.deliverCurrentMsg(subject, hdr, msg, seq, ts) {
-				needSignal = true
-			}
+			obs = append(obs, o)
 		}
 		mset.mu.Unlock()
 
-		if needSignal {
-			mset.signalConsumers()
+		for _, o := range obs {
+			o.incStreamPending(seq, subject)
+			if !o.deliverCurrentMsg(subject, hdr, msg, seq, ts) {
+				o.signalNewMessages()
+			}
 		}
 	}
-}
-
-// Will signal all waiting consumers.
-func (mset *Stream) signalConsumers() {
-	mset.mu.Lock()
-	if mset.sgw > 0 {
-		mset.sg.Broadcast()
-	}
-	mset.mu.Unlock()
 }
 
 // Internal message for use by jetstream subsystem.
@@ -729,16 +1171,16 @@ func (mset *Stream) Name() string {
 }
 
 func (mset *Stream) internalSendLoop() {
-	mset.mu.Lock()
+	mset.mu.RLock()
 	c := mset.client
 	if c == nil {
-		mset.mu.Unlock()
+		mset.mu.RUnlock()
 		return
 	}
 	s := c.srv
 	sendq := mset.sendq
 	name := mset.config.Name
-	mset.mu.Unlock()
+	mset.mu.RUnlock()
 
 	// Warn when internal send queue is backed up past 75%
 	warnThresh := 3 * msetSendQSize / 4
@@ -772,9 +1214,11 @@ func (mset *Stream) internalSendLoop() {
 				c.pa.hdb = nil
 				msg = append(pm.msg, _CRLF_...)
 			}
+
 			didDeliver := c.processInboundClientMsg(msg)
 			c.pa.szb = nil
 			c.flushClients(0)
+
 			// Check to see if this is a delivery for an observable and
 			// we failed to deliver the message. If so alert the observable.
 			if pm.o != nil && pm.seq > 0 && !didDeliver {
@@ -793,8 +1237,25 @@ func (mset *Stream) delete() error {
 
 // Internal function to stop or delete the stream.
 func (mset *Stream) stop(delete bool) error {
+	// Clean up consumers.
+	mset.mu.Lock()
+	var obs []*Consumer
+	for _, o := range mset.consumers {
+		obs = append(obs, o)
+	}
+	mset.consumers = nil
+	mset.mu.Unlock()
+
+	for _, o := range obs {
+		// Second flag says do not broadcast to signal.
+		// TODO(dlc) - If we have an err here we don't want to stop
+		// but should we log?
+		o.stop(delete, false, delete)
+	}
+
 	mset.mu.Lock()
 
+	// Send stream delete advisory after the consumers.
 	if delete {
 		mset.sendDeleteAdvisoryLocked()
 	}
@@ -809,27 +1270,17 @@ func (mset *Stream) stop(delete bool) error {
 		mset.mu.Unlock()
 		return nil
 	}
-	var obs []*Consumer
-	for _, o := range mset.consumers {
-		obs = append(obs, o)
+
+	// Cleanup duplicate timer if running.
+	if mset.ddtmr != nil {
+		mset.ddtmr.Stop()
+		mset.ddtmr = nil
+		mset.ddarr = nil
+		mset.ddmap = nil
 	}
-	mset.consumers = nil
 	mset.mu.Unlock()
 
 	c.closeConnection(ClientClosed)
-
-	// Clean up consumers.
-	for _, o := range obs {
-		// Second flag says do not broadcast to signal.
-		if err := o.stop(delete, false, delete); err != nil {
-			return err
-		}
-	}
-
-	// Make sure we release them all here at once.
-	mset.mu.Lock()
-	mset.sg.Broadcast()
-	mset.mu.Unlock()
 
 	if mset.store == nil {
 		return nil
@@ -880,17 +1331,25 @@ func (mset *Stream) NumConsumers() int {
 	return len(mset.consumers)
 }
 
+func (mset *Stream) addConsumer(o *Consumer) {
+	mset.consumers[o.name] = o
+	if o.config.FilterSubject != _EMPTY_ {
+		mset.numFilter++
+	}
+}
+
+func (mset *Stream) deleteConsumer(o *Consumer) {
+	if o.config.FilterSubject != _EMPTY_ {
+		mset.numFilter--
+	}
+	delete(mset.consumers, o.name)
+}
+
 // LookupConsumer will retrieve a consumer by name.
 func (mset *Stream) LookupConsumer(name string) *Consumer {
 	mset.mu.Lock()
 	defer mset.mu.Unlock()
-
-	for _, o := range mset.consumers {
-		if o.name == name {
-			return o
-		}
-	}
-	return nil
+	return mset.consumers[name]
 }
 
 // State will return the current state for this stream.
@@ -904,22 +1363,6 @@ func (mset *Stream) State() StreamState {
 	// Currently rely on store.
 	// TODO(dlc) - This will need to change with clusters.
 	return mset.store.State()
-}
-
-// waitForMsgs will have the stream wait for the arrival of new messages.
-func (mset *Stream) waitForMsgs() {
-	mset.mu.Lock()
-
-	if mset.client == nil {
-		mset.mu.Unlock()
-		return
-	}
-
-	mset.sgw++
-	mset.sg.Wait()
-	mset.sgw--
-
-	mset.mu.Unlock()
 }
 
 // Determines if the new proposed partition is unique amongst all observables.
@@ -936,7 +1379,17 @@ func (mset *Stream) partitionUnique(partition string) bool {
 	return true
 }
 
-// ackMsg is called into from an observable when we have a WorkQueue or Interest retention policy.
+// Lock should be held.
+func (mset *Stream) checkInterest(seq uint64, obs *Consumer) bool {
+	for _, o := range mset.consumers {
+		if o != obs && o.needAck(seq) {
+			return true
+		}
+	}
+	return false
+}
+
+// ackMsg is called into from a consumer when we have a WorkQueue or Interest retention policy.
 func (mset *Stream) ackMsg(obs *Consumer, seq uint64) {
 	switch mset.config.Retention {
 	case LimitsPolicy:
@@ -944,16 +1397,10 @@ func (mset *Stream) ackMsg(obs *Consumer, seq uint64) {
 	case WorkQueuePolicy:
 		mset.store.RemoveMsg(seq)
 	case InterestPolicy:
-		var needAck bool
 		mset.mu.Lock()
-		for _, o := range mset.consumers {
-			if o != obs && o.needAck(seq) {
-				needAck = true
-				break
-			}
-		}
+		hasInterest := mset.checkInterest(seq, obs)
 		mset.mu.Unlock()
-		if !needAck {
+		if !hasInterest {
 			mset.store.RemoveMsg(seq)
 		}
 	}
@@ -967,16 +1414,7 @@ func (mset *Stream) Snapshot(deadline time.Duration, checkMsgs, includeConsumers
 		return nil, fmt.Errorf("invalid stream")
 	}
 	store := mset.store
-	var obs []*Consumer
-	for _, o := range mset.consumers {
-		obs = append(obs, o)
-	}
 	mset.mu.Unlock()
-
-	// Make sure to sync their state.
-	for _, o := range obs {
-		o.writeState()
-	}
 
 	return store.Snapshot(deadline, checkMsgs, includeConsumers)
 }

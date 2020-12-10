@@ -14,23 +14,30 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"net/http"
+	"net/textproto"
 )
 
 type parserState int
 type parseState struct {
 	state   parserState
+	op      byte
 	as      int
 	drop    int
 	pa      pubArg
 	argBuf  []byte
 	msgBuf  []byte
+	header  http.Header // access via getHeader
 	scratch [MAX_CONTROL_LINE_SIZE]byte
 }
 
 type pubArg struct {
 	arg     []byte
 	pacache []byte
+	origin  []byte
 	account []byte
 	subject []byte
 	deliver []byte
@@ -123,8 +130,14 @@ const (
 )
 
 func (c *client) parse(buf []byte) error {
+	// Branch out to mqtt clients. c.mqtt is immutable, but should it become
+	// an issue (say data race detection), we could branch outside in readLoop
+	if c.isMqtt() {
+		return c.mqttParse(buf)
+	}
 	var i int
 	var b byte
+	var lmsg bool
 
 	// Snapshots
 	c.mu.Lock()
@@ -142,6 +155,7 @@ func (c *client) parse(buf []byte) error {
 
 		switch c.state {
 		case OP_START:
+			c.op = b
 			if b != 'C' && b != 'c' {
 				if authSet {
 					goto authErr
@@ -170,7 +184,7 @@ func (c *client) parse(buf []byte) error {
 					c.state = OP_R
 				}
 			case 'L', 'l':
-				if c.kind != LEAF {
+				if c.kind != LEAF && c.kind != ROUTER {
 					goto parseErr
 				} else {
 					c.state = OP_L
@@ -381,6 +395,17 @@ func (c *client) parse(buf []byte) error {
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
+				// Check if we have and account mappings or tees or filters.
+				// FIXME(dlc) - Probably better way to do this.
+				// Could add in cache but will be tricky since results based on pub subject are dynamic
+				// due to wildcard matching and weight sets.
+				if c.kind == CLIENT && c.in.flags.isSet(hasMappings) {
+					old := c.pa.subject
+					changed := c.selectMappedSubject()
+					if trace && changed {
+						c.traceInOp("MAPPING", []byte(fmt.Sprintf("%s -> %s", old, c.pa.subject)))
+					}
+				}
 				c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
 				// If we don't have a saved buffer then jump ahead with
 				// the index. If this overruns what is left we fall out
@@ -439,11 +464,12 @@ func (c *client) parse(buf []byte) error {
 				c.traceMsg(c.msgBuf)
 			}
 			c.processInboundMsg(c.msgBuf)
-			c.argBuf, c.msgBuf = nil, nil
+			c.argBuf, c.msgBuf, c.header = nil, nil, nil
 			c.drop, c.as, c.state = 0, i+1, OP_START
 			// Drop all pub args
-			c.pa.arg, c.pa.pacache, c.pa.account, c.pa.subject = nil, nil, nil, nil
+			c.pa.arg, c.pa.pacache, c.pa.origin, c.pa.account, c.pa.subject = nil, nil, nil, nil, nil
 			c.pa.reply, c.pa.hdr, c.pa.size, c.pa.szb, c.pa.hdb, c.pa.queues = nil, -1, 0, nil, nil, nil
+			lmsg = false
 		case OP_A:
 			switch b {
 			case '+':
@@ -577,12 +603,20 @@ func (c *client) parse(buf []byte) error {
 					if trace {
 						c.traceInOp("SUB", arg)
 					}
-					_, err = c.processSub(arg, false)
+					err = c.parseSub(arg, false)
 				case ROUTER:
-					if trace {
-						c.traceInOp("RS+", arg)
+					switch c.op {
+					case 'R', 'r':
+						if trace {
+							c.traceInOp("RS+", arg)
+						}
+						err = c.processRemoteSub(arg, false)
+					case 'L', 'l':
+						if trace {
+							c.traceInOp("LS+", arg)
+						}
+						err = c.processRemoteSub(arg, true)
 					}
-					err = c.processRemoteSub(arg)
 				case GATEWAY:
 					if trace {
 						c.traceInOp("RS+", arg)
@@ -704,7 +738,12 @@ func (c *client) parse(buf []byte) error {
 					err = c.processUnsub(arg)
 				case ROUTER:
 					if trace && c.srv != nil {
-						c.traceInOp("RS-", arg)
+						switch c.op {
+						case 'R', 'r':
+							c.traceInOp("RS-", arg)
+						case 'L', 'l':
+							c.traceInOp("LS-", arg)
+						}
 					}
 					err = c.processRemoteUnsub(arg)
 				case GATEWAY:
@@ -895,10 +934,19 @@ func (c *client) parse(buf []byte) error {
 				}
 				var err error
 				if c.kind == ROUTER || c.kind == GATEWAY {
-					if trace {
-						c.traceInOp("RMSG", arg)
+					switch c.op {
+					case 'R', 'r':
+						if trace {
+							c.traceInOp("RMSG", arg)
+						}
+						err = c.processRoutedMsgArgs(arg)
+					case 'L', 'l':
+						if trace {
+							c.traceInOp("LMSG", arg)
+						}
+						lmsg = true
+						err = c.processRoutedOriginClusterMsgArgs(arg)
 					}
-					err = c.processRoutedMsgArgs(arg)
 				} else if c.kind == LEAF {
 					if trace {
 						c.traceInOp("LMSG", arg)
@@ -1079,7 +1127,7 @@ func (c *client) parse(buf []byte) error {
 
 		if c.argBuf == nil {
 			// Works also for MSG_ARG, when message comes from ROUTE.
-			if err := c.clonePubArg(); err != nil {
+			if err := c.clonePubArg(lmsg); err != nil {
 				goto parseErr
 			}
 		}
@@ -1130,13 +1178,16 @@ func protoSnippet(start int, buf []byte) string {
 
 // clonePubArg is used when the split buffer scenario has the pubArg in the existing read buffer, but
 // we need to hold onto it into the next read.
-func (c *client) clonePubArg() error {
+func (c *client) clonePubArg(lmsg bool) error {
 	// Just copy and re-process original arg buffer.
 	c.argBuf = c.scratch[:0]
 	c.argBuf = append(c.argBuf, c.pa.arg...)
 
 	switch c.kind {
 	case ROUTER, GATEWAY:
+		if lmsg {
+			return c.processRoutedOriginClusterMsgArgs(c.argBuf)
+		}
 		if c.pa.hdr < 0 {
 			return c.processRoutedMsgArgs(c.argBuf)
 		} else {
@@ -1155,4 +1206,18 @@ func (c *client) clonePubArg() error {
 			return c.processHeaderPub(c.argBuf)
 		}
 	}
+}
+
+func (ps *parseState) getHeader() http.Header {
+	if ps.header == nil {
+		if hdr := ps.pa.hdr; hdr > 0 {
+			reader := bufio.NewReader(bytes.NewReader(ps.msgBuf[0:hdr]))
+			tp := textproto.NewReader(reader)
+			tp.ReadLine() // skip over first line, contains version
+			if mimeHeader, err := tp.ReadMIMEHeader(); err == nil {
+				ps.header = http.Header(mimeHeader)
+			}
+		}
+	}
+	return ps.header
 }

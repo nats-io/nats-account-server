@@ -29,7 +29,6 @@ import (
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
-	nsc "github.com/nats-io/nsc/cmd/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -92,73 +91,15 @@ func CreateAccountKey(t *testing.T) ([]byte, string, nkeys.KeyPair) {
 	return seed, pub, kp
 }
 
-func MakeTempStore(t *testing.T, name string, kp nkeys.KeyPair) (*nsc.Store, string) {
+func CreateTestStoreForOperator(t *testing.T, name string) (string, func(string, string)) {
 	p, err := ioutil.TempDir("", "store_test")
 	require.NoError(t, err)
 
-	var nk *nsc.NamedKey
-	if kp != nil {
-		nk = &nsc.NamedKey{Name: name, KP: kp}
+	return p, func(tk string, jwt string) {
+		file := filepath.Join(p, tk+".jwt")
+		err := ioutil.WriteFile(file, []byte(jwt), 0644)
+		require.NoError(t, err)
 	}
-
-	s, err := nsc.CreateStore(name, p, nk)
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	return s, p
-}
-
-func CreateTestStoreForOperator(t *testing.T, name string, operator nkeys.KeyPair) (*nsc.Store, string) {
-	s, p := MakeTempStore(t, name, operator)
-
-	require.NotNil(t, s)
-	require.FileExists(t, filepath.Join(s.Dir, ".nsc"))
-	require.True(t, s.Has("", ".nsc"))
-
-	if operator != nil {
-		tokenName := fmt.Sprintf("%s.jwt", nsc.SafeName(name))
-		require.FileExists(t, filepath.Join(s.Dir, tokenName))
-		require.True(t, s.Has("", tokenName))
-	}
-
-	return s, p
-}
-
-func TestStartWithNSCFlag(t *testing.T) {
-	_, _, kp := CreateOperatorKey(t)
-	_, apub, _ := CreateAccountKey(t)
-	s, path := CreateTestStoreForOperator(t, "x", kp)
-
-	c := jwt.NewAccountClaims(apub)
-	c.Name = "foo"
-	cd, err := c.Encode(kp)
-	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
-
-	flags := Flags{
-		DebugAndVerbose: true,
-		NSCFolder:       filepath.Join(path, "x"),
-		HostPort:        "127.0.0.1:0",
-	}
-
-	server := NewAccountServer()
-	server.InitializeFromFlags(flags)
-	server.config.Logging.Custom = NewNilLogger()
-	err = server.Start()
-	require.NoError(t, err)
-	defer server.Stop()
-
-	httpClient, err := testHTTPClient(false)
-	require.NoError(t, err)
-
-	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/accounts/%s", server.port, apub))
-	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	jwt := string(body)
-	require.Equal(t, cd, jwt)
 }
 
 func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
@@ -267,7 +208,6 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	require.Equal(t, "http://primary.nats.io:5222", server.config.Primary)
 
 	require.Equal(t, "D:/nats/as_store", server.config.Store.Dir)
-	require.False(t, server.config.Store.ReadOnly)
 	require.False(t, server.config.Store.Shard)
 
 	require.Equal(t, 5000, server.config.HTTP.ReadTimeout)
@@ -308,18 +248,17 @@ func TestNATSFlags(t *testing.T) {
 
 	_, _, kp := CreateOperatorKey(t)
 	_, apub, _ := CreateAccountKey(t)
-	s, path := CreateTestStoreForOperator(t, "x", kp)
+	path, store := CreateTestStoreForOperator(t, "x")
 
 	c := jwt.NewAccountClaims(apub)
 	c.Name = "foo"
 	cd, err := c.Encode(kp)
 	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
+	store(apub, cd)
 
 	flags := Flags{
 		DebugAndVerbose: true,
-		NSCFolder:       filepath.Join(path, "x"),
+		Directory:       path,
 		HostPort:        "127.0.0.1:0",
 		NATSURL:         testEnv.NC.ConnectedUrl(),
 		Creds:           testEnv.SystemUserCredsFile,
@@ -363,12 +302,12 @@ func TestNATSFlags(t *testing.T) {
 }
 
 func TestStartWithBadHostPortFlag(t *testing.T) {
-	_, _, kp := CreateOperatorKey(t)
-	_, path := CreateTestStoreForOperator(t, "x", kp)
+	CreateOperatorKey(t)
+	path, _ := CreateTestStoreForOperator(t, "x")
 
 	flags := Flags{
 		DebugAndVerbose: true,
-		NSCFolder:       filepath.Join(path, "x"),
+		Directory:       filepath.Join(path, "x"),
 		HostPort:        "127.0.0.1",
 	}
 
@@ -378,7 +317,7 @@ func TestStartWithBadHostPortFlag(t *testing.T) {
 
 	flags = Flags{
 		DebugAndVerbose: true,
-		NSCFolder:       filepath.Join(path, "x"),
+		Directory:       filepath.Join(path, "x"),
 		HostPort:        "127.0.0.1:blam",
 	}
 
@@ -397,7 +336,6 @@ func TestFlagOverridesConfig(t *testing.T) {
 	{
 		store: {
 			Dir: '%s',
-			ReadOnly: false,
 		},
 		http: {
 			ReadTimeout: 2000,
@@ -415,7 +353,6 @@ func TestFlagOverridesConfig(t *testing.T) {
 
 	flags := Flags{
 		ConfigFile: fullPath,
-		ReadOnly:   true,
 		Directory:  path,
 	}
 
@@ -429,5 +366,4 @@ func TestFlagOverridesConfig(t *testing.T) {
 
 	require.Equal(t, server.config.Store.Dir, path)
 	require.Equal(t, server.config.HTTP.ReadTimeout, 2000)
-	require.True(t, server.jwtStore.IsReadOnly())
 }

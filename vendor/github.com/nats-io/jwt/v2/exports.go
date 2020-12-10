@@ -78,6 +78,7 @@ type Export struct {
 	TokenReq             bool            `json:"token_req,omitempty"`
 	Revocations          RevocationList  `json:"revocations,omitempty"`
 	ResponseType         ResponseType    `json:"response_type,omitempty"`
+	ResponseThreshold    time.Duration   `json:"response_threshold,omitempty"`
 	Latency              *ServiceLatency `json:"service_latency,omitempty"`
 	AccountTokenPosition uint            `json:"account_token_position,omitempty"`
 }
@@ -110,6 +111,10 @@ func (e *Export) IsStreamResponse() bool {
 
 // Validate appends validation issues to the passed in results list
 func (e *Export) Validate(vr *ValidationResults) {
+	if e == nil {
+		vr.AddError("null export is not allowed")
+		return
+	}
 	if !e.IsService() && !e.IsStream() {
 		vr.AddError("invalid export type: %q", e.Type)
 	}
@@ -124,6 +129,12 @@ func (e *Export) Validate(vr *ValidationResults) {
 			vr.AddError("latency tracking only permitted for services")
 		}
 		e.Latency.Validate(vr)
+	}
+	if e.ResponseThreshold.Nanoseconds() < 0 {
+		vr.AddError("negative response threshold is invalid")
+	}
+	if e.ResponseThreshold.Nanoseconds() > 0 && !e.IsService() {
+		vr.AddError("response threshold only valid for services")
 	}
 	e.Subject.Validate(vr)
 	if e.AccountTokenPosition > 0 {
@@ -164,16 +175,20 @@ func (e *Export) ClearRevocation(pubKey string) {
 	e.Revocations.ClearRevocation(pubKey)
 }
 
-// IsRevokedAt checks if the public key is in the revoked list with a timestamp later than
-// the one passed in. Generally this method is called with time.Now() but other time's can
-// be used for testing.
-func (e *Export) IsRevokedAt(pubKey string, timestamp time.Time) bool {
-	return e.Revocations.IsRevoked(pubKey, timestamp)
+// isRevoked checks if the public key is in the revoked list with a timestamp later than the one passed in.
+// Generally this method is called with the subject and issue time of the jwt to be tested.
+// DO NOT pass time.Now(), it will not produce a stable/expected response.
+func (e *Export) isRevoked(pubKey string, claimIssuedAt time.Time) bool {
+	return e.Revocations.IsRevoked(pubKey, claimIssuedAt)
 }
 
-// IsRevoked checks if the public key is in the revoked list with time.Now()
-func (e *Export) IsRevoked(pubKey string) bool {
-	return e.Revocations.IsRevoked(pubKey, time.Now())
+// IsClaimRevoked checks if the activation revoked the claim passed in.
+// Invalid claims (nil, no Subject or IssuedAt) will return true.
+func (e *Export) IsClaimRevoked(claim *ActivationClaims) bool {
+	if claim == nil || claim.IssuedAt == 0 || claim.Subject == "" {
+		return true
+	}
+	return e.isRevoked(claim.Subject, time.Unix(claim.IssuedAt, 0))
 }
 
 // Exports is a slice of exports
@@ -217,6 +232,10 @@ func (e *Exports) Validate(vr *ValidationResults) error {
 	var streamSubjects []Subject
 
 	for _, v := range *e {
+		if v == nil {
+			vr.AddError("null export is not allowed")
+			continue
+		}
 		if v.IsService() {
 			serviceSubjects = append(serviceSubjects, v.Subject)
 		} else {

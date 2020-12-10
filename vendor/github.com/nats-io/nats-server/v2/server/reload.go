@@ -297,25 +297,28 @@ type clusterOption struct {
 }
 
 // Apply the cluster change.
-func (c *clusterOption) Apply(server *Server) {
+func (c *clusterOption) Apply(s *Server) {
 	// TODO: support enabling/disabling clustering.
-	server.mu.Lock()
+	s.mu.Lock()
 	tlsRequired := c.newValue.TLSConfig != nil
-	server.routeInfo.TLSRequired = tlsRequired
-	server.routeInfo.TLSVerify = tlsRequired
-	server.routeInfo.AuthRequired = c.newValue.Username != ""
+	s.routeInfo.TLSRequired = tlsRequired
+	s.routeInfo.TLSVerify = tlsRequired
+	s.routeInfo.AuthRequired = c.newValue.Username != ""
 	if c.newValue.NoAdvertise {
-		server.routeInfo.ClientConnectURLs = nil
-		server.routeInfo.WSConnectURLs = nil
+		s.routeInfo.ClientConnectURLs = nil
+		s.routeInfo.WSConnectURLs = nil
 	} else {
-		server.routeInfo.ClientConnectURLs = server.clientConnectURLs
-		server.routeInfo.WSConnectURLs = server.websocket.connectURLs
+		s.routeInfo.ClientConnectURLs = s.clientConnectURLs
+		s.routeInfo.WSConnectURLs = s.websocket.connectURLs
 	}
-	server.setRouteInfoHostPortAndIP()
-	server.mu.Unlock()
-	server.Noticef("Reloaded: cluster")
+	s.setRouteInfoHostPortAndIP()
+	s.mu.Unlock()
+	if c.newValue.Name != "" && c.newValue.Name != s.ClusterName() {
+		s.setClusterName(c.newValue.Name)
+	}
+	s.Noticef("Reloaded: cluster")
 	if tlsRequired && c.newValue.TLSConfig.InsecureSkipVerify {
-		server.Warnf(clusterTLSInsecureWarning)
+		s.Warnf(clusterTLSInsecureWarning)
 	}
 }
 
@@ -593,6 +596,25 @@ func (m *maxTracedMsgLenOption) Apply(server *Server) {
 	server.Noticef("Reloaded: max_traced_msg_len = %d", m.newValue)
 }
 
+type mqttAckWaitReload struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (o *mqttAckWaitReload) Apply(s *Server) {
+	s.Noticef("Reloaded: MQTT ack_wait = %v", o.newValue)
+}
+
+type mqttMaxAckPendingReload struct {
+	noopOption
+	newValue uint16
+}
+
+func (o *mqttMaxAckPendingReload) Apply(s *Server) {
+	s.mqttUpdateMaxAckPending(o.newValue)
+	s.Noticef("Reloaded: MQTT max_ack_pending = %v", o.newValue)
+}
+
 // Reload reads the current configuration file and applies any supported
 // changes. This returns an error if the server was not started with a config
 // file or an option which doesn't support hot-swapping was changed.
@@ -630,6 +652,7 @@ func (s *Server) Reload() error {
 	gatewayOrgPort := curOpts.Gateway.Port
 	leafnodesOrgPort := curOpts.LeafNode.Port
 	websocketOrgPort := curOpts.Websocket.Port
+	mqttOrgPort := curOpts.MQTT.Port
 
 	s.mu.Unlock()
 
@@ -661,6 +684,9 @@ func (s *Server) Reload() error {
 	}
 	if newOpts.Websocket.Port == -1 {
 		newOpts.Websocket.Port = websocketOrgPort
+	}
+	if newOpts.MQTT.Port == -1 {
+		newOpts.MQTT.Port = mqttOrgPort
 	}
 
 	if err := s.reloadOptions(curOpts, newOpts); err != nil {
@@ -751,9 +777,7 @@ func imposeOrder(value interface{}) error {
 			return value[i].String() < value[j].String()
 		})
 	case []string:
-		sort.Slice(value, func(i, j int) bool {
-			return value[i] < value[j]
-		})
+		sort.Strings(value)
 	case []*jwt.OperatorClaims:
 		sort.Slice(value, func(i, j int) bool {
 			return value[i].Issuer < value[j].Issuer
@@ -763,11 +787,9 @@ func imposeOrder(value interface{}) error {
 			return value.Gateways[i].Name < value.Gateways[j].Name
 		})
 	case WebsocketOpts:
-		sort.Slice(value.AllowedOrigins, func(i, j int) bool {
-			return value.AllowedOrigins[i] < value.AllowedOrigins[j]
-		})
+		sort.Strings(value.AllowedOrigins)
 	case string, bool, int, int32, int64, time.Duration, float64, nil,
-		LeafNodeOpts, ClusterOpts, *tls.Config, *URLAccResolver, *MemAccResolver, Authentication:
+		LeafNodeOpts, ClusterOpts, *tls.Config, *URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts:
 		// explicitly skipped types
 	default:
 		// this will fail during unit tests
@@ -906,6 +928,44 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew := newValue.(LeafNodeOpts)
 			tmpOld.TLSConfig = nil
 			tmpNew.TLSConfig = nil
+
+			// Special check for leafnode remotes changes which are not supported right now.
+			leafRemotesChanged := func(a, b LeafNodeOpts) bool {
+				if len(tmpOld.Remotes) != len(tmpNew.Remotes) {
+					return true
+				}
+
+				// Check whether all remotes URLs are still the same.
+				for _, oldRemote := range tmpOld.Remotes {
+					var found bool
+
+					for _, newRemote := range tmpNew.Remotes {
+						// Bind to global account in case not defined.
+						if newRemote.LocalAccount == _EMPTY_ {
+							newRemote.LocalAccount = globalAccountName
+						}
+
+						if reflect.DeepEqual(oldRemote, newRemote) {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						return true
+					}
+				}
+
+				return false
+			}
+
+			// First check whether remotes changed at all. If they did not,
+			// skip them in the complete equal check.
+			if !leafRemotesChanged(tmpOld, tmpNew) {
+				tmpOld.Remotes = nil
+				tmpNew.Remotes = nil
+			}
+
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
@@ -931,6 +991,20 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpOld.TLSConfig = nil
 			tmpNew.TLSConfig = nil
 			// If there is really a change prevents reload.
+			if !reflect.DeepEqual(tmpOld, tmpNew) {
+				// See TODO(ik) note below about printing old/new values.
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
+					field.Name, oldValue, newValue)
+			}
+		case "mqtt":
+			diffOpts = append(diffOpts, &mqttAckWaitReload{newValue: newValue.(MQTTOpts).AckWait})
+			diffOpts = append(diffOpts, &mqttMaxAckPendingReload{newValue: newValue.(MQTTOpts).MaxAckPending})
+			// Nil out/set to 0 the options that we allow to be reloaded so that
+			// we only fail reload if some that we don't support are changed.
+			tmpOld := oldValue.(MQTTOpts)
+			tmpNew := newValue.(MQTTOpts)
+			tmpOld.TLSConfig, tmpOld.AckWait, tmpOld.MaxAckPending = nil, 0, 0
+			tmpNew.TLSConfig, tmpNew.AckWait, tmpNew.MaxAckPending = nil, 0, 0
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
 				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
@@ -1088,6 +1162,7 @@ func (s *Server) reloadAuthorization() {
 		s.gacc = nil
 		s.configureAccounts()
 		s.configureAuthorization()
+		s.mu.Unlock()
 
 		s.accounts.Range(func(k, v interface{}) bool {
 			newAcc := v.(*Account)
@@ -1128,6 +1203,11 @@ func (s *Server) reloadAuthorization() {
 			}
 			return true
 		})
+		s.mu.Lock()
+		// Check if we had a default system account.
+		if s.sys != nil && s.sys.account != nil && !s.opts.NoSystemAccount {
+			s.accounts.Store(s.sys.account.Name, s.sys.account)
+		}
 		// Double check any JetStream configs.
 		checkJetStream = true
 	} else if s.opts.AccountResolver != nil {
@@ -1144,9 +1224,7 @@ func (s *Server) reloadAuthorization() {
 				if acc == s.gacc {
 					return true
 				}
-				acc.mu.RLock()
-				accName := acc.Name
-				acc.mu.RUnlock()
+				accName := acc.GetName()
 				// Release server lock for following actions
 				s.mu.Unlock()
 				accClaims, claimJWT, _ := s.fetchAccountClaims(accName)
@@ -1192,6 +1270,8 @@ func (s *Server) reloadAuthorization() {
 		// can't hold the lock as go routine reading it may be waiting for lock as well
 		resetCh = s.sys.resetCh
 	}
+	// Check that publish retained messages sources are still allowed to publish.
+	s.mqttCheckPubRetainedPerms()
 	s.mu.Unlock()
 
 	if resetCh != nil {
@@ -1228,7 +1308,20 @@ func (s *Server) reloadAuthorization() {
 
 	// We will double check all JetStream configs on a reload.
 	if checkJetStream {
-		s.configAllJetStreamAccounts()
+		var err error
+		s.getJetStream().clearResources()
+		if s.globalAccountOnly() {
+			err = s.GlobalAccount().EnableJetStream(nil)
+		} else {
+			err = s.configAllJetStreamAccounts()
+		}
+		if err != nil {
+			s.Errorf(err.Error())
+		}
+	}
+
+	if res := s.AccountResolver(); res != nil {
+		res.Reload()
 	}
 }
 

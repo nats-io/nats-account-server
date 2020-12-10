@@ -49,6 +49,10 @@ const (
 	gwClusterOffset  = gwReplyPrefixLen
 	gwServerOffset   = gwClusterOffset + gwHashLen + 1
 	gwSubjectOffset  = gwServerOffset + gwHashLen + 1
+
+	// Gateway connections send PINGs regardless of traffic. The interval is
+	// either Options.PingInterval or this value, whichever is the smallest.
+	gwMaxPingInterval = 15 * time.Second
 )
 
 var (
@@ -56,6 +60,7 @@ var (
 	gatewayReconnectDelay        = defaultGatewayReconnectDelay
 	gatewayMaxRUnsubBeforeSwitch = defaultGatewayMaxRUnsubBeforeSwitch
 	gatewaySolicitDelay          = int64(defaultSolicitGatewaysDelay)
+	gatewayMaxPingInterval       = gwMaxPingInterval
 )
 
 // Warning when user configures gateway TLS insecure
@@ -123,7 +128,7 @@ type srvGateway struct {
 	outo     []*client              // outbound gateways maintained in an order suitable for sending msgs (currently based on RTT)
 	in       map[uint64]*client     // inbound gateways
 	remotes  map[string]*gatewayCfg // Config of remote gateways
-	URLs     map[string]struct{}    // Set of all Gateway URLs in the cluster
+	URLs     refCountedUrlSet       // Set of all Gateway URLs in the cluster
 	URL      string                 // This server gateway URL (after possible random port is resolved)
 	info     *Info                  // Gateway Info protocol
 	infoJSON []byte                 // Marshal'ed Info protocol
@@ -298,7 +303,7 @@ func (s *Server) newGateway(opts *Options) error {
 		outo:     make([]*client, 0, 4),
 		in:       make(map[uint64]*client),
 		remotes:  make(map[string]*gatewayCfg),
-		URLs:     make(map[string]struct{}),
+		URLs:     make(refCountedUrlSet),
 		resolver: opts.Gateway.resolver,
 		runknown: opts.Gateway.RejectUnknown,
 		oldHash:  getOldHash(opts.Gateway.Name),
@@ -373,17 +378,6 @@ func (g *srvGateway) getName() string {
 	return n
 }
 
-// Returns the Gateway URLs of all servers in the local cluster.
-// This is used to send to other cluster this server connects to.
-// The gateway read-lock is held on entry
-func (g *srvGateway) getURLs() []string {
-	a := make([]string, 0, len(g.URLs))
-	for u := range g.URLs {
-		a = append(a, u)
-	}
-	return a
-}
-
 // Returns if this server rejects connections from gateways that are not
 // explicitly configured.
 func (g *srvGateway) rejectUnknown() bool {
@@ -398,10 +392,7 @@ func (g *srvGateway) rejectUnknown() bool {
 // the cluster to form and this server gathers gateway URLs for this
 // cluster in order to send that as part of the connect/info process.
 func (s *Server) startGateways() {
-	// Spin up the accept loop
-	ch := make(chan struct{})
-	go s.gatewayAcceptLoop(ch)
-	<-ch
+	s.startGatewayAcceptLoop()
 
 	// Delay start of creation of gateways to give a chance
 	// to the local cluster to form.
@@ -422,18 +413,9 @@ func (s *Server) startGateways() {
 	})
 }
 
-// This is the gateways accept loop. This runs as a go-routine.
-// The listen specification is resolved (if use of random port),
-// then a listener is started. After that, this routine enters
-// a loop (until the server is shutdown) accepting incoming
-// gateway connections.
-func (s *Server) gatewayAcceptLoop(ch chan struct{}) {
-	defer func() {
-		if ch != nil {
-			close(ch)
-		}
-	}()
-
+// This starts the gateway accept loop in a go routine, unless it
+// is detected that the server has already been shutdown.
+func (s *Server) startGatewayAcceptLoop() {
 	// Snapshot server options.
 	opts := s.getOpts()
 
@@ -442,9 +424,15 @@ func (s *Server) gatewayAcceptLoop(ch chan struct{}) {
 		port = 0
 	}
 
+	s.mu.Lock()
+	if s.shutdown {
+		s.mu.Unlock()
+		return
+	}
 	hp := net.JoinHostPort(opts.Gateway.Host, strconv.Itoa(port))
-	l, e := net.Listen("tcp", hp)
+	l, e := natsListen("tcp", hp)
 	if e != nil {
+		s.mu.Unlock()
 		s.Fatalf("Error listening on gateway port: %d - %v", opts.Gateway.Port, e)
 		return
 	}
@@ -452,7 +440,6 @@ func (s *Server) gatewayAcceptLoop(ch chan struct{}) {
 	s.Noticef("Listening for gateways connections on %s",
 		net.JoinHostPort(opts.Gateway.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
 
-	s.mu.Lock()
 	tlsReq := opts.Gateway.TLSConfig != nil
 	authRequired := opts.Gateway.Username != ""
 	info := &Info{
@@ -497,28 +484,8 @@ func (s *Server) gatewayAcceptLoop(ch chan struct{}) {
 	if warn {
 		s.Warnf(gatewayTLSInsecureWarning)
 	}
+	go s.acceptConnections(l, "Gateway", func(conn net.Conn) { s.createGateway(nil, nil, conn) }, nil)
 	s.mu.Unlock()
-
-	// Let them know we are up
-	close(ch)
-	ch = nil
-
-	tmpDelay := ACCEPT_MIN_SLEEP
-
-	for s.isRunning() {
-		conn, err := l.Accept()
-		if err != nil {
-			tmpDelay = s.acceptError("Gateway", err, tmpDelay)
-			continue
-		}
-		tmpDelay = ACCEPT_MIN_SLEEP
-		s.startGoRoutine(func() {
-			s.createGateway(nil, nil, conn)
-			s.grWG.Done()
-		})
-	}
-	s.Debugf("Gateway accept loop exiting..")
-	s.done <- true
 }
 
 // Similar to setInfoHostPortAndGenerateJSON, but for gatewayInfo.
@@ -526,7 +493,7 @@ func (s *Server) setGatewayInfoHostPort(info *Info, o *Options) error {
 	gw := s.gateway
 	gw.Lock()
 	defer gw.Unlock()
-	delete(gw.URLs, gw.URL)
+	gw.URLs.removeUrl(gw.URL)
 	if o.Gateway.Advertise != "" {
 		advHost, advPort, err := parseHostPort(o.Gateway.Advertise, o.Gateway.Port)
 		if err != nil {
@@ -566,7 +533,7 @@ func (s *Server) setGatewayInfoHostPort(info *Info, o *Options) error {
 	} else {
 		s.Noticef("Address for gateway %q is %s", gw.name, gw.URL)
 	}
-	gw.URLs[gw.URL] = struct{}{}
+	gw.URLs[gw.URL]++
 	gw.info = info
 	info.GatewayURL = gw.URL
 	// (re)generate the gatewayInfoJSON byte array
@@ -583,7 +550,7 @@ func (g *srvGateway) generateInfoJSON() {
 	if !g.enabled {
 		return
 	}
-	g.info.GatewayURLs = g.getURLs()
+	g.info.GatewayURLs = g.URLs.getAsStringSlice()
 	b, err := json.Marshal(g.info)
 	if err != nil {
 		panic(err)
@@ -658,7 +625,7 @@ func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
 		report := s.shouldReportConnectErr(firstConnect, attempts)
 		// Iteration is random
 		for _, u := range urls {
-			address, err := s.getRandomIP(s.gateway.resolver, u.Host)
+			address, err := s.getRandomIP(s.gateway.resolver, u.Host, nil)
 			if err != nil {
 				s.Errorf("Error getting IP for %s gateway %q (%s): %v", typeStr, cfg.Name, u.Host, err)
 				continue
@@ -668,7 +635,7 @@ func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
 			} else {
 				s.Debugf(connFmt, typeStr, cfg.Name, u.Host, address, attempts)
 			}
-			conn, err := net.DialTimeout("tcp", address, DEFAULT_ROUTE_DIAL)
+			conn, err := natsDialTimeout("tcp", address, DEFAULT_ROUTE_DIAL)
 			if err == nil {
 				// We could connect, create the gateway connection and return.
 				s.createGateway(cfg, u, conn)
@@ -846,7 +813,7 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	}
 
 	// Spin up the read loop.
-	s.startGoRoutine(func() { c.readLoop() })
+	s.startGoRoutine(func() { c.readLoop(nil) })
 
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })
@@ -1235,8 +1202,7 @@ func (s *Server) sendSubsToGateway(c *client, accountName []byte) {
 	}
 	// Send
 	c.mu.Lock()
-	c.queueOutbound(buf)
-	c.flushSignal()
+	c.enqueueProto(buf)
 	c.Debugf("Sent queue subscriptions to gateway")
 	c.mu.Unlock()
 }
@@ -1494,13 +1460,12 @@ func (g *gatewayCfg) addURLs(infoURLs []string) {
 // Server lock held on entry
 func (s *Server) addGatewayURL(urlStr string) bool {
 	s.gateway.Lock()
-	_, present := s.gateway.URLs[urlStr]
-	if !present {
-		s.gateway.URLs[urlStr] = struct{}{}
+	added := s.gateway.URLs.addUrl(urlStr)
+	if added {
 		s.gateway.generateInfoJSON()
 	}
 	s.gateway.Unlock()
-	return !present
+	return added
 }
 
 // Removes this URL from the set of gateway URLs.
@@ -1511,9 +1476,8 @@ func (s *Server) removeGatewayURL(urlStr string) bool {
 		return false
 	}
 	s.gateway.Lock()
-	_, removed := s.gateway.URLs[urlStr]
+	removed := s.gateway.URLs.removeUrl(urlStr)
 	if removed {
-		delete(s.gateway.URLs, urlStr)
 		s.gateway.generateInfoJSON()
 	}
 	s.gateway.Unlock()
@@ -2512,7 +2476,7 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		sub.nm, sub.max = 0, 0
 		sub.client = gwc
 		sub.subject = subject
-		didDeliver = c.deliverMsg(sub, subject, mh, msg, false) || didDeliver
+		didDeliver = c.deliverMsg(sub, subject, mreply, mh, msg, false) || didDeliver
 	}
 	// Done with subscription, put back to pool. We don't need
 	// to reset content since we explicitly set when using it.

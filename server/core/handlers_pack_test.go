@@ -29,7 +29,6 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
-	"github.com/nats-io/nats-account-server/server/store"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )
@@ -58,16 +57,10 @@ func acceptAndClose(t *testing.T, hostport string) net.Listener {
 	return l
 }
 
-func TestPackJWTs(t *testing.T) {
-	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
-	defer testEnv.Cleanup()
-	require.NoError(t, err)
-
+func initAndPostNAccounts(t *testing.T, testEnv *TestSetup, n int) map[string]string {
 	operatorKey := testEnv.OperatorKey
-
 	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
+	for i := 0; i < n; i++ {
 		accountKey, err := nkeys.CreateAccount()
 		require.NoError(t, err)
 
@@ -87,6 +80,15 @@ func TestPackJWTs(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, resp.StatusCode == http.StatusOK)
 	}
+
+	return pubKeys
+}
+
+func TestPackJWTs(t *testing.T) {
+	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
+	defer testEnv.Cleanup()
+	require.NoError(t, err)
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	resp, err := testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack?max=foo"))
 	require.NoError(t, err)
@@ -120,35 +122,10 @@ func TestPackJWTs(t *testing.T) {
 }
 
 func TestPackJWTsWithMax(t *testing.T) {
-
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, false)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
-
-	operatorKey := testEnv.OperatorKey
-
-	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
-		accountKey, err := nkeys.CreateAccount()
-		require.NoError(t, err)
-
-		pubKey, err := accountKey.PublicKey()
-		require.NoError(t, err)
-
-		account := jwt.NewAccountClaims(pubKey)
-		acctJWT, err := account.Encode(operatorKey)
-		require.NoError(t, err)
-
-		pubKeys[pubKey] = acctJWT
-
-		path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
-		url := testEnv.URLForPath(path)
-
-		resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
-		require.NoError(t, err)
-		require.True(t, resp.StatusCode == http.StatusOK)
-	}
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	resp, err := testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack?max=2"))
 	require.NoError(t, err)
@@ -179,31 +156,7 @@ func TestReplicatedInit(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
-
-	operatorKey := testEnv.OperatorKey
-
-	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
-		accountKey, err := nkeys.CreateAccount()
-		require.NoError(t, err)
-
-		pubKey, err := accountKey.PublicKey()
-		require.NoError(t, err)
-
-		account := jwt.NewAccountClaims(pubKey)
-		acctJWT, err := account.Encode(operatorKey)
-		require.NoError(t, err)
-
-		pubKeys[pubKey] = acctJWT
-
-		path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
-		url := testEnv.URLForPath(path)
-
-		resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
-		require.NoError(t, err)
-		require.True(t, resp.StatusCode == http.StatusOK)
-	}
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
 	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
@@ -237,31 +190,7 @@ func TestReplicatedInitWithMax(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
-
-	operatorKey := testEnv.OperatorKey
-
-	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
-		accountKey, err := nkeys.CreateAccount()
-		require.NoError(t, err)
-
-		pubKey, err := accountKey.PublicKey()
-		require.NoError(t, err)
-
-		account := jwt.NewAccountClaims(pubKey)
-		acctJWT, err := account.Encode(operatorKey)
-		require.NoError(t, err)
-
-		pubKeys[pubKey] = acctJWT
-
-		path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
-		url := testEnv.URLForPath(path)
-
-		resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
-		require.NoError(t, err)
-		require.True(t, resp.StatusCode == http.StatusOK)
-	}
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
 	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
@@ -302,31 +231,7 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
-
-	operatorKey := testEnv.OperatorKey
-
-	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
-		accountKey, err := nkeys.CreateAccount()
-		require.NoError(t, err)
-
-		pubKey, err := accountKey.PublicKey()
-		require.NoError(t, err)
-
-		account := jwt.NewAccountClaims(pubKey)
-		acctJWT, err := account.Encode(operatorKey)
-		require.NoError(t, err)
-
-		pubKeys[pubKey] = acctJWT
-
-		path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
-		url := testEnv.URLForPath(path)
-
-		resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
-		require.NoError(t, err)
-		require.True(t, resp.StatusCode == http.StatusOK)
-	}
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
 	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
@@ -363,59 +268,11 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 	require.Equal(t, 0, count)
 }
 
-func TestPackFailsWithWrongStore(t *testing.T) {
-	_, _, kp := store.CreateOperatorKey(t)
-	_, apub, _ := store.CreateAccountKey(t)
-	s := store.CreateTestStoreForOperator(t, "x", kp)
-
-	c := jwt.NewAccountClaims(apub)
-	c.Name = "foo"
-	cd, err := c.Encode(kp)
-	require.NoError(t, err)
-	_, err = s.StoreClaim([]byte(cd))
-	require.NoError(t, err)
-
-	config := conf.DefaultServerConfig()
-	config.Store.Dir = ""
-	config.Store.NSC = s.Dir
-	testEnv, err := SetupTestServer(config, false, false)
-	defer testEnv.Cleanup()
-	require.NoError(t, err)
-
-	resp, err := testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack"))
-	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusNotFound)
-}
-
 func TestReplicatedInitPrimaryDown(t *testing.T) {
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
 	defer testEnv.Cleanup()
 	require.NoError(t, err)
-
-	operatorKey := testEnv.OperatorKey
-
-	pubKeys := map[string]string{}
-
-	for i := 0; i < 100; i++ {
-		accountKey, err := nkeys.CreateAccount()
-		require.NoError(t, err)
-
-		pubKey, err := accountKey.PublicKey()
-		require.NoError(t, err)
-
-		account := jwt.NewAccountClaims(pubKey)
-		acctJWT, err := account.Encode(operatorKey)
-		require.NoError(t, err)
-
-		pubKeys[pubKey] = acctJWT
-
-		path := fmt.Sprintf("/jwt/v1/accounts/%s", pubKey)
-		url := testEnv.URLForPath(path)
-
-		resp, err := testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
-		require.NoError(t, err)
-		require.True(t, resp.StatusCode == http.StatusOK)
-	}
+	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
 	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")

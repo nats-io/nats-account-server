@@ -39,7 +39,10 @@ type AccountServerConfig struct {
 
 	OperatorJWTPath      string
 	SystemAccountJWTPath string
+	SignRequestSubject   string
+	SignRequestTimeout   int //milliseconds
 
+	// Below options are only to copy jwt from an old account server for initialization
 	Primary            string
 	ReplicationTimeout int //milliseconds
 	MaxReplicationPack int // maximum number of JWTS to grab on startup
@@ -79,10 +82,9 @@ type NATSConfig struct {
 // if Dir is set a folder store is used, mutability is based on ReadOnly
 // otherwise a memory store is used, mutability is based on ReadOnly (which means the r/o store will be stuck empty)
 type StoreConfig struct {
-	NSC      string // an nsc operator folder
-	Dir      string // the path to a folder for mutable storage
-	Shard    bool   // optional setting to shard the directory store, avoiding too many files in one folder
-	ReadOnly bool   // flag to indicate read-only status
+	Dir             string // the path to a folder for mutable storage
+	Shard           bool   // optional setting to shard the directory store, avoiding too many files in one folder
+	CleanupInterval int    // interval at which expiration is checked
 }
 
 // DefaultServerConfig generates a default configuration with
@@ -106,8 +108,12 @@ func DefaultServerConfig() *AccountServerConfig {
 			ReconnectWait:  1000,
 			MaxReconnects:  -1,
 		},
-		Store:              StoreConfig{}, // in memory store
+		Store: StoreConfig{
+			Dir:             ".",
+			CleanupInterval: 0,
+		}, // in memory store
 		ReplicationTimeout: 5000,
 		MaxReplicationPack: 10000,
+		SignRequestTimeout: 1000,
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server/pse"
 )
 
@@ -139,7 +140,7 @@ const defaultStackBufSize = 10000
 func newSubsDetailList(client *client) []SubDetail {
 	subsDetail := make([]SubDetail, 0, len(client.subs))
 	for _, sub := range client.subs {
-		subsDetail = append(subsDetail, newSubDetail(sub))
+		subsDetail = append(subsDetail, newClientSubDetail(sub))
 	}
 	return subsDetail
 }
@@ -771,8 +772,11 @@ type SubszOptions struct {
 	// Limit is the maximum number of subscriptions that should be returned by Subsz().
 	Limit int `json:"limit"`
 
-	// Subscriptions indicates if subscriptions should be included in the results.
+	// Subscriptions indicates if subscription details should be included in the results.
 	Subscriptions bool `json:"subscriptions"`
+
+	// Filter based on this account name.
+	Account string `json:"account,omitempty"`
 
 	// Test the list against this subject. Needs to be literal since it signifies a publish subject.
 	// We will only return subscriptions that would match if a message was sent to this subject.
@@ -781,6 +785,7 @@ type SubszOptions struct {
 
 // SubDetail is for verbose information for subscriptions.
 type SubDetail struct {
+	Account string `json:"account,omitempty"`
 	Subject string `json:"subject"`
 	Queue   string `json:"qgroup,omitempty"`
 	Sid     string `json:"sid"`
@@ -789,7 +794,17 @@ type SubDetail struct {
 	Cid     uint64 `json:"cid"`
 }
 
+// Subscription client should be locked and guaranteed to be present.
 func newSubDetail(sub *subscription) SubDetail {
+	sd := newClientSubDetail(sub)
+	if sub.client.acc != nil {
+		sd.Account = sub.client.acc.GetName()
+	}
+	return sd
+}
+
+// For subs details under clients.
+func newClientSubDetail(sub *subscription) SubDetail {
 	return SubDetail{
 		Subject: string(sub.subject),
 		Queue:   string(sub.queue),
@@ -808,6 +823,7 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 		offset    int
 		limit     = DefaultSubListSize
 		testSub   = ""
+		filterAcc = ""
 	)
 
 	if opts != nil {
@@ -827,6 +843,9 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 				return nil, fmt.Errorf("invalid test subject, must be valid publish subject: %s", testSub)
 			}
 		}
+		if opts.Account != "" {
+			filterAcc = opts.Account
+		}
 	}
 
 	slStats := &SublistStats{}
@@ -839,6 +858,9 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 		subs := raw[:0]
 		s.accounts.Range(func(k, v interface{}) bool {
 			acc := v.(*Account)
+			if filterAcc != "" && acc.GetName() != filterAcc {
+				return true
+			}
 			slStats.add(acc.sl.Stats())
 			acc.sl.localSubs(&subs)
 			return true
@@ -877,6 +899,9 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 	} else {
 		s.accounts.Range(func(k, v interface{}) bool {
 			acc := v.(*Account)
+			if filterAcc != "" && acc.GetName() != filterAcc {
+				return true
+			}
 			slStats.add(acc.sl.Stats())
 			return true
 		})
@@ -904,11 +929,14 @@ func (s *Server) HandleSubsz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	testSub := r.URL.Query().Get("test")
+	// Filtered account.
+	filterAcc := r.URL.Query().Get("acc")
 
 	subszOpts := &SubszOptions{
 		Subscriptions: subs,
 		Offset:        offset,
 		Limit:         limit,
+		Account:       filterAcc,
 		Test:          testSub,
 	}
 
@@ -1020,6 +1048,7 @@ type JetStreamVarz struct {
 
 // ClusterOptsVarz contains monitoring cluster information
 type ClusterOptsVarz struct {
+	Name        string   `json:"name,omitempty"`
 	Host        string   `json:"addr,omitempty"`
 	Port        int      `json:"cluster_port,omitempty"`
 	AuthTimeout float64  `json:"auth_timeout,omitempty"`
@@ -1036,7 +1065,7 @@ type GatewayOptsVarz struct {
 	Advertise      string                  `json:"advertise,omitempty"`
 	ConnectRetries int                     `json:"connect_retries,omitempty"`
 	Gateways       []RemoteGatewayOptsVarz `json:"gateways,omitempty"`
-	RejectUnknown  bool                    `json:"reject_unknown,omitempty"`
+	RejectUnknown  bool                    `json:"reject_unknown,omitempty"` // config got renamed to reject_unknown_cluster
 }
 
 // RemoteGatewayOptsVarz contains monitoring remote gateway information
@@ -1101,21 +1130,22 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	fmt.Fprintf(w, `<html lang="en">
    <head>
-    <link rel="shortcut icon" href="http://nats.io/img/favicon.ico">
+    <link rel="shortcut icon" href="https://nats.io/img/favicon.ico">
     <style type="text/css">
       body { font-family: "Century Gothic", CenturyGothic, AppleGothic, sans-serif; font-size: 22; }
       a { margin-left: 32px; }
     </style>
   </head>
   <body>
-    <img src="http://nats.io/img/logo.png" alt="NATS">
+    <img src="https://nats.io/img/logo.png" alt="NATS">
     <br/>
-	<a href=%s>varz</a><br/>
-	<a href=%s>connz</a><br/>
-	<a href=%s>routez</a><br/>
-	<a href=%s>gatewayz</a><br/>
-	<a href=%s>leafz</a><br/>
-	<a href=%s>subsz</a><br/>
+	<a href=.%s>varz</a><br/>
+	<a href=.%s>connz</a><br/>
+	<a href=.%s>routez</a><br/>
+	<a href=.%s>gatewayz</a><br/>
+	<a href=.%s>leafz</a><br/>
+	<a href=.%s>subsz</a><br/>
+	<a href=.%s>accountz</a><br/>
     <br/>
     <a href=https://docs.nats.io/nats-server/configuration/monitoring.html>help</a>
   </body>
@@ -1126,6 +1156,7 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 		s.basePath(GatewayzPath),
 		s.basePath(LeafzPath),
 		s.basePath(SubszPath),
+		s.basePath(AccountzPath),
 	)
 }
 
@@ -1170,6 +1201,7 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 		HTTPBasePath: opts.HTTPBasePath,
 		HTTPSPort:    opts.HTTPSPort,
 		Cluster: ClusterOptsVarz{
+			Name:        info.Cluster,
 			Host:        c.Host,
 			Port:        c.Port,
 			AuthTimeout: c.AuthTimeout,
@@ -1707,7 +1739,8 @@ type Leafz struct {
 // LeafzOptions are options passed to Leafz
 type LeafzOptions struct {
 	// Subscriptions indicates that Leafz will return a leafnode's subscriptions
-	Subscriptions bool `json:"subscriptions"`
+	Subscriptions bool   `json:"subscriptions"`
+	Account       string `json:"account"`
 }
 
 // LeafInfo has detailed information on each remote leafnode connection.
@@ -1732,6 +1765,14 @@ func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
 	if len(s.leafs) > 0 {
 		lconns = make([]*client, 0, len(s.leafs))
 		for _, ln := range s.leafs {
+			if opts != nil && opts.Account != "" {
+				ln.mu.Lock()
+				ok := ln.acc.Name == opts.Account
+				ln.mu.Unlock()
+				if !ok {
+					continue
+				}
+			}
 			lconns = append(lconns, ln)
 		}
 	}
@@ -1781,12 +1822,7 @@ func (s *Server) HandleLeafz(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	var opts *LeafzOptions
-	if subs {
-		opts = &LeafzOptions{Subscriptions: true}
-	}
-
-	l, err := s.Leafz(opts)
+	l, err := s.Leafz(&LeafzOptions{subs, r.URL.Query().Get("acc")})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
@@ -1873,6 +1909,274 @@ func (reason ClosedState) String() string {
 		return "Internal Client"
 	case MsgHeaderViolation:
 		return "Message Header Violation"
+	case NoRespondersRequiresHeaders:
+		return "No Responders Requires Headers"
+	case ClusterNameConflict:
+		return "Cluster Name Conflict"
+	case DuplicateRemoteLeafnodeConnection:
+		return "Duplicate Remote LeafNode Connection"
+	case DuplicateClientID:
+		return "Duplicate Client ID"
 	}
+
 	return "Unknown State"
+}
+
+// AccountzOptions are options passed to Accountz
+type AccountzOptions struct {
+	// Account indicates that Accountz will return details for the account
+	Account string `json:"account"`
+}
+
+func newExtServiceLatency(l *serviceLatency) *jwt.ServiceLatency {
+	if l == nil {
+		return nil
+	}
+	return &jwt.ServiceLatency{
+		Sampling: int(l.sampling),
+		Results:  jwt.Subject(l.subject),
+	}
+}
+
+type ExtImport struct {
+	jwt.Import
+	Invalid     bool                `json:"invalid"`
+	Share       bool                `json:"share"`
+	Tracking    bool                `json:"tracking"`
+	TrackingHdr http.Header         `json:"tracking_header,omitempty"`
+	Latency     *jwt.ServiceLatency `json:"latency,omitempty"`
+	M1          *ServiceLatency     `json:"m1,omitempty"`
+}
+
+type ExtExport struct {
+	jwt.Export
+	ApprovedAccounts []string `json:"approved_accounts,omitempty"`
+}
+
+type ExtVrIssues struct {
+	Description string `json:"description"`
+	Blocking    bool   `json:"blocking"`
+	Time        bool   `json:"time_check"`
+}
+
+type ExtMap map[string][]*MapDest
+
+type AccountInfo struct {
+	AccountName string               `json:"account_name"`
+	LastUpdate  time.Time            `json:"update_time,omitempty"`
+	Expired     bool                 `json:"expired"`
+	Complete    bool                 `json:"complete"`
+	JetStream   bool                 `json:"jetstream_enabled"`
+	LeafCnt     int                  `json:"leafnode_connections"`
+	ClientCnt   int                  `json:"client_connections"`
+	SubCnt      uint32               `json:"subscriptions"`
+	Mappings    ExtMap               `json:"mappings,omitempty"`
+	Exports     []ExtExport          `json:"exports,omitempty"`
+	Imports     []ExtImport          `json:"imports,omitempty"`
+	Jwt         string               `json:"jwt,omitempty"`
+	Claim       *jwt.AccountClaims   `json:"decoded_jwt,omitempty"`
+	Vr          []ExtVrIssues        `json:"validation_result_jwt,omitempty"`
+	RevokedUser map[string]time.Time `json:"revoked_user,omitempty"`
+	RevokedAct  map[string]time.Time `json:"revoked_activations,omitempty"`
+	Sublist     *SublistStats        `json:"sublist_stats,omitempty"`
+	Responses   map[string]ExtImport `json:"responses,omitempty"`
+}
+
+type Accountz struct {
+	ID       string       `json:"server_id"`
+	Now      time.Time    `json:"now"`
+	Accounts []string     `json:"accounts,omitempty"`
+	Account  *AccountInfo `json:"account_detail,omitempty"`
+}
+
+// HandleAccountz process HTTP requests for account information.
+func (s *Server) HandleAccountz(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.httpReqStats[AccountzPath]++
+	s.mu.Unlock()
+	if l, err := s.Accountz(&AccountzOptions{r.URL.Query().Get("acc")}); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+	} else if b, err := json.MarshalIndent(l, "", "  "); err != nil {
+		s.Errorf("Error marshaling response to %s request: %v", AccountzPath, err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+	} else {
+		ResponseHandler(w, r, b) // Handle response
+	}
+}
+
+func (s *Server) Accountz(optz *AccountzOptions) (*Accountz, error) {
+	a := &Accountz{
+		ID:  s.ID(),
+		Now: time.Now(),
+	}
+	if optz.Account == "" {
+		a.Accounts = []string{}
+		s.accounts.Range(func(key, value interface{}) bool {
+			a.Accounts = append(a.Accounts, key.(string))
+			return true
+		})
+		return a, nil
+	} else if aInfo, err := s.accountInfo(optz.Account); err != nil {
+		return nil, err
+	} else {
+		a.Account = aInfo
+		return a, nil
+	}
+}
+
+func newExtImport(v *serviceImport) ExtImport {
+	imp := ExtImport{
+		Invalid: true,
+		Import:  jwt.Import{Type: jwt.Service},
+	}
+	if v != nil {
+		imp.Share = v.share
+		imp.Tracking = v.tracking
+		imp.Invalid = v.invalid
+		imp.Import = jwt.Import{
+			Subject: jwt.Subject(v.from),
+			Account: v.acc.Name,
+			Type:    jwt.Service,
+			To:      jwt.Subject(v.to),
+		}
+		imp.TrackingHdr = v.trackingHdr
+		imp.Latency = newExtServiceLatency(v.latency)
+		if v.m1 != nil {
+			m1 := *v.m1
+			imp.M1 = &m1
+		}
+	}
+	return imp
+}
+
+func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
+	var a *Account
+	if v, ok := s.accounts.Load(accName); !ok {
+		return nil, fmt.Errorf("Account %s does not exist", accName)
+	} else {
+		a = v.(*Account)
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	var vrIssues []ExtVrIssues
+	claim, _ := jwt.DecodeAccountClaims(a.claimJWT) //ignore error
+	if claim != nil {
+		vr := jwt.ValidationResults{}
+		claim.Validate(&vr)
+		vrIssues = make([]ExtVrIssues, len(vr.Issues))
+		for i, v := range vr.Issues {
+			vrIssues[i] = ExtVrIssues{v.Description, v.Blocking, v.TimeCheck}
+		}
+	}
+	exports := []ExtExport{}
+	for k, v := range a.exports.services {
+		e := ExtExport{
+			Export: jwt.Export{
+				Subject: jwt.Subject(k),
+				Type:    jwt.Service,
+			},
+			ApprovedAccounts: []string{},
+		}
+		if v != nil {
+			e.Latency = newExtServiceLatency(v.latency)
+			e.TokenReq = v.tokenReq
+			e.ResponseType = jwt.ResponseType(v.respType.String())
+			for name := range v.approved {
+				e.ApprovedAccounts = append(e.ApprovedAccounts, name)
+			}
+		}
+		exports = append(exports, e)
+	}
+	for k, v := range a.exports.streams {
+		e := ExtExport{
+			Export: jwt.Export{
+				Subject: jwt.Subject(k),
+				Type:    jwt.Stream,
+			},
+			ApprovedAccounts: []string{},
+		}
+		if v != nil {
+			e.TokenReq = v.tokenReq
+			for name := range v.approved {
+				e.ApprovedAccounts = append(e.ApprovedAccounts, name)
+			}
+		}
+		exports = append(exports, e)
+	}
+	imports := []ExtImport{}
+	for _, v := range a.imports.streams {
+		imp := ExtImport{
+			Invalid: true,
+			Import:  jwt.Import{Type: jwt.Stream},
+		}
+		if v != nil {
+			imp.Invalid = v.invalid
+			imp.Import = jwt.Import{
+				Subject: jwt.Subject(v.from),
+				Account: v.acc.Name,
+				Type:    jwt.Stream,
+				To:      jwt.Subject(v.to),
+			}
+		}
+		imports = append(imports, imp)
+	}
+	for _, v := range a.imports.services {
+		imports = append(imports, newExtImport(v))
+	}
+	responses := map[string]ExtImport{}
+	for k, v := range a.exports.responses {
+		responses[k] = newExtImport(v)
+	}
+	mappings := ExtMap{}
+	for _, m := range a.mappings {
+		var dests []*MapDest
+		src := ""
+		if m == nil {
+			src = "nil"
+			if _, ok := mappings[src]; ok { // only set if not present (keep orig in case nil is used)
+				continue
+			}
+			dests = append(dests, &MapDest{})
+		} else {
+			src = m.src
+			for _, d := range m.dests {
+				dests = append(dests, &MapDest{d.tr.dest, d.weight, ""})
+			}
+			for c, cd := range m.cdests {
+				for _, d := range cd {
+					dests = append(dests, &MapDest{d.tr.dest, d.weight, c})
+				}
+			}
+		}
+		mappings[src] = dests
+	}
+	collectRevocations := func(revocations map[string]int64) map[string]time.Time {
+		rev := map[string]time.Time{}
+		for k, v := range a.usersRevoked {
+			rev[k] = time.Unix(v, 0)
+		}
+		return rev
+	}
+	return &AccountInfo{
+		accName,
+		a.updated,
+		a.expired,
+		!a.incomplete,
+		a.js != nil,
+		a.numLocalLeafNodes(),
+		a.numLocalConnections(),
+		a.sl.Count(),
+		mappings,
+		exports,
+		imports,
+		a.claimJWT,
+		claim,
+		vrIssues,
+		collectRevocations(a.usersRevoked),
+		collectRevocations(a.actsRevoked),
+		a.sl.Stats(),
+		responses,
+	}, nil
 }
