@@ -199,6 +199,8 @@ func (server *AccountServer) Start() error {
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
 
+	server.jwt = NewJwtHandler(server.logger)
+
 	store, err := server.createStore()
 	if err != nil {
 		return err
@@ -227,8 +229,7 @@ func (server *AccountServer) Start() error {
 		return err
 	} else if sysJWT, err := server.readJWT(server.config.SystemAccountJWTPath, "system account"); err != nil {
 		return err
-	} else if err := server.jwt.Initialize(server.logger, opJWT, sysJWT, store, server.config.MaxReplicationPack,
-		server.sendAccountNotification, server.sendActivationNotification, sign); err != nil {
+	} else if err := server.jwt.Initialize(opJWT, sysJWT, store, server.config.MaxReplicationPack, server.sendAccountNotification, server.sendActivationNotification, sign); err != nil {
 		return err
 	}
 
@@ -326,7 +327,7 @@ func (server *AccountServer) Stop() {
 		server.Close()
 		server.logger.Noticef("closed JWT store")
 	}
-	server.jwt = JwtHandler{}
+	server.jwt = NewJwtHandler(server.logger)
 }
 
 // this functionality is only used to initialize the server from an old server

@@ -44,17 +44,16 @@ type JwtHandler struct {
 	sendActivationNotification activationNotification
 }
 
+func NewJwtHandler(logger natsserver.Logger) JwtHandler {
+	if logger == nil {
+		logger = &NilLogger{}
+	}
+	return JwtHandler{logger: logger}
+}
+
 // Initialize JwtHandler which exposes http handler on top of a jwtStore
 // To Close, stop using the jwthandler and close the passed in store.
-func (h *JwtHandler) Initialize(
-	logger natsserver.Logger,
-	opJWT []byte,
-	sysAccJWT []byte,
-	jwtStore store.JWTStore,
-	packLimit int,
-	accNotification accountNotification,
-	actNotification activationNotification,
-	sign accountSignup) error {
+func (h *JwtHandler) Initialize(opJWT []byte, sysAccJWT []byte, jwtStore store.JWTStore, packLimit int, accNotification accountNotification, actNotification activationNotification, sign accountSignup) error {
 
 	if h == nil {
 		return fmt.Errorf("JwtHandler is nil")
@@ -65,11 +64,6 @@ func (h *JwtHandler) Initialize(
 	if _, ok := jwtStore.(store.PackableJWTStore); !ok && packLimit > 0 {
 		return fmt.Errorf("JwtStore does not implement PackableJWTStore but packLimit is specified")
 	}
-	if logger == nil {
-		logger = &NilLogger{}
-	}
-
-	h.logger = logger
 	h.jwtStore = jwtStore
 	h.sendAccountNotification = accNotification
 	h.sendActivationNotification = actNotification
