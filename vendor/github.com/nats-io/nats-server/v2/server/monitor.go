@@ -127,6 +127,10 @@ type ConnInfo struct {
 	Account        string      `json:"account,omitempty"`
 	Subs           []string    `json:"subscriptions_list,omitempty"`
 	SubsDetail     []SubDetail `json:"subscriptions_list_detail,omitempty"`
+	JWT            string      `json:"jwt,omitempty"`
+	IssuerKey      string      `json:"issuer_key,omitempty"`
+	NameTag        string      `json:"name_tag,omitempty"`
+	Tags           jwt.TagList `json:"tags,omitempty"`
 }
 
 // DefaultConnListSize is the default size of the connection list.
@@ -329,11 +333,15 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		}
 		// Fill in user if auth requested.
 		if auth {
-			ci.AuthorizedUser = client.opts.Username
+			ci.AuthorizedUser = client.getRawAuthUser()
 			// Add in account iff not the global account.
 			if client.acc != nil && (client.acc.Name != globalAccountName) {
 				ci.Account = client.acc.Name
 			}
+			ci.JWT = client.opts.JWT
+			ci.IssuerKey = issuerForClient(client)
+			ci.Tags = client.tags
+			ci.NameTag = client.nameTag
 		}
 		client.mu.Unlock()
 		pconns[i] = ci
@@ -447,7 +455,7 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 	ci.LastActivity = client.last
 	ci.Uptime = myUptime(now.Sub(client.start))
 	ci.Idle = myUptime(now.Sub(client.last))
-	ci.RTT = client.getRTT()
+	ci.RTT = client.getRTT().String()
 	ci.OutMsgs = client.outMsgs
 	ci.OutBytes = client.outBytes
 	ci.NumSubs = uint32(len(client.subs))
@@ -477,14 +485,14 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 }
 
 // Assume lock is held
-func (c *client) getRTT() string {
+func (c *client) getRTT() time.Duration {
 	if c.rtt == 0 {
 		// If a real client, go ahead and send ping now to get a value
 		// for RTT. For tests and telnet, or if client is closing, etc skip.
 		if c.opts.Lang != "" {
 			c.sendRTTPingLocked()
 		}
-		return ""
+		return 0
 	}
 	var rtt time.Duration
 	if c.rtt > time.Microsecond && c.rtt < time.Millisecond {
@@ -492,7 +500,7 @@ func (c *client) getRTT() string {
 	} else {
 		rtt = c.rtt.Truncate(time.Nanosecond)
 	}
-	return rtt.String()
+	return rtt
 }
 
 func decodeBool(w http.ResponseWriter, r *http.Request, param string) (bool, error) {
@@ -703,7 +711,7 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 			NumSubs:      uint32(len(r.subs)),
 			Import:       r.opts.Import,
 			Export:       r.opts.Export,
-			RTT:          r.getRTT(),
+			RTT:          r.getRTT().String(),
 		}
 
 		if len(r.subs) > 0 {
@@ -984,58 +992,61 @@ func (s *Server) HandleStacksz(w http.ResponseWriter, r *http.Request) {
 
 // Varz will output server information on the monitoring port at /varz.
 type Varz struct {
-	ID                string            `json:"server_id"`
-	Name              string            `json:"server_name"`
-	Version           string            `json:"version"`
-	Proto             int               `json:"proto"`
-	GitCommit         string            `json:"git_commit,omitempty"`
-	GoVersion         string            `json:"go"`
-	Host              string            `json:"host"`
-	Port              int               `json:"port"`
-	AuthRequired      bool              `json:"auth_required,omitempty"`
-	TLSRequired       bool              `json:"tls_required,omitempty"`
-	TLSVerify         bool              `json:"tls_verify,omitempty"`
-	IP                string            `json:"ip,omitempty"`
-	ClientConnectURLs []string          `json:"connect_urls,omitempty"`
-	WSConnectURLs     []string          `json:"ws_connect_urls,omitempty"`
-	MaxConn           int               `json:"max_connections"`
-	MaxSubs           int               `json:"max_subscriptions,omitempty"`
-	PingInterval      time.Duration     `json:"ping_interval"`
-	MaxPingsOut       int               `json:"ping_max"`
-	HTTPHost          string            `json:"http_host"`
-	HTTPPort          int               `json:"http_port"`
-	HTTPBasePath      string            `json:"http_base_path"`
-	HTTPSPort         int               `json:"https_port"`
-	AuthTimeout       float64           `json:"auth_timeout"`
-	MaxControlLine    int32             `json:"max_control_line"`
-	MaxPayload        int               `json:"max_payload"`
-	MaxPending        int64             `json:"max_pending"`
-	Cluster           ClusterOptsVarz   `json:"cluster,omitempty"`
-	Gateway           GatewayOptsVarz   `json:"gateway,omitempty"`
-	LeafNode          LeafNodeOptsVarz  `json:"leaf,omitempty"`
-	JetStream         JetStreamVarz     `json:"jetstream,omitempty"`
-	TLSTimeout        float64           `json:"tls_timeout"`
-	WriteDeadline     time.Duration     `json:"write_deadline"`
-	Start             time.Time         `json:"start"`
-	Now               time.Time         `json:"now"`
-	Uptime            string            `json:"uptime"`
-	Mem               int64             `json:"mem"`
-	Cores             int               `json:"cores"`
-	MaxProcs          int               `json:"gomaxprocs"`
-	CPU               float64           `json:"cpu"`
-	Connections       int               `json:"connections"`
-	TotalConnections  uint64            `json:"total_connections"`
-	Routes            int               `json:"routes"`
-	Remotes           int               `json:"remotes"`
-	Leafs             int               `json:"leafnodes"`
-	InMsgs            int64             `json:"in_msgs"`
-	OutMsgs           int64             `json:"out_msgs"`
-	InBytes           int64             `json:"in_bytes"`
-	OutBytes          int64             `json:"out_bytes"`
-	SlowConsumers     int64             `json:"slow_consumers"`
-	Subscriptions     uint32            `json:"subscriptions"`
-	HTTPReqStats      map[string]uint64 `json:"http_req_stats"`
-	ConfigLoadTime    time.Time         `json:"config_load_time"`
+	ID                    string                `json:"server_id"`
+	Name                  string                `json:"server_name"`
+	Version               string                `json:"version"`
+	Proto                 int                   `json:"proto"`
+	GitCommit             string                `json:"git_commit,omitempty"`
+	GoVersion             string                `json:"go"`
+	Host                  string                `json:"host"`
+	Port                  int                   `json:"port"`
+	AuthRequired          bool                  `json:"auth_required,omitempty"`
+	TLSRequired           bool                  `json:"tls_required,omitempty"`
+	TLSVerify             bool                  `json:"tls_verify,omitempty"`
+	IP                    string                `json:"ip,omitempty"`
+	ClientConnectURLs     []string              `json:"connect_urls,omitempty"`
+	WSConnectURLs         []string              `json:"ws_connect_urls,omitempty"`
+	MaxConn               int                   `json:"max_connections"`
+	MaxSubs               int                   `json:"max_subscriptions,omitempty"`
+	PingInterval          time.Duration         `json:"ping_interval"`
+	MaxPingsOut           int                   `json:"ping_max"`
+	HTTPHost              string                `json:"http_host"`
+	HTTPPort              int                   `json:"http_port"`
+	HTTPBasePath          string                `json:"http_base_path"`
+	HTTPSPort             int                   `json:"https_port"`
+	AuthTimeout           float64               `json:"auth_timeout"`
+	MaxControlLine        int32                 `json:"max_control_line"`
+	MaxPayload            int                   `json:"max_payload"`
+	MaxPending            int64                 `json:"max_pending"`
+	Cluster               ClusterOptsVarz       `json:"cluster,omitempty"`
+	Gateway               GatewayOptsVarz       `json:"gateway,omitempty"`
+	LeafNode              LeafNodeOptsVarz      `json:"leaf,omitempty"`
+	JetStream             JetStreamVarz         `json:"jetstream,omitempty"`
+	TLSTimeout            float64               `json:"tls_timeout"`
+	WriteDeadline         time.Duration         `json:"write_deadline"`
+	Start                 time.Time             `json:"start"`
+	Now                   time.Time             `json:"now"`
+	Uptime                string                `json:"uptime"`
+	Mem                   int64                 `json:"mem"`
+	Cores                 int                   `json:"cores"`
+	MaxProcs              int                   `json:"gomaxprocs"`
+	CPU                   float64               `json:"cpu"`
+	Connections           int                   `json:"connections"`
+	TotalConnections      uint64                `json:"total_connections"`
+	Routes                int                   `json:"routes"`
+	Remotes               int                   `json:"remotes"`
+	Leafs                 int                   `json:"leafnodes"`
+	InMsgs                int64                 `json:"in_msgs"`
+	OutMsgs               int64                 `json:"out_msgs"`
+	InBytes               int64                 `json:"in_bytes"`
+	OutBytes              int64                 `json:"out_bytes"`
+	SlowConsumers         int64                 `json:"slow_consumers"`
+	Subscriptions         uint32                `json:"subscriptions"`
+	HTTPReqStats          map[string]uint64     `json:"http_req_stats"`
+	ConfigLoadTime        time.Time             `json:"config_load_time"`
+	Tags                  jwt.TagList           `json:"tags,omitempty"`
+	TrustedOperatorsJwt   []string              `json:"trusted_operators_jwt,omitempty"`
+	TrustedOperatorsClaim []*jwt.OperatorClaims `json:"trusted_operators_claim,omitempty"`
 }
 
 // JetStreamVarz contains basic runtime information about jetstream
@@ -1053,6 +1064,9 @@ type ClusterOptsVarz struct {
 	Port        int      `json:"cluster_port,omitempty"`
 	AuthTimeout float64  `json:"auth_timeout,omitempty"`
 	URLs        []string `json:"urls,omitempty"`
+	TLSTimeout  float64  `json:"tls_timeout,omitempty"`
+	TLSRequired bool     `json:"tls_required,omitempty"`
+	TLSVerify   bool     `json:"tls_verify,omitempty"`
 }
 
 // GatewayOptsVarz contains monitoring gateway information
@@ -1062,6 +1076,8 @@ type GatewayOptsVarz struct {
 	Port           int                     `json:"port,omitempty"`
 	AuthTimeout    float64                 `json:"auth_timeout,omitempty"`
 	TLSTimeout     float64                 `json:"tls_timeout,omitempty"`
+	TLSRequired    bool                    `json:"tls_required,omitempty"`
+	TLSVerify      bool                    `json:"tls_verify,omitempty"`
 	Advertise      string                  `json:"advertise,omitempty"`
 	ConnectRetries int                     `json:"connect_retries,omitempty"`
 	Gateways       []RemoteGatewayOptsVarz `json:"gateways,omitempty"`
@@ -1081,6 +1097,8 @@ type LeafNodeOptsVarz struct {
 	Port        int                  `json:"port,omitempty"`
 	AuthTimeout float64              `json:"auth_timeout,omitempty"`
 	TLSTimeout  float64              `json:"tls_timeout,omitempty"`
+	TLSRequired bool                 `json:"tls_required,omitempty"`
+	TLSVerify   bool                 `json:"tls_verify,omitempty"`
 	Remotes     []RemoteLeafOptsVarz `json:"remotes,omitempty"`
 }
 
@@ -1186,6 +1204,10 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	c := &opts.Cluster
 	gw := &opts.Gateway
 	ln := &opts.LeafNode
+	clustTlsReq := c.TLSConfig != nil
+	gatewayTlsReq := gw.TLSConfig != nil
+	leafTlsReq := ln.TLSConfig != nil
+	leafTlsVerify := leafTlsReq && ln.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
 	varz := &Varz{
 		ID:           info.ID,
 		Version:      info.Version,
@@ -1205,6 +1227,9 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			Host:        c.Host,
 			Port:        c.Port,
 			AuthTimeout: c.AuthTimeout,
+			TLSTimeout:  c.TLSTimeout,
+			TLSRequired: clustTlsReq,
+			TLSVerify:   clustTlsReq,
 		},
 		Gateway: GatewayOptsVarz{
 			Name:           gw.Name,
@@ -1212,6 +1237,8 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			Port:           gw.Port,
 			AuthTimeout:    gw.AuthTimeout,
 			TLSTimeout:     gw.TLSTimeout,
+			TLSRequired:    gatewayTlsReq,
+			TLSVerify:      gatewayTlsReq,
 			Advertise:      gw.Advertise,
 			ConnectRetries: gw.ConnectRetries,
 			Gateways:       []RemoteGatewayOptsVarz{},
@@ -1222,12 +1249,17 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			Port:        ln.Port,
 			AuthTimeout: ln.AuthTimeout,
 			TLSTimeout:  ln.TLSTimeout,
+			TLSRequired: leafTlsReq,
+			TLSVerify:   leafTlsVerify,
 			Remotes:     []RemoteLeafOptsVarz{},
 		},
-		Start:    s.start,
-		MaxSubs:  opts.MaxSubs,
-		Cores:    numCores,
-		MaxProcs: maxProcs,
+		Start:                 s.start,
+		MaxSubs:               opts.MaxSubs,
+		Cores:                 numCores,
+		MaxProcs:              maxProcs,
+		Tags:                  opts.Tags,
+		TrustedOperatorsJwt:   opts.operatorJWT,
+		TrustedOperatorsClaim: opts.TrustedOperators,
 	}
 	if len(opts.Routes) > 0 {
 		varz.Cluster.URLs = urlsToStrings(opts.Routes)
@@ -1253,7 +1285,6 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 		}
 		varz.LeafNode.Remotes = rlna
 	}
-
 	if s.js != nil {
 		s.js.mu.RLock()
 		varz.JetStream = JetStreamVarz{
@@ -1787,7 +1818,7 @@ func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
 				Account:  ln.acc.Name,
 				IP:       ln.host,
 				Port:     int(ln.port),
-				RTT:      ln.getRTT(),
+				RTT:      ln.getRTT().String(),
 				InMsgs:   atomic.LoadInt64(&ln.inMsgs),
 				OutMsgs:  ln.outMsgs,
 				InBytes:  atomic.LoadInt64(&ln.inBytes),
@@ -1933,7 +1964,7 @@ func newExtServiceLatency(l *serviceLatency) *jwt.ServiceLatency {
 		return nil
 	}
 	return &jwt.ServiceLatency{
-		Sampling: int(l.sampling),
+		Sampling: jwt.SamplingRate(l.sampling),
 		Results:  jwt.Subject(l.subject),
 	}
 }
@@ -1974,6 +2005,9 @@ type AccountInfo struct {
 	Exports     []ExtExport          `json:"exports,omitempty"`
 	Imports     []ExtImport          `json:"imports,omitempty"`
 	Jwt         string               `json:"jwt,omitempty"`
+	IssuerKey   string               `json:"issuer_key,omitempty"`
+	NameTag     string               `json:"name_tag,omitempty"`
+	Tags        jwt.TagList          `json:"tags,omitempty"`
 	Claim       *jwt.AccountClaims   `json:"decoded_jwt,omitempty"`
 	Vr          []ExtVrIssues        `json:"validation_result_jwt,omitempty"`
 	RevokedUser map[string]time.Time `json:"revoked_user,omitempty"`
@@ -2172,6 +2206,9 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 		exports,
 		imports,
 		a.claimJWT,
+		a.Issuer,
+		a.nameTag,
+		a.tags,
 		claim,
 		vrIssues,
 		collectRevocations(a.usersRevoked),

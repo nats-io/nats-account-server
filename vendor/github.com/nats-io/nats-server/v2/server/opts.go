@@ -67,7 +67,7 @@ type ClusterOpts struct {
 	TLSTimeout        float64           `json:"-"`
 	TLSConfig         *tls.Config       `json:"-"`
 	TLSMap            bool              `json:"-"`
-	TLSCheckKnwonURLs bool              `json:"-"`
+	TLSCheckKnownURLs bool              `json:"-"`
 	ListenStr         string            `json:"-"`
 	Advertise         string            `json:"-"`
 	NoAdvertise       bool              `json:"-"`
@@ -147,6 +147,15 @@ type RemoteLeafOpts struct {
 	Hub          bool        `json:"hub,omitempty"`
 	DenyImports  []string    `json:"-"`
 	DenyExports  []string    `json:"-"`
+
+	// When an URL has the "ws" (or "wss") scheme, then the server will initiate the
+	// connection as a websocket connection. By default, the websocket frames will be
+	// masked (as if this server was a websocket client to the remote server). The
+	// NoMasking option will change this behavior and will send umasked frames.
+	Websocket struct {
+		Compression bool `json:"-"`
+		NoMasking   bool `json:"-"`
+	}
 }
 
 // Options block for nats-server.
@@ -229,7 +238,6 @@ type Options struct {
 	TrustedOperators         []*jwt.OperatorClaims `json:"-"`
 	AccountResolver          AccountResolver       `json:"-"`
 	AccountResolverTLSConfig *tls.Config           `json:"-"`
-	resolverPreloads         map[string]string
 
 	CustomClientAuthentication Authentication `json:"-"`
 	CustomRouterAuthentication Authentication `json:"-"`
@@ -247,10 +255,18 @@ type Options struct {
 	// that this applies to reconnect events.
 	ReconnectErrorReports int
 
+	// Tags describing the server. They will be included in varz
+	// and used as a filter criteria for some system requests
+	Tags jwt.TagList `json:"-"`
+
 	// private fields, used to know if bool options are explicitly
 	// defined in config and/or command line params.
 	inConfig  map[string]bool
 	inCmdLine map[string]bool
+
+	// private fields for operator mode
+	operatorJWT      []string
+	resolverPreloads map[string]string
 
 	// private fields, used for testing
 	gatewaysSolicitDelay time.Duration
@@ -849,12 +865,13 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		// Assume for now these are file names, but they can also be the JWT itself inline.
 		o.TrustedOperators = make([]*jwt.OperatorClaims, 0, len(opFiles))
 		for _, fname := range opFiles {
-			opc, err := ReadOperatorJWT(fname)
+			theJWT, opc, err := readOperatorJWT(fname)
 			if err != nil {
 				err := &configErr{tk, fmt.Sprintf("error parsing operator JWT: %v", err)}
 				*errors = append(*errors, err)
 				continue
 			}
+			o.operatorJWT = append(o.operatorJWT, theJWT)
 			o.TrustedOperators = append(o.TrustedOperators, opc)
 		}
 		if len(o.TrustedOperators) == 1 {
@@ -1060,6 +1077,34 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			*errors = append(*errors, err)
 			return
 		}
+	case "server_tags":
+		var err error
+		switch v := v.(type) {
+		case string:
+			o.Tags.Add(v)
+		case []string:
+			o.Tags.Add(v...)
+		case []interface{}:
+			for _, t := range v {
+				if t, ok := t.(token); ok {
+					if t, ok := t.Value().(string); ok {
+						o.Tags.Add(t)
+						continue
+					} else {
+						err = &configErr{tk, fmt.Sprintf("error parsing tags: unsupported type %T where string is expected", t)}
+					}
+				} else {
+					err = &configErr{tk, fmt.Sprintf("error parsing tags: unsupported type %T", t)}
+				}
+				break
+			}
+		default:
+			err = &configErr{tk, fmt.Sprintf("error parsing tags: unsupported type %T", v)}
+		}
+		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
 	default:
 		if au := atomic.LoadInt32(&allowUnknownTopLevelField); au == 0 && !tk.IsUsedVariable() {
 			err := &unknownConfigFieldErr{
@@ -1212,7 +1257,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.TLSConfig = config
 			opts.Cluster.TLSTimeout = tlsopts.Timeout
 			opts.Cluster.TLSMap = tlsopts.Map
-			opts.Cluster.TLSCheckKnwonURLs = tlsopts.TLSCheckKnownURLs
+			opts.Cluster.TLSCheckKnownURLs = tlsopts.TLSCheckKnownURLs
 		case "cluster_advertise", "advertise":
 			opts.Cluster.Advertise = mv.(string)
 		case "no_advertise":
@@ -1766,6 +1811,10 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 					continue
 				}
 				remote.DenyExports = subjects
+			case "ws_compress", "ws_compression", "websocket_compress", "websocket_compression":
+				remote.Websocket.Compression = v.(bool)
+			case "ws_no_masking", "websocket_no_masking":
+				remote.Websocket.NoMasking = v.(bool)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -3509,7 +3558,7 @@ func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]erro
 				*errors = append(*errors, err)
 			}
 			o.Websocket.HandshakeTimeout = ht
-		case "compression":
+		case "compress", "compression":
 			o.Websocket.Compression = mv.(bool)
 		case "authorization", "authentication":
 			auth := parseSimpleAuth(tk, errors, warnings)
@@ -4002,6 +4051,9 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.BoolVar(&showHelp, "help", false, "Show this message.")
 	fs.IntVar(&opts.Port, "port", 0, "Port to listen on.")
 	fs.IntVar(&opts.Port, "p", 0, "Port to listen on.")
+	fs.StringVar(&opts.ServerName, "n", "", "Server name.")
+	fs.StringVar(&opts.ServerName, "name", "", "Server name.")
+	fs.StringVar(&opts.ServerName, "server_name", "", "Server name.")
 	fs.StringVar(&opts.Host, "addr", "", "Network host to listen on.")
 	fs.StringVar(&opts.Host, "a", "", "Network host to listen on.")
 	fs.StringVar(&opts.Host, "net", "", "Network host to listen on.")

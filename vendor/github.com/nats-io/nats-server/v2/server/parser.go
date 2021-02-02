@@ -47,6 +47,8 @@ type pubArg struct {
 	queues  [][]byte
 	size    int
 	hdr     int
+	psi     *serviceImport
+	proxy   *Account
 }
 
 // Parser constants
@@ -257,6 +259,9 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
+				}
 				if trace {
 					c.traceInOp("HPUB", arg)
 				}
@@ -316,6 +321,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				var err error
 				if c.kind == ROUTER || c.kind == GATEWAY {
@@ -388,6 +396,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				if trace {
 					c.traceInOp("PUB", arg)
@@ -506,6 +517,9 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
+				}
 				if trace {
 					c.traceInOp("A+", arg)
 				}
@@ -544,6 +558,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				if trace {
 					c.traceInOp("A-", arg)
@@ -595,6 +612,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				var err error
 
@@ -727,6 +747,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				var err error
 
@@ -874,6 +897,9 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
+				}
 				if trace {
 					c.traceInOp("CONNECT", removePassFromTrace(arg))
 				}
@@ -931,6 +957,9 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
+				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
 				}
 				var err error
 				if c.kind == ROUTER || c.kind == GATEWAY {
@@ -1008,6 +1037,9 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
+				}
 				if err := c.processInfo(arg); err != nil {
 					return err
 				}
@@ -1084,6 +1116,9 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
+					return err
+				}
 				c.processErr(string(arg))
 				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
@@ -1111,11 +1146,7 @@ func (c *client) parse(buf []byte) error {
 		// Check for violations of control line length here. Note that this is not
 		// exact at all but the performance hit is too great to be precise, and
 		// catching here should prevent memory exhaustion attacks.
-		if len(c.argBuf) > int(mcl) {
-			err := NewErrorCtx(ErrMaxControlLine, "State %d, max_control_line %d, Buffer len %d",
-				c.state, int(mcl), len(c.argBuf))
-			c.sendErr(err.Error())
-			c.closeConnection(MaxControlLineExceeded)
+		if err := c.overMaxControlLineLimit(c.argBuf, mcl); err != nil {
 			return err
 		}
 	}
@@ -1126,7 +1157,7 @@ func (c *client) parse(buf []byte) error {
 		// read buffer and we are not able to process the msg.
 
 		if c.argBuf == nil {
-			// Works also for MSG_ARG, when message comes from ROUTE.
+			// Works also for MSG_ARG, when message comes from ROUTE or GATEWAY.
 			if err := c.clonePubArg(lmsg); err != nil {
 				goto parseErr
 			}
@@ -1158,14 +1189,13 @@ authErr:
 
 parseErr:
 	c.sendErr("Unknown Protocol Operation")
-	snip := protoSnippet(i, buf)
-	err := fmt.Errorf("%s parser ERROR, state=%d, i=%d: proto='%s...'",
-		c.typeString(), c.state, i, snip)
+	snip := protoSnippet(i, PROTO_SNIPPET_SIZE, buf)
+	err := fmt.Errorf("%s parser ERROR, state=%d, i=%d: proto='%s...'", c.typeString(), c.state, i, snip)
 	return err
 }
 
-func protoSnippet(start int, buf []byte) string {
-	stop := start + PROTO_SNIPPET_SIZE
+func protoSnippet(start, max int, buf []byte) string {
+	stop := start + max
 	bufSize := len(buf)
 	if start >= bufSize {
 		return `""`
@@ -1174,6 +1204,23 @@ func protoSnippet(start int, buf []byte) string {
 		stop = bufSize - 1
 	}
 	return fmt.Sprintf("%q", buf[start:stop])
+}
+
+// Check if the length of buffer `arg` is over the max control line limit `mcl`.
+// If so, an error is sent to the client and the connection is closed.
+// The error ErrMaxControlLine is returned.
+func (c *client) overMaxControlLineLimit(arg []byte, mcl int32) error {
+	if c.kind != CLIENT {
+		return nil
+	}
+	if len(arg) > int(mcl) {
+		err := NewErrorCtx(ErrMaxControlLine, "State %d, max_control_line %d, Buffer len %d (snip: %s...)",
+			c.state, int(mcl), len(c.argBuf), protoSnippet(0, MAX_CONTROL_LINE_SNIPPET_SIZE, arg))
+		c.sendErr(err.Error())
+		c.closeConnection(MaxControlLineExceeded)
+		return err
+	}
+	return nil
 }
 
 // clonePubArg is used when the split buffer scenario has the pubArg in the existing read buffer, but

@@ -238,7 +238,7 @@ func (s *Server) configureAuthorization() {
 	// This just checks and sets up the user map if we have multiple users.
 	if opts.CustomClientAuthentication != nil {
 		s.info.AuthRequired = true
-	} else if len(s.trustedKeys) > 0 {
+	} else if s.trustedKeys != nil {
 		s.info.AuthRequired = true
 	} else if opts.Nkeys != nil || opts.Users != nil {
 		s.nkeys, s.users = s.buildNkeysAndUsersFromOptions(opts.Nkeys, opts.Users)
@@ -560,10 +560,19 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			c.Debugf("Account JWT not signed by trusted operator")
 			return false
 		}
-		// this only executes IF there's an issuer on the Juc - otherwise the account is already vetted
-		if juc.IssuerAccount != "" && !acc.hasIssuer(juc.Issuer) {
+		if scope, ok := acc.hasIssuer(juc.Issuer); !ok {
 			c.Debugf("User JWT issuer is not known")
 			return false
+		} else if scope != nil {
+			if err := scope.ValidateScopedSigner(juc); err != nil {
+				c.Debugf("User JWT is not valid: %v", err)
+				return false
+			} else if uSc, ok := scope.(*jwt.UserScope); !ok {
+				c.Debugf("User JWT is not valid")
+				return false
+			} else {
+				juc.UserPermissionLimits = uSc.Template
+			}
 		}
 		if acc.IsExpired() {
 			c.Debugf("Account JWT has expired")
@@ -615,13 +624,23 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			return false
 		}
 		// Hold onto the user's public key.
+		c.mu.Lock()
 		c.pubKey = juc.Subject
+		c.tags = juc.Tags
+		c.nameTag = juc.Name
+		c.mu.Unlock()
 
 		// Generate an event if we have a system account.
 		s.accountConnectEvent(c)
 
 		// Check if we need to set an auth timer if the user jwt expires.
 		c.setExpiration(juc.Claims(), validFor)
+
+		acc.mu.RLock()
+		c.Debugf("Authenticated JWT: %s %q (claim-name: %q, claim-tags: %q) "+
+			"signed with %q by Account %q (claim-name: %q, claim-tags: %q) signed with %q",
+			c.typeString(), juc.Subject, juc.Name, juc.Tags, juc.Issuer, issuer, acc.nameTag, acc.tags, acc.Issuer)
+		acc.mu.RUnlock()
 		return true
 	}
 
@@ -845,12 +864,12 @@ func (s *Server) isRouterAuthorized(c *client) bool {
 		return s.opts.CustomRouterAuthentication.Check(c)
 	}
 
-	if opts.Cluster.TLSMap || opts.Cluster.TLSCheckKnwonURLs {
+	if opts.Cluster.TLSMap || opts.Cluster.TLSCheckKnownURLs {
 		return checkClientTLSCertSubject(c, func(user string, _ *ldap.DN, isDNSAltName bool) (string, bool) {
 			if user == "" {
 				return "", false
 			}
-			if opts.Cluster.TLSCheckKnwonURLs && isDNSAltName {
+			if opts.Cluster.TLSCheckKnownURLs && isDNSAltName {
 				if dnsAltNameMatches(dnsAltNameLabels(user), opts.Routes) {
 					return "", true
 				}

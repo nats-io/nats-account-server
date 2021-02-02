@@ -15,8 +15,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,17 +163,21 @@ type ServerInfo struct {
 
 // ClientInfo is detailed information about the client forming a connection.
 type ClientInfo struct {
-	Start   time.Time  `json:"start,omitempty"`
-	Host    string     `json:"host,omitempty"`
-	ID      uint64     `json:"id"`
-	Account string     `json:"acc"`
-	User    string     `json:"user,omitempty"`
-	Name    string     `json:"name,omitempty"`
-	Lang    string     `json:"lang,omitempty"`
-	Version string     `json:"ver,omitempty"`
-	RTT     string     `json:"rtt,omitempty"`
-	Server  string     `json:"server,omitempty"`
-	Stop    *time.Time `json:"stop,omitempty"`
+	Start     *time.Time    `json:"start,omitempty"`
+	Host      string        `json:"host,omitempty"`
+	ID        uint64        `json:"id,omitempty"`
+	Account   string        `json:"acc"`
+	User      string        `json:"user,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	Lang      string        `json:"lang,omitempty"`
+	Version   string        `json:"ver,omitempty"`
+	RTT       time.Duration `json:"rtt,omitempty"`
+	Server    string        `json:"server,omitempty"`
+	Stop      *time.Time    `json:"stop,omitempty"`
+	Jwt       string        `json:"jwt,omitempty"`
+	IssuerKey string        `json:"issuer_key,omitempty"`
+	NameTag   string        `json:"name_tag,omitempty"`
+	Tags      jwt.TagList   `json:"tags,omitempty"`
 }
 
 // ServerStats hold various statistics that we will periodically send out.
@@ -221,7 +223,7 @@ type DataStats struct {
 
 // Used for internally queueing up messages that the server wants to send.
 type pubMsg struct {
-	acc  *Account
+	c    *client
 	sub  string
 	rply string
 	si   *ServerInfo
@@ -254,9 +256,8 @@ RESET:
 		s.mu.Unlock()
 		return
 	}
-	c := s.sys.client
+	sysc := s.sys.client
 	resetCh := s.sys.resetCh
-	sysacc := s.sys.account
 	sendq := s.sys.sendq
 	id := s.info.ID
 	host := s.info.Host
@@ -304,14 +305,18 @@ RESET:
 					b, _ = json.MarshalIndent(pm.msg, _EMPTY_, "  ")
 				}
 			}
-			c.mu.Lock()
 
-			// We can have an override for account here.
-			if pm.acc != nil {
-				c.acc = pm.acc
+			// Setup our client. If the user wants to use a non-system account use our internal
+			// account scoped here so that we are not changing out accounts for the system client.
+			var c *client
+			if pm.c != nil {
+				c = pm.c
 			} else {
-				c.acc = sysacc
+				c = sysc
 			}
+
+			// Grab client lock.
+			c.mu.Lock()
 
 			// Prep internal structures needed to send message.
 			c.pa.subject = []byte(pm.sub)
@@ -325,12 +330,13 @@ RESET:
 			b = append(b, _CRLF_...)
 
 			if trace {
-				c.traceInOp(fmt.Sprintf("PUB %s %s %d",
-					c.pa.subject, c.pa.reply, c.pa.size), nil)
+				c.traceInOp(fmt.Sprintf("PUB %s %s %d", c.pa.subject, c.pa.reply, c.pa.size), nil)
 				c.traceMsg(b)
 			}
 
+			// Process like a normal inbound msg.
 			c.processInboundClientMsg(b)
+
 			// See if we are doing graceful shutdown.
 			if !pm.last {
 				c.flushClients(0) // Never spend time in place.
@@ -376,8 +382,15 @@ func (s *Server) sendInternalAccountMsg(a *Account, subject string, msg interfac
 	}
 	sendq := s.sys.sendq
 	// Don't hold lock while placing on the channel.
+	c := s.sys.client
 	s.mu.Unlock()
-	sendq <- &pubMsg{a, subject, "", nil, msg, false}
+
+	// Replace our client with the account's internal client.
+	if a != nil {
+		c = a.internalClient()
+	}
+
+	sendq <- &pubMsg{c, subject, _EMPTY_, nil, msg, false}
 	return nil
 }
 
@@ -404,6 +417,9 @@ func (s *Server) sendInternalMsg(sub, rply string, si *ServerInfo, msg interface
 
 // Locked version of checking if events system running. Also checks server.
 func (s *Server) eventsRunning() bool {
+	if s == nil {
+		return false
+	}
 	s.mu.Lock()
 	er := s.running && s.eventsEnabled()
 	s.mu.Unlock()
@@ -559,7 +575,22 @@ func (s *Server) startRemoteServerSweepTimer() {
 }
 
 // Length of our system hash used for server targeted messages.
-const sysHashLen = 6
+const sysHashLen = 8
+
+// Computes a hash of 8 characters for the name.
+func getHash(name string) []byte {
+	return getHashSize(name, sysHashLen)
+}
+
+// Returns the node name for this server which is a hash of the server name.
+func (s *Server) Node() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sys != nil {
+		return s.sys.shash
+	}
+	return _EMPTY_
+}
 
 // This will setup our system wide tracking subs.
 // For now we will setup one wildcard subscription to
@@ -572,9 +603,7 @@ func (s *Server) initEventTracking() {
 		return
 	}
 	// Create a system hash which we use for other servers to target us specifically.
-	sha := sha256.New()
-	sha.Write([]byte(s.info.ID))
-	s.sys.shash = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))[:sysHashLen]
+	s.sys.shash = string(getHash(s.info.Name))
 
 	// This will be for all inbox responses.
 	subject := fmt.Sprintf(inboxRespSubj, s.sys.shash, "*")
@@ -830,6 +859,8 @@ func (s *Server) processNewServer(ms *ServerInfo) {
 	// Right now we only check if we have leafnode servers and if so send another
 	// connect update to make sure they switch this account to interest only mode.
 	s.ensureGWsInterestOnlyForLeafNodes()
+	// Add to our nodeToName
+	s.nodeToName[string(getHash(ms.Name))] = ms.Name
 }
 
 // If GW is enabled on this server and there are any leaf node connections,
@@ -860,13 +891,14 @@ func (s *Server) shutdownEventing() {
 	s.mu.Lock()
 	clearTimer(&s.sys.sweeper)
 	clearTimer(&s.sys.stmr)
+	sys := s.sys
 	s.mu.Unlock()
 
 	// We will queue up a shutdown event and wait for the
 	// internal send loop to exit.
 	s.sendShutdownEvent()
-	s.sys.wg.Wait()
-	close(s.sys.resetCh)
+	sys.wg.Wait()
+	close(sys.resetCh)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -940,9 +972,10 @@ func (s *Server) leafNodeConnected(sub *subscription, _ *client, subject, reply 
 
 // Common filter options for system requests STATSZ VARZ SUBSZ CONNZ ROUTEZ GATEWAYZ LEAFZ
 type EventFilterOptions struct {
-	Name    string `json:"server_name,omitempty"` // filter by server name
-	Cluster string `json:"cluster,omitempty"`     // filter by cluster name
-	Host    string `json:"host,omitempty"`        // filter by host name
+	Name    string   `json:"server_name,omitempty"` // filter by server name
+	Cluster string   `json:"cluster,omitempty"`     // filter by cluster name
+	Host    string   `json:"host,omitempty"`        // filter by host name
+	Tags    []string `json:"tags,omitempty"`        // filter by tags (must match all tags)
 }
 
 // StatszEventOptions are options passed to Statsz
@@ -1014,6 +1047,14 @@ func (s *Server) filterRequest(fOpts *EventFilterOptions) bool {
 		s.mu.Unlock()
 		if !strings.Contains(cluster, fOpts.Cluster) {
 			return true
+		}
+	}
+	if len(fOpts.Tags) > 0 {
+		opts := s.getOpts()
+		for _, t := range fOpts.Tags {
+			if !opts.Tags.Contains(t) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1251,14 +1292,18 @@ func (s *Server) accountConnectEvent(c *client) {
 			Time: time.Now().UTC(),
 		},
 		Client: ClientInfo{
-			Start:   c.start,
-			Host:    c.host,
-			ID:      c.cid,
-			Account: accForClient(c),
-			User:    c.getRawAuthUser(),
-			Name:    c.opts.Name,
-			Lang:    c.opts.Lang,
-			Version: c.opts.Version,
+			Start:     &c.start,
+			Host:      c.host,
+			ID:        c.cid,
+			Account:   accForClient(c),
+			User:      c.getRawAuthUser(),
+			Name:      c.opts.Name,
+			Lang:      c.opts.Lang,
+			Version:   c.opts.Version,
+			Jwt:       c.opts.JWT,
+			IssuerKey: issuerForClient(c),
+			Tags:      c.tags,
+			NameTag:   c.nameTag,
 		},
 	}
 	c.mu.Unlock()
@@ -1294,16 +1339,20 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 			Time: now.UTC(),
 		},
 		Client: ClientInfo{
-			Start:   c.start,
-			Stop:    &now,
-			Host:    c.host,
-			ID:      c.cid,
-			Account: accForClient(c),
-			User:    c.getRawAuthUser(),
-			Name:    c.opts.Name,
-			Lang:    c.opts.Lang,
-			Version: c.opts.Version,
-			RTT:     c.getRTT(),
+			Start:     &c.start,
+			Stop:      &now,
+			Host:      c.host,
+			ID:        c.cid,
+			Account:   accForClient(c),
+			User:      c.getRawAuthUser(),
+			Name:      c.opts.Name,
+			Lang:      c.opts.Lang,
+			Version:   c.opts.Version,
+			RTT:       c.getRTT(),
+			Jwt:       c.opts.JWT,
+			IssuerKey: issuerForClient(c),
+			Tags:      c.tags,
+			NameTag:   c.nameTag,
 		},
 		Sent: DataStats{
 			Msgs:  atomic.LoadInt64(&c.inMsgs),
@@ -1339,16 +1388,20 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 			Time: now.UTC(),
 		},
 		Client: ClientInfo{
-			Start:   c.start,
-			Stop:    &now,
-			Host:    c.host,
-			ID:      c.cid,
-			Account: accForClient(c),
-			User:    c.getRawAuthUser(),
-			Name:    c.opts.Name,
-			Lang:    c.opts.Lang,
-			Version: c.opts.Version,
-			RTT:     c.getRTT(),
+			Start:     &c.start,
+			Stop:      &now,
+			Host:      c.host,
+			ID:        c.cid,
+			Account:   accForClient(c),
+			User:      c.getRawAuthUser(),
+			Name:      c.opts.Name,
+			Lang:      c.opts.Lang,
+			Version:   c.opts.Version,
+			RTT:       c.getRTT(),
+			Jwt:       c.opts.JWT,
+			IssuerKey: issuerForClient(c),
+			Tags:      c.tags,
+			NameTag:   c.nameTag,
 		},
 		Sent: DataStats{
 			Msgs:  c.inMsgs,
@@ -1374,20 +1427,20 @@ type msgHandler func(sub *subscription, client *client, subject, reply string, m
 
 // Create an internal subscription. sysSubscribeQ for queue groups.
 func (s *Server) sysSubscribe(subject string, cb msgHandler) (*subscription, error) {
-	return s.systemSubscribe(subject, "", false, cb)
+	return s.systemSubscribe(subject, _EMPTY_, false, nil, cb)
 }
 
 // Create an internal subscription with queue
 func (s *Server) sysSubscribeQ(subject, queue string, cb msgHandler) (*subscription, error) {
-	return s.systemSubscribe(subject, queue, false, cb)
+	return s.systemSubscribe(subject, queue, false, nil, cb)
 }
 
 // Create an internal subscription but do not forward interest.
 func (s *Server) sysSubscribeInternal(subject string, cb msgHandler) (*subscription, error) {
-	return s.systemSubscribe(subject, "", true, cb)
+	return s.systemSubscribe(subject, _EMPTY_, true, nil, cb)
 }
 
-func (s *Server) systemSubscribe(subject, queue string, internalOnly bool, cb msgHandler) (*subscription, error) {
+func (s *Server) systemSubscribe(subject, queue string, internalOnly bool, c *client, cb msgHandler) (*subscription, error) {
 	if !s.eventsEnabled() {
 		return nil, ErrNoSysAccount
 	}
@@ -1395,7 +1448,9 @@ func (s *Server) systemSubscribe(subject, queue string, internalOnly bool, cb ms
 		return nil, fmt.Errorf("undefined message handler")
 	}
 	s.mu.Lock()
-	c := s.sys.client
+	if c == nil {
+		c = s.sys.client
+	}
 	trace := c.trace
 	s.sys.sid++
 	sid := strconv.Itoa(s.sys.sid)
@@ -1415,13 +1470,19 @@ func (s *Server) systemSubscribe(subject, queue string, internalOnly bool, cb ms
 }
 
 func (s *Server) sysUnsubscribe(sub *subscription) {
-	if sub == nil || !s.eventsEnabled() {
+	if sub == nil {
 		return
 	}
+
 	s.mu.Lock()
+	if !s.eventsEnabled() {
+		s.mu.Unlock()
+		return
+	}
 	acc := s.sys.account
 	c := s.sys.client
 	s.mu.Unlock()
+
 	c.unsubscribe(acc, sub, true, true)
 }
 
@@ -1572,7 +1633,7 @@ func totalSubs(rr *SublistResult, qg []byte) (nsubs int32) {
 
 // Allows users of large systems to debug active subscribers for a given subject.
 // Payload should be the subject of interest.
-func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply string, rmsg []byte) {
 	// Even though this is an internal only subscription, meaning interest was not forwarded, we could
 	// get one here from a GW in optimistic mode. Ignore for now.
 	// FIXME(dlc) - Should we send no interest here back to the GW?
@@ -1580,12 +1641,15 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 		return
 	}
 
-	var nsubs int32
+	_, acc, _, msg, err := s.getRequestInfo(c, rmsg)
+	if err != nil {
+		return
+	}
 
 	// We could have a single subject or we could have a subject and a wildcard separated by whitespace.
 	args := strings.Split(strings.TrimSpace(string(msg)), " ")
 	if len(args) == 0 {
-		s.sendInternalAccountMsg(c.acc, reply, 0)
+		s.sendInternalAccountMsg(acc, reply, 0)
 		return
 	}
 
@@ -1595,15 +1659,17 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 		qgroup = []byte(args[1])
 	}
 
+	var nsubs int32
+
 	if subjectIsLiteral(tsubj) {
 		// We will look up subscribers locally first then determine if we need to solicit other servers.
-		rr := c.acc.sl.Match(tsubj)
+		rr := acc.sl.Match(tsubj)
 		nsubs = totalSubs(rr, qgroup)
 	} else {
 		// We have a wildcard, so this is a bit slower path.
 		var _subs [32]*subscription
 		subs := _subs[:0]
-		c.acc.sl.All(&subs)
+		acc.sl.All(&subs)
 		for _, sub := range subs {
 			if subjectIsSubsetMatch(string(sub.subject), tsubj) {
 				if qgroup != nil && !bytes.Equal(qgroup, sub.queue) {
@@ -1617,7 +1683,7 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 	}
 
 	// We should have an idea of how many responses to expect from remote servers.
-	var expected = c.acc.expectedRemoteResponses()
+	var expected = acc.expectedRemoteResponses()
 
 	// If we are only local, go ahead and return.
 	if expected == 0 {
@@ -1647,7 +1713,7 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 	}
 	// Send the request to the other servers.
 	request := &accNumSubsReq{
-		Account: c.acc.Name,
+		Account: acc.Name,
 		Subject: tsubj,
 		Queue:   qgroup,
 	}
@@ -1661,11 +1727,17 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 		case <-time.After(500 * time.Millisecond):
 		}
 		// Cleanup the WC entry.
+		var sendResponse bool
 		s.mu.Lock()
-		delete(s.sys.replies, replySubj)
+		if s.sys != nil && s.sys.replies != nil {
+			delete(s.sys.replies, replySubj)
+			sendResponse = true
+		}
 		s.mu.Unlock()
-		// Send the response.
-		s.sendInternalAccountMsg(nil, reply, atomic.LoadInt32(&nsubs))
+		if sendResponse {
+			// Send the response.
+			s.sendInternalAccountMsg(nil, reply, atomic.LoadInt32(&nsubs))
+		}
 	}()
 }
 
@@ -1713,6 +1785,18 @@ func accForClient(c *client) string {
 		return c.acc.Name
 	}
 	return "N/A"
+}
+
+// Helper to grab issuer for a client.
+func issuerForClient(c *client) (issuerKey string) {
+	if c == nil || c.user == nil {
+		return
+	}
+	issuerKey = c.user.SigningKey
+	if issuerKey == "" && c.user.Account != nil {
+		issuerKey = c.user.Account.Name
+	}
+	return
 }
 
 // Helper to clear timers.

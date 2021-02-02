@@ -19,9 +19,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
+	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
+
+const MaxInfoLength = 255
+
+type Info struct {
+	Description string `json:"description,omitempty"`
+	InfoURL     string `json:"info_url,omitempty"`
+}
+
+func (s Info) Validate(vr *ValidationResults) {
+	if len(s.Description) > MaxInfoLength {
+		vr.AddError("Description is too long")
+	}
+	if s.InfoURL != "" {
+		if len(s.InfoURL) > MaxInfoLength {
+			vr.AddError("Info URL is too long")
+		}
+		u, err := url.Parse(s.InfoURL)
+		if err == nil && (u.Hostname() == "" || u.Scheme == "") {
+			err = fmt.Errorf("no hostname or scheme")
+		}
+		if err != nil {
+			vr.AddError("error parsing info url: %v", err)
+		}
+	}
+}
 
 // ExportType defines the type of import/export.
 type ExportType int
@@ -71,7 +99,74 @@ func (t *ExportType) UnmarshalJSON(b []byte) error {
 		*t = Service
 		return nil
 	}
-	return fmt.Errorf("unknown export type")
+	return fmt.Errorf("unknown export type %q", j)
+}
+
+type RenamingSubject Subject
+
+func (s RenamingSubject) Validate(from Subject, vr *ValidationResults) {
+	v := Subject(s)
+	v.Validate(vr)
+	if from == "" {
+		vr.AddError("subject cannot be empty")
+	}
+	if strings.Contains(string(s), " ") {
+		vr.AddError("subject %q cannot have spaces", v)
+	}
+	matchesSuffix := func(s Subject) bool {
+		return s == ">" || strings.HasSuffix(string(s), ".>")
+	}
+	if matchesSuffix(v) != matchesSuffix(from) {
+		vr.AddError("both, renaming subject and subject, need to end or not end in >")
+	}
+	fromCnt := from.countTokenWildcards()
+	refCnt := 0
+	for _, tk := range strings.Split(string(v), ".") {
+		if tk == "*" {
+			refCnt++
+		}
+		if len(tk) < 2 {
+			continue
+		}
+		if tk[0] == '$' {
+			if idx, err := strconv.Atoi(tk[1:]); err == nil {
+				if idx > fromCnt {
+					vr.AddError("Reference $%d in %q reference * in %q that do not exist", idx, s, from)
+				} else {
+					refCnt++
+				}
+			}
+		}
+	}
+	if refCnt != fromCnt {
+		vr.AddError("subject does not contain enough * or reference wildcards $[0-9]")
+	}
+}
+
+// Replaces reference tokens with *
+func (s RenamingSubject) ToSubject() Subject {
+	if !strings.Contains(string(s), "$") {
+		return Subject(s)
+	}
+	bldr := strings.Builder{}
+	tokens := strings.Split(string(s), ".")
+	for i, tk := range tokens {
+		convert := false
+		if len(tk) > 1 && tk[0] == '$' {
+			if _, err := strconv.Atoi(tk[1:]); err == nil {
+				convert = true
+			}
+		}
+		if convert {
+			bldr.WriteString("*")
+		} else {
+			bldr.WriteString(tk)
+		}
+		if i != len(tokens)-1 {
+			bldr.WriteString(".")
+		}
+	}
+	return Subject(bldr.String())
 }
 
 // Subject is a string that represents a NATS subject
@@ -86,6 +181,21 @@ func (s Subject) Validate(vr *ValidationResults) {
 	if strings.Contains(v, " ") {
 		vr.AddError("subject %q cannot have spaces", v)
 	}
+}
+
+func (s Subject) countTokenWildcards() int {
+	v := string(s)
+	if v == "*" {
+		return 1
+	}
+	cnt := strings.Count(v, ".*.")
+	if strings.HasSuffix(v, ".*") {
+		cnt++
+	}
+	if strings.HasPrefix(v, "*.") {
+		cnt++
+	}
+	return cnt
 }
 
 // HasWildCards is used to check if a subject contains a > or *
@@ -163,6 +273,10 @@ type UserLimits struct {
 	Locale string      `json:"times_location,omitempty"`
 }
 
+func (u *UserLimits) Empty() bool {
+	return reflect.DeepEqual(*u, UserLimits{})
+}
+
 func (u *UserLimits) IsUnlimited() bool {
 	return len(u.Src) == 0 && len(u.Times) == 0
 }
@@ -207,13 +321,33 @@ type Permission struct {
 	Deny  StringList `json:"deny,omitempty"`
 }
 
+func (p *Permission) Empty() bool {
+	return len(p.Allow) == 0 && len(p.Deny) == 0
+}
+
+func checkPermission(vr *ValidationResults, subj string, permitQueue bool) {
+	tk := strings.Split(subj, " ")
+	switch len(tk) {
+	case 1:
+		Subject(tk[0]).Validate(vr)
+	case 2:
+		Subject(tk[0]).Validate(vr)
+		Subject(tk[1]).Validate(vr)
+		if !permitQueue {
+			vr.AddError(`Permission Subject "%s" is not allowed to contain queue`, subj)
+		}
+	default:
+		vr.AddError(`Permission Subject "%s" contains too many spaces`, subj)
+	}
+}
+
 // Validate the allow, deny elements of a permission
-func (p *Permission) Validate(vr *ValidationResults) {
+func (p *Permission) Validate(vr *ValidationResults, permitQueue bool) {
 	for _, subj := range p.Allow {
-		Subject(subj).Validate(vr)
+		checkPermission(vr, subj, permitQueue)
 	}
 	for _, subj := range p.Deny {
-		Subject(subj).Validate(vr)
+		checkPermission(vr, subj, permitQueue)
 	}
 }
 
@@ -241,6 +375,8 @@ func (p *Permissions) Validate(vr *ValidationResults) {
 	if p.Resp != nil {
 		p.Resp.Validate(vr)
 	}
+	p.Sub.Validate(vr, true)
+	p.Pub.Validate(vr, false)
 }
 
 // StringList is a wrapper for an array of strings
