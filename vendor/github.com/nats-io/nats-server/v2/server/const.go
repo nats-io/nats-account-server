@@ -1,4 +1,4 @@
-// Copyright 2012-2020 The NATS Authors
+// Copyright 2012-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.2.0-beta.35"
+	VERSION = "2.2.0-beta.64"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -123,6 +123,9 @@ const (
 
 	// PROTO_SNIPPET_SIZE is the default size of proto to print on parse errors.
 	PROTO_SNIPPET_SIZE = 32
+
+	// MAX_CONTROL_LINE_SNIPPET_SIZE is the default size of proto to print on max control line errors.
+	MAX_CONTROL_LINE_SNIPPET_SIZE = 128
 
 	// MAX_MSG_ARGS Maximum possible number of arguments from MSG proto.
 	MAX_MSG_ARGS = 4

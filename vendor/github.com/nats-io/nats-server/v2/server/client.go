@@ -1,4 +1,4 @@
-// Copyright 2012-2020 The NATS Authors
+// Copyright 2012-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,12 +16,14 @@ package server
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -263,6 +265,9 @@ type client struct {
 
 	trace bool
 	echo  bool
+
+	tags    jwt.TagList
+	nameTag string
 }
 
 type rrTracking struct {
@@ -288,7 +293,7 @@ type outbound struct {
 	pb  int64         // Total pending/queued bytes.
 	pm  int32         // Total pending/queued messages.
 	fsp int32         // Flush signals that are pending per producer from readLoop's pcd.
-	sch chan struct{} // To signal writeLoop that there is data to flush.
+	sg  *sync.Cond    // To signal writeLoop that there is data to flush.
 	wdl time.Duration // Snapshot of write deadline.
 	mp  int64         // Snapshot of max pending for client.
 	lft time.Duration // Last flush time for Write.
@@ -536,11 +541,18 @@ func (c *client) initClient() {
 
 	// Outbound data structure setup
 	c.out.sz = startBufSize
-	c.out.sch = make(chan struct{}, 1)
+	c.out.sg = sync.NewCond(&(c.mu))
 	opts := s.getOpts()
 	// Snapshots to avoid mutex access in fast paths.
 	c.out.wdl = opts.WriteDeadline
 	c.out.mp = opts.MaxPending
+	// Snapshot max control line since currently can not be changed on reload and we
+	// were checking it on each call to parse. If this changes and we allow MaxControlLine
+	// to be reloaded without restart, this code will need to change.
+	c.mcl = int32(opts.MaxControlLine)
+	if c.mcl == 0 {
+		c.mcl = MAX_CONTROL_LINE_SIZE
+	}
 
 	c.subs = make(map[string]*subscription)
 	c.echo = true
@@ -587,7 +599,11 @@ func (c *client) initClient() {
 	case GATEWAY:
 		c.ncs.Store(fmt.Sprintf("%s - gid:%d", conn, c.cid))
 	case LEAF:
-		c.ncs.Store(fmt.Sprintf("%s - lid:%d", conn, c.cid))
+		var ws string
+		if c.isWebsocket() {
+			ws = "_ws"
+		}
+		c.ncs.Store(fmt.Sprintf("%s - lid%s:%d", conn, ws, c.cid))
 	case SYSTEM:
 		c.ncs.Store("SYSTEM")
 	case JETSTREAM:
@@ -688,6 +704,15 @@ func (c *client) applyAccountLimits() {
 		if uc, _ := jwt.DecodeUserClaims(c.opts.JWT); uc != nil {
 			c.mpay = int32(uc.Limits.Payload)
 			c.msubs = int32(uc.Limits.Subs)
+			if uc.IssuerAccount != _EMPTY_ && uc.IssuerAccount != uc.Issuer {
+				if scope, ok := c.acc.signingKeys[uc.Issuer]; ok {
+					if userScope, ok := scope.(*jwt.UserScope); ok {
+						// if signing key disappeared or changed and we don't get here, the client will be disconnected
+						c.mpay = int32(userScope.Template.Limits.Payload)
+						c.msubs = int32(userScope.Template.Limits.Subs)
+					}
+				}
+			}
 		}
 	}
 	minLimit(&c.mpay, c.acc.mpay)
@@ -899,16 +924,10 @@ func (c *client) writeLoop() {
 		return
 	}
 	c.flags.set(writeLoopStarted)
-	ch := c.out.sch
 	c.mu.Unlock()
 
 	// Used to check that we did flush from last wake up.
 	waitOk := true
-
-	// Used to limit the wait for a signal
-	const maxWait = time.Second
-	t := time.NewTimer(maxWait)
-
 	var close bool
 
 	// Main loop. Will wait to be signaled and then will use
@@ -918,18 +937,9 @@ func (c *client) writeLoop() {
 		if close = c.isClosed(); !close {
 			owtf := c.out.fsp > 0 && c.out.pb < maxBufSize && c.out.fsp < maxFlushPending
 			if waitOk && (c.out.pb == 0 || owtf) {
-				c.mu.Unlock()
-
-				// Reset our timer
-				t.Reset(maxWait)
-
-				// Wait on pending data.
-				select {
-				case <-ch:
-				case <-t.C:
-				}
-
-				c.mu.Lock()
+				c.out.sg.Wait()
+				// Check that connection has not been closed while lock was released
+				// in the conditional wait.
 				close = c.isClosed()
 			}
 		}
@@ -1008,21 +1018,16 @@ func (c *client) readLoop(pre []byte) {
 		c.mqtt.r = &mqttReader{reader: nc}
 	}
 	c.in.rsz = startBufSize
-	// Snapshot max control line since currently can not be changed on reload and we
-	// were checking it on each call to parse. If this changes and we allow MaxControlLine
-	// to be reloaded without restart, this code will need to change.
-	c.mcl = MAX_CONTROL_LINE_SIZE
-	if s != nil {
-		if opts := s.getOpts(); opts != nil {
-			c.mcl = int32(opts.MaxControlLine)
-		}
-	}
 
 	// Check the per-account-cache for closed subscriptions
 	cpacc := c.kind == ROUTER || c.kind == GATEWAY
 	// Last per-account-cache check for closed subscriptions
 	lpacc := time.Now()
 	acc := c.acc
+	var masking bool
+	if ws {
+		masking = c.ws.maskread
+	}
 	c.mu.Unlock()
 
 	defer func() {
@@ -1046,21 +1051,26 @@ func (c *client) readLoop(pre []byte) {
 
 	var wsr *wsReadInfo
 	if ws {
-		wsr = &wsReadInfo{}
+		wsr = &wsReadInfo{mask: masking}
 		wsr.init()
 	}
 
-	// If we have a pre buffer parse that first.
-	if len(pre) > 0 {
-		c.parse(pre)
-	}
-
 	for {
-		n, err := nc.Read(b)
-		// If we have any data we will try to parse and exit at the end.
-		if n == 0 && err != nil {
-			c.closeConnection(closedStateForErr(err))
-			return
+		var n int
+		var err error
+
+		// If we have a pre buffer parse that first.
+		if len(pre) > 0 {
+			b = pre
+			n = len(pre)
+			pre = nil
+		} else {
+			n, err = nc.Read(b)
+			// If we have any data we will try to parse and exit at the end.
+			if n == 0 && err != nil {
+				c.closeConnection(closedStateForErr(err))
+				return
+			}
 		}
 		if ws {
 			bufs, err = c.wsRead(wsr, nc, b[:n])
@@ -1159,7 +1169,14 @@ func (c *client) readLoop(pre []byte) {
 		}
 		// re-snapshot the account since it can change during reload, etc.
 		acc = c.acc
+		// Refresh nc because in some cases, we have upgraded c.nc to TLS.
+		nc = c.nc
 		c.mu.Unlock()
+
+		// Connection was closed
+		if nc == nil {
+			return
+		}
 
 		if dur := time.Since(start); dur >= readLoopReportThreshold {
 			c.Warnf("Readloop processing time: %v", dur)
@@ -1420,12 +1437,12 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 	if !skipFlush && c.isWebsocket() && !c.ws.closeSent {
 		c.wsEnqueueCloseMessage(reason)
 	}
-	// Be consistent with the creation: for routes and gateways,
+	// Be consistent with the creation: for routes, gateways and leaf,
 	// we use Noticef on create, so use that too for delete.
 	if c.srv != nil {
-		if c.kind == ROUTER || c.kind == GATEWAY {
+		if c.kind == ROUTER || c.kind == GATEWAY || c.kind == LEAF {
 			c.Noticef("%s connection closed: %s", c.typeString(), reason)
-		} else { // Client, System, Jetstream, Account and Leafnode connections.
+		} else { // Client, System, Jetstream, and Account connections.
 			c.Debugf("%s connection closed: %s", c.typeString(), reason)
 		}
 	}
@@ -1456,13 +1473,8 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 
 // flushSignal will use server to queue the flush IO operation to a pool of flushers.
 // Lock must be held.
-func (c *client) flushSignal() bool {
-	select {
-	case c.out.sch <- struct{}{}:
-		return true
-	default:
-	}
-	return false
+func (c *client) flushSignal() {
+	c.out.sg.Signal()
 }
 
 // Traces a message.
@@ -1511,7 +1523,7 @@ func (c *client) processInfo(arg []byte) error {
 	case GATEWAY:
 		c.processGatewayInfo(&info)
 	case LEAF:
-		return c.processLeafnodeInfo(&info)
+		c.processLeafnodeInfo(&info)
 	}
 	return nil
 }
@@ -1795,7 +1807,7 @@ func (c *client) authViolation() {
 	var hasTrustedNkeys, hasNkeys, hasUsers bool
 	if s = c.srv; s != nil {
 		s.mu.Lock()
-		hasTrustedNkeys = len(s.trustedKeys) > 0
+		hasTrustedNkeys = s.trustedKeys != nil
 		hasNkeys = s.nkeys != nil
 		hasUsers = s.users != nil
 		s.mu.Unlock()
@@ -2109,6 +2121,14 @@ func (c *client) processPong() {
 	if reorderGWs {
 		srv.gateway.orderOutboundConnections()
 	}
+}
+
+// Will return the parts from the raw wire msg.
+func (c *client) msgParts(data []byte) (hdr []byte, msg []byte) {
+	if c != nil && c.pa.hdr > 0 {
+		return data[:c.pa.hdr], data[c.pa.hdr:]
+	}
+	return nil, data
 }
 
 // Header pubs take form HPUB <subject> [reply] <hdr_len> <total_len>\r\n
@@ -2923,10 +2943,8 @@ func (c *client) deliverMsg(sub *subscription, subject, reply, mh, msg []byte, g
 		return false
 	}
 
-	// This is set under the client lock using atomic because it can be
-	// checked with atomic without the client lock. Here, we don't need
-	// the atomic operation since we are under the lock.
-	if sub.closed == 1 {
+	// New race detector forces this now.
+	if sub.isClosed() {
 		client.mu.Unlock()
 		return false
 	}
@@ -3551,10 +3569,46 @@ func (c *client) setupResponseServiceImport(acc *Account, si *serviceImport, tra
 	return rsi
 }
 
+// This will set a header for the message.
+// Lock does not need to be held but this should only be called
+// from the inbound go routine. We will update the pubArgs.
+func (c *client) setHeader(key, value string, msg []byte) []byte {
+	const hdrLine = "NATS/1.0\r\n"
+	var bb bytes.Buffer
+	var omi int
+	// Write original header if present.
+	if c.pa.hdr > LEN_CR_LF {
+		omi = c.pa.hdr
+		bb.Write(msg[:c.pa.hdr-LEN_CR_LF])
+	} else {
+		bb.WriteString(hdrLine)
+	}
+	http.Header{key: []string{value}}.Write(&bb)
+	bb.WriteString(CR_LF)
+	nhdr := bb.Len()
+	// Put the original message back.
+	bb.Write(msg[omi:])
+	nsize := bb.Len() - LEN_CR_LF
+	// Update pubArgs
+	// If others will use this later we need to save and restore original.
+	c.pa.hdr = nhdr
+	c.pa.size = nsize
+	c.pa.hdb = []byte(strconv.Itoa(nhdr))
+	c.pa.szb = []byte(strconv.Itoa(nsize))
+	return bb.Bytes()
+}
+
 // processServiceImport is an internal callback when a subscription matches an imported service
 // from another account. This includes response mappings as well.
 func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byte) {
-	if c.kind == GATEWAY && !si.isRespServiceImport() {
+	// If we are a GW and this is not a direct serviceImport ignore.
+	isResponse := si.isRespServiceImport()
+	if c.kind == GATEWAY && !isResponse {
+		return
+	}
+	// If we are here and we are a serviceImport response make sure we are not matching back
+	// to the import/export pair that started the request. If so ignore.
+	if isResponse && c.pa.psi != nil && c.pa.psi.se == si.se {
 		return
 	}
 
@@ -3600,19 +3654,37 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 	} else if si.usePub {
 		to = string(c.pa.subject)
 	}
-
 	// Now check to see if this account has mappings that could affect the service import.
 	// Can't use non-locked trick like in processInboundClientMsg, so just call into selectMappedSubject
 	// so we only lock once.
 	to, _ = si.acc.selectMappedSubject(to)
 
-	oreply, oacc := c.pa.reply, c.acc
-	c.pa.reply = nrr
-	if !si.isSysAcc {
-		c.mu.Lock()
-		c.acc = si.acc
-		c.mu.Unlock()
+	// Copy our pubArg and account
+	pacopy := c.pa
+	oacc := c.acc
+	// Change this so that we detect recursion
+	c.pa.psi = si
+
+	// Place our client info for the request in the message.
+	// This will survive going across routes, etc.
+	if c.pa.proxy == nil && !si.response {
+		if ci := c.getClientInfo(si.share); ci != nil {
+			if b, _ := json.Marshal(ci); b != nil {
+				msg = c.setHeader(ClientInfoHdr, string(b), msg)
+			}
+		}
 	}
+
+	// Set our reply.
+	c.pa.reply = nrr
+	// For processing properly across routes, etc.
+	if c.kind == CLIENT || c.kind == LEAF {
+		c.pa.proxy = c.acc
+	}
+	c.mu.Lock()
+	c.acc = si.acc
+	c.mu.Unlock()
+
 	// FIXME(dlc) - Do L1 cache trick like normal client?
 	rr := si.acc.sl.Match(to)
 
@@ -3647,13 +3719,10 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 
 	// Put what was there back now.
 	c.in.rts = orts
-	c.pa.reply = oreply
-
-	if !si.isSysAcc {
-		c.mu.Lock()
-		c.acc = oacc
-		c.mu.Unlock()
-	}
+	c.pa = pacopy
+	c.mu.Lock()
+	c.acc = oacc
+	c.mu.Unlock()
 
 	// Determine if we should remove this service import. This is for response service imports.
 	// We will remove if we did not deliver, or if we are a response service import and we are
@@ -3817,7 +3886,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			}
 		}
 
-		// Remap to original if internal.
+		// Remap to the original subject if internal.
 		if sub.icb != nil {
 			subj = subject
 		}
@@ -4195,6 +4264,8 @@ func (c *client) typeString() string {
 		return "JetStream"
 	case ACCOUNT:
 		return "Account"
+	case SYSTEM:
+		return "System"
 	}
 	return "Unknown Type"
 }
@@ -4586,31 +4657,137 @@ func (c *client) pruneClosedSubFromPerAccountCache() {
 }
 
 // Grabs the information for this client.
-func (c *client) getClientInfo(detailed bool) LatencyClient {
-	var lc LatencyClient
-	if c == nil || c.kind != CLIENT {
-		return lc
+func (c *client) getClientInfo(detailed bool) *ClientInfo {
+	if c == nil || (c.kind != CLIENT && c.kind != LEAF) {
+		return nil
 	}
 	// Server name. Defaults to server ID if not set explicitly.
-	sn := c.srv.Name()
+	var sn string
+	if detailed && c.kind != LEAF {
+		sn = c.srv.Name()
+	}
 
 	c.mu.Lock()
-	// Defaults for all are RTT and Account.
-	lc.Account = accForClient(c)
-	lc.RTT = c.rtt
-	// Detailed is opt in.
+	var ci ClientInfo
+	// RTT and Account are always added.
+	ci.Account = accForClient(c)
+	ci.RTT = c.rtt
+	// Detailed signals additional opt in.
 	if detailed {
-		lc.Start = c.start.UTC()
-		lc.IP = c.host
-		lc.CID = c.cid
-		lc.Name = c.opts.Name
-		lc.User = c.getRawAuthUser()
-		lc.Lang = c.opts.Lang
-		lc.Version = c.opts.Version
-		lc.Server = sn
+		if c.kind == LEAF {
+			sn = c.leaf.remoteServer
+		}
+		ci.Start = &c.start
+		ci.Host = c.host
+		ci.ID = c.cid
+		ci.Name = c.opts.Name
+		ci.User = c.getRawAuthUser()
+		ci.Lang = c.opts.Lang
+		ci.Version = c.opts.Version
+		ci.Server = sn
+		ci.Jwt = c.opts.JWT
+		ci.IssuerKey = issuerForClient(c)
+		ci.NameTag = c.nameTag
+		ci.Tags = c.tags
 	}
 	c.mu.Unlock()
-	return lc
+	return &ci
+}
+
+func (c *client) doTLSServerHandshake(typ string, tlsConfig *tls.Config, timeout float64) error {
+	_, err := c.doTLSHandshake(typ, false, nil, tlsConfig, _EMPTY_, timeout)
+	return err
+}
+
+func (c *client) doTLSClientHandshake(typ string, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64) (bool, error) {
+	return c.doTLSHandshake(typ, true, url, tlsConfig, tlsName, timeout)
+}
+
+// Performs eithe server or client side (if solicit is true) TLS Handshake.
+// On error, the TLS handshake error has been logged and the connection
+// has been closed.
+//
+// Lock is held on entry.
+func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64) (bool, error) {
+	var host string
+	var resetTLSName bool
+	var err error
+
+	// Capture kind for some debug/error statements.
+	kind := c.kind
+
+	// If we solicited, we will act like the client, otherwise the server.
+	if solicit {
+		c.Debugf("Starting TLS %s client handshake", typ)
+		if tlsConfig.ServerName == _EMPTY_ {
+			// If the given url is a hostname, use this hostname for the
+			// ServerName. If it is an IP, use the cfg's tlsName. If none
+			// is available, resort to current IP.
+			host = url.Hostname()
+			if tlsName != _EMPTY_ && net.ParseIP(host) != nil {
+				host = tlsName
+			}
+			tlsConfig.ServerName = host
+		}
+		c.nc = tls.Client(c.nc, tlsConfig)
+	} else {
+		if kind == CLIENT {
+			c.Debugf("Starting TLS client connection handshake")
+		} else {
+			c.Debugf("Starting TLS %s server handshake", typ)
+		}
+		c.nc = tls.Server(c.nc, tlsConfig)
+	}
+
+	conn := c.nc.(*tls.Conn)
+
+	// Setup the timeout
+	ttl := secondsToDuration(timeout)
+	time.AfterFunc(ttl, func() { tlsTimeout(c, conn) })
+	conn.SetReadDeadline(time.Now().Add(ttl))
+
+	c.mu.Unlock()
+	if err = conn.Handshake(); err != nil {
+		if solicit {
+			// Based on type of error, possibly clear the saved tlsName
+			// See: https://github.com/nats-io/nats-server/issues/1256
+			if _, ok := err.(x509.HostnameError); ok {
+				if host == tlsName {
+					resetTLSName = true
+				}
+			}
+		}
+		if kind == CLIENT {
+			c.Errorf("TLS handshake error: %v", err)
+		} else {
+			c.Errorf("TLS %s handshake error: %v", typ, err)
+		}
+		c.closeConnection(TLSHandshakeError)
+
+		// Grab the lock before returning since the caller was holding the lock on entry
+		c.mu.Lock()
+		// Returning any error is fine. Since the connection is closed ErrConnectionClosed
+		// is appropriate.
+		return resetTLSName, ErrConnectionClosed
+	}
+
+	// Reset the read deadline
+	conn.SetReadDeadline(time.Time{})
+
+	// Re-Grab lock
+	c.mu.Lock()
+
+	// To be consistent with client, set this flag to indicate that handshake is done
+	c.flags.set(handshakeComplete)
+
+	// The connection still may have been closed on success handshake due
+	// to a race with tls timeout. If that the case, return error indicating
+	// that the connection is closed.
+	if err == nil && c.isClosed() {
+		err = ErrConnectionClosed
+	}
+
+	return false, err
 }
 
 // getRAwAuthUser returns the raw auth user for the client.

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 The NATS Authors
+// Copyright 2018-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -74,7 +74,7 @@ type Account struct {
 	limits
 	expired      bool
 	incomplete   bool
-	signingKeys  []string
+	signingKeys  map[string]jwt.Scope
 	srv          *Server // server this account is registered with (possibly nil)
 	lds          string  // loop detection subject for leaf nodes
 	siReply      []byte  // service reply prefix, will form wildcard subscription.
@@ -82,6 +82,8 @@ type Account struct {
 	eventIds     *nuid.NUID
 	eventIdsMu   sync.Mutex
 	defaultPerms *Permissions
+	tags         jwt.TagList
+	nameTag      string
 }
 
 // Account based limits.
@@ -110,6 +112,8 @@ type streamImport struct {
 	invalid bool
 }
 
+const ClientInfoHdr = "Nats-Request-Info"
+
 // Import service mapping struct
 type serviceImport struct {
 	acc         *Account
@@ -118,7 +122,6 @@ type serviceImport struct {
 	sid         []byte
 	from        string
 	to          string
-	exsub       string
 	tr          *transform
 	ts          int64
 	rt          ServiceRespType
@@ -131,7 +134,6 @@ type serviceImport struct {
 	share       bool
 	tracking    bool
 	didDeliver  bool
-	isSysAcc    bool
 	trackingHdr http.Header // header from request
 }
 
@@ -218,6 +220,10 @@ func NewAccount(name string) *Account {
 		eventIds: nuid.New(),
 	}
 	return a
+}
+
+func (a *Account) String() string {
+	return a.Name
 }
 
 // Used to create shallow copies of accounts for transfer
@@ -872,17 +878,6 @@ func (a *Account) removeClient(c *client) int {
 	return n
 }
 
-func (a *Account) randomClient() *client {
-	if a.ic != nil {
-		return a.ic
-	}
-	var c *client
-	for c = range a.clients {
-		break
-	}
-	return c
-}
-
 // AddServiceExport will configure the account with the defined export.
 func (a *Account) AddServiceExport(subject string, accounts []*Account) error {
 	return a.AddServiceExportWithResponse(subject, Singleton, accounts)
@@ -1097,11 +1092,10 @@ func (a *Account) IsExportServiceTracking(service string) bool {
 // designate to share the additional information in the service import.
 type ServiceLatency struct {
 	TypedEvent
-
 	Status         int           `json:"status"`
 	Error          string        `json:"description,omitempty"`
-	Requestor      LatencyClient `json:"requestor,omitempty"`
-	Responder      LatencyClient `json:"responder,omitempty"`
+	Requestor      *ClientInfo   `json:"requestor,omitempty"`
+	Responder      *ClientInfo   `json:"responder,omitempty"`
 	RequestHeader  http.Header   `json:"header,omitempty"` // only contains header(s) triggering the measurement
 	RequestStart   time.Time     `json:"start"`
 	ServiceLatency time.Duration `json:"service"`
@@ -1111,23 +1105,6 @@ type ServiceLatency struct {
 
 // ServiceLatencyType is the NATS Event Type for ServiceLatency
 const ServiceLatencyType = "io.nats.server.metric.v1.service_latency"
-
-// LatencyClient is the JSON message structure assigned to requestors and responders.
-// Note that for a requestor, the only information shared by default is the RTT used
-// to calculate the total latency. The requestor's account can designate to share
-// the additional information in the service import.
-type LatencyClient struct {
-	Account string        `json:"acc"`
-	RTT     time.Duration `json:"rtt"`
-	Start   time.Time     `json:"start,omitempty"`
-	User    string        `json:"user,omitempty"`
-	Name    string        `json:"name,omitempty"`
-	Lang    string        `json:"lang,omitempty"`
-	Version string        `json:"ver,omitempty"`
-	IP      string        `json:"ip,omitempty"`
-	CID     uint64        `json:"cid,omitempty"`
-	Server  string        `json:"server,omitempty"`
-}
 
 // NATSTotalTime is a helper function that totals the NATS latencies.
 func (nl *ServiceLatency) NATSTotalTime() time.Duration {
@@ -1226,7 +1203,11 @@ func (a *Account) sendBackendErrorTrackingLatency(si *serviceImport, reason rsiR
 	if rc != nil {
 		sl.Requestor = rc.getClientInfo(share)
 	}
-	sl.RequestStart = time.Unix(0, ts-int64(sl.Requestor.RTT)).UTC()
+	var reqRTT time.Duration
+	if sl.Requestor != nil {
+		reqRTT = sl.Requestor.RTT
+	}
+	sl.RequestStart = time.Unix(0, ts-int64(reqRTT)).UTC()
 	if reason == rsiNoDelivery {
 		sl.Status = 503
 		sl.Error = "Service Unavailable"
@@ -1255,10 +1236,17 @@ func (a *Account) sendTrackingLatency(si *serviceImport, responder *client) bool
 		Requestor: requestor.getClientInfo(si.share),
 		Responder: responder.getClientInfo(true),
 	}
-	sl.RequestStart = time.Unix(0, si.ts-int64(sl.Requestor.RTT)).UTC()
-	sl.ServiceLatency = serviceRTT - sl.Responder.RTT
+	var respRTT, reqRTT time.Duration
+	if sl.Responder != nil {
+		respRTT = sl.Responder.RTT
+	}
+	if sl.Requestor != nil {
+		reqRTT = sl.Requestor.RTT
+	}
+	sl.RequestStart = time.Unix(0, si.ts-int64(reqRTT)).UTC()
+	sl.ServiceLatency = serviceRTT - respRTT
 	sl.TotalLatency = sl.Requestor.RTT + serviceRTT
-	if sl.Responder.RTT > 0 {
+	if respRTT > 0 {
 		sl.SystemLatency = time.Since(ts)
 		sl.TotalLatency += sl.SystemLatency
 	}
@@ -1351,6 +1339,7 @@ func (a *Account) AddServiceImportWithClaim(destination *Account, from, to strin
 	}
 
 	_, err := a.addServiceImport(destination, from, to, imClaim)
+
 	return err
 }
 
@@ -1680,8 +1669,8 @@ func (a *Account) serviceImportExists(dest *Account, from string) bool {
 }
 
 // Add a service import.
-// This does no checks and should only be called by the msg processing code. Use
-// AddServiceImport from above if responding to user input or config changes, etc.
+// This does no checks and should only be called by the msg processing code.
+// Use AddServiceImport from above if responding to user input or config changes, etc.
 func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Import) (*serviceImport, error) {
 	rt := Singleton
 	var lat *serviceLatency
@@ -1696,6 +1685,7 @@ func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Im
 	dest.mu.RUnlock()
 
 	// Track if this maps us to the system account.
+	// We will always share information with them.
 	var isSysAcc bool
 	if s != nil {
 		s.mu.Lock()
@@ -1728,16 +1718,25 @@ func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Im
 		if to == from {
 			usePub = true
 		} else {
-			from, _ = transformUntokenize(from)
-			// Create a transform
-			if tr, err = newTransform(from, transformTokenize(to)); err != nil {
+			to, _ = transformUntokenize(to)
+			// Create a transform. Do so in reverse such that $ symbols only exist in to
+			if tr, err = newTransform(to, transformTokenize(from)); err != nil {
 				a.mu.Unlock()
 				return nil, fmt.Errorf("failed to create mapping transform for service import subject %q to %q: %v",
 					from, to, err)
+			} else {
+				// un-tokenize and reverse transform so we get the transform needed
+				from, _ = transformUntokenize(from)
+				tr = tr.reverse()
 			}
 		}
 	}
-	si := &serviceImport{dest, claim, se, nil, from, to, "", tr, 0, rt, lat, nil, nil, usePub, false, false, false, false, false, isSysAcc, nil}
+	// Turn on sharing by default if importing from system services.
+	share := isSysAcc
+	if claim != nil {
+		share = claim.Share
+	}
+	si := &serviceImport{dest, claim, se, nil, from, to, tr, 0, rt, lat, nil, nil, usePub, false, false, share, false, false, nil}
 	a.imports.services[from] = si
 	a.mu.Unlock()
 
@@ -1797,6 +1796,7 @@ func (a *Account) addServiceImportSub(si *serviceImport) error {
 		c.processServiceImport(si, a, msg)
 	}
 	_, err := c.processSub([]byte(subject), nil, []byte(sid), cb, true)
+
 	return err
 }
 
@@ -2152,7 +2152,7 @@ func (a *Account) addRespServiceImport(dest *Account, to string, osi *serviceImp
 
 	// dest is the requestor's account. a is the service responder with the export.
 	// Marked as internal here, that is how we distinguish.
-	si := &serviceImport{dest, nil, osi.se, nil, nrr, to, osi.to, nil, 0, rt, nil, nil, nil, false, true, false, osi.share, false, false, false, nil}
+	si := &serviceImport{dest, nil, osi.se, nil, nrr, to, nil, 0, rt, nil, nil, nil, false, true, false, osi.share, false, false, nil}
 
 	if a.exports.responses == nil {
 		a.exports.responses = make(map[string]*serviceImport)
@@ -2247,6 +2247,7 @@ func (a *Account) AddMappedStreamImportWithClaim(account *Account, from, to stri
 				return fmt.Errorf("failed to create mapping transform for stream import subject %q to %q: %v",
 					from, to, err)
 			}
+			to, _ = transformUntokenize(to)
 		}
 	}
 
@@ -2541,7 +2542,7 @@ func (a *Account) checkActivation(importAcc *Account, claim *jwt.Import, expTime
 		clone.Token = fetchActivation(url.String())
 	}
 	vr := jwt.CreateValidationResults()
-	clone.Validate(a.Name, vr)
+	clone.Validate(importAcc.Name, vr)
 	if vr.IsBlocking(true) {
 		return false
 	}
@@ -2588,7 +2589,8 @@ func (a *Account) isIssuerClaimTrusted(claims *jwt.ActivationClaims) bool {
 		}
 		return false
 	}
-	return a.hasIssuerNoLock(claims.Issuer)
+	_, ok := a.hasIssuerNoLock(claims.Issuer)
+	return ok
 }
 
 // Returns true if `a` and `b` stream imports are the same. Note that the
@@ -2734,26 +2736,19 @@ func (a *Account) checkExpiration(claims *jwt.ClaimsData) {
 }
 
 // hasIssuer returns true if the issuer matches the account
+// If the issuer is a scoped signing key, the scope will be returned as well
 // issuer or it is a signing key for the account.
-func (a *Account) hasIssuer(issuer string) bool {
+func (a *Account) hasIssuer(issuer string) (jwt.Scope, bool) {
 	a.mu.RLock()
-	hi := a.hasIssuerNoLock(issuer)
+	scope, ok := a.hasIssuerNoLock(issuer)
 	a.mu.RUnlock()
-	return hi
+	return scope, ok
 }
 
 // hasIssuerNoLock is the unlocked version of hasIssuer
-func (a *Account) hasIssuerNoLock(issuer string) bool {
-	// same issuer -- keep this for safety on the calling code
-	if a.Name == issuer {
-		return true
-	}
-	for i := 0; i < len(a.signingKeys); i++ {
-		if a.signingKeys[i] == issuer {
-			return true
-		}
-	}
-	return false
+func (a *Account) hasIssuerNoLock(issuer string) (jwt.Scope, bool) {
+	scope, ok := a.signingKeys[issuer]
+	return scope, ok
 }
 
 // Returns the loop detection subject used for leafnodes
@@ -2810,12 +2805,16 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	if a == nil {
 		return
 	}
-	s.Debugf("Updating account claims: %s", a.Name)
+	s.Debugf("Updating account claims: %s/%s", a.Name, ac.Name)
 	a.checkExpiration(ac.Claims())
 
 	a.mu.Lock()
 	// Clone to update, only select certain fields.
 	old := &Account{Name: a.Name, exports: a.exports, limits: a.limits, signingKeys: a.signingKeys}
+
+	// overwrite claim meta data
+	a.nameTag = ac.Name
+	a.tags = ac.Tags
 
 	// Reset exports and imports here.
 
@@ -2838,22 +2837,30 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	// Reset any notion of export revocations.
 	a.actsRevoked = nil
 
+	alteredScope := map[string]struct{}{}
+
 	// update account signing keys
 	a.signingKeys = nil
+	_, strict := s.strictSigningKeyUsage[a.Issuer]
+	if len(ac.SigningKeys) > 0 || !strict {
+		a.signingKeys = make(map[string]jwt.Scope)
+	}
 	signersChanged := false
-	if len(ac.SigningKeys) > 0 {
-		// insure copy the new keys and sort
-		a.signingKeys = append(a.signingKeys, ac.SigningKeys...)
-		sort.Strings(a.signingKeys)
+	for k, scope := range ac.SigningKeys {
+		a.signingKeys[k] = scope
+	}
+	if !strict {
+		a.signingKeys[a.Name] = nil
 	}
 	if len(a.signingKeys) != len(old.signingKeys) {
 		signersChanged = true
-	} else {
-		for i := 0; i < len(old.signingKeys); i++ {
-			if a.signingKeys[i] != old.signingKeys[i] {
-				signersChanged = true
-				break
-			}
+	}
+	for k, scope := range a.signingKeys {
+		if oldScope, ok := old.signingKeys[k]; !ok {
+			signersChanged = true
+		} else if !reflect.DeepEqual(scope, oldScope) {
+			signersChanged = true
+			alteredScope[k] = struct{}{}
 		}
 	}
 	a.mu.Unlock()
@@ -2896,10 +2903,22 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 			}
 			if err := a.AddServiceExportWithResponse(string(e.Subject), rt, authAccounts(e.TokenReq)); err != nil {
 				s.Debugf("Error adding service export to account [%s]: %v", a.Name, err)
+				continue
 			}
+			sub := string(e.Subject)
 			if e.Latency != nil {
-				if err := a.TrackServiceExportWithSampling(string(e.Subject), string(e.Latency.Results), e.Latency.Sampling); err != nil {
-					s.Debugf("Error adding latency tracking for service export to account [%s]: %v", a.Name, err)
+				if err := a.TrackServiceExportWithSampling(sub, string(e.Latency.Results), int(e.Latency.Sampling)); err != nil {
+					hdrNote := ""
+					if e.Latency.Sampling == jwt.Headers {
+						hdrNote = " (using headers)"
+					}
+					s.Debugf("Error adding latency tracking%s for service export to account [%s]: %v", hdrNote, a.Name, err)
+				}
+			}
+			if e.ResponseThreshold != 0 {
+				// Response threshold was set in options.
+				if err := a.SetServiceExportResponseThreshold(sub, e.ResponseThreshold); err != nil {
+					s.Debugf("Error adding service export response threshold for [%s]: %v", a.Name, err)
 				}
 			}
 		}
@@ -2930,17 +2949,30 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 			incompleteImports = append(incompleteImports, i)
 			continue
 		}
+		from := string(i.Subject)
+		to := i.GetTo()
 		switch i.Type {
 		case jwt.Stream:
-			s.Debugf("Adding stream import %s:%q for %s:%q", acc.Name, i.Subject, a.Name, i.To)
-			if err := a.AddStreamImportWithClaim(acc, string(i.Subject), string(i.To), i); err != nil {
+			if i.LocalSubject != _EMPTY_ {
+				// set local subject implies to is empty
+				to = string(i.LocalSubject)
+				s.Debugf("Adding stream import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+				err = a.AddMappedStreamImportWithClaim(acc, from, to, i)
+			} else {
+				s.Debugf("Adding stream import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+				err = a.AddStreamImportWithClaim(acc, from, to, i)
+			}
+			if err != nil {
 				s.Debugf("Error adding stream import to account [%s]: %v", a.Name, err.Error())
 				incompleteImports = append(incompleteImports, i)
 			}
 		case jwt.Service:
-			// FIXME(dlc) - need to add in respThresh here eventually.
-			s.Debugf("Adding service import %s:%q for %s:%q", acc.Name, i.Subject, a.Name, i.To)
-			if err := a.AddServiceImportWithClaim(acc, string(i.Subject), string(i.To), i); err != nil {
+			if i.LocalSubject != _EMPTY_ {
+				from = string(i.LocalSubject)
+				to = string(i.Subject)
+			}
+			s.Debugf("Adding service import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+			if err := a.AddServiceImportWithClaim(acc, from, to, i); err != nil {
 				s.Debugf("Error adding service import to account [%s]: %v", a.Name, err.Error())
 				incompleteImports = append(incompleteImports, i)
 			}
@@ -3054,6 +3086,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	if a.srv == nil {
 		a.srv = s
 	}
+
 	if jsEnabled {
 		if ac.Limits.JetStreamLimits.DiskStorage != 0 || ac.Limits.JetStreamLimits.MemoryStorage != 0 {
 			// JetStreamAccountLimits and jwt.JetStreamLimits use same value for unlimited
@@ -3079,6 +3112,8 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 		})
 	}
 
+	// If JetStream is enabled for this server we will call into configJetStream for the account
+	// regardless of enabled or disabled. It handles both cases.
 	if jsEnabled {
 		if err := s.configJetStream(a); err != nil {
 			s.Errorf("Error configuring jetstream for account [%s]: %v", a.Name, err.Error())
@@ -3119,9 +3154,18 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	if signersChanged {
 		for _, c := range clients {
 			c.mu.Lock()
+			if c.user == nil {
+				c.mu.Unlock()
+				continue
+			}
 			sk := c.user.SigningKey
 			c.mu.Unlock()
-			if sk != "" && !a.hasIssuer(sk) {
+			if sk == _EMPTY_ {
+				continue
+			}
+			if _, ok := alteredScope[sk]; ok {
+				c.closeConnection(AuthenticationViolation)
+			} else if _, ok := a.hasIssuer(sk); !ok {
 				c.closeConnection(AuthenticationViolation)
 			}
 		}
@@ -3470,19 +3514,21 @@ func handleDeleteRequest(store *DirJWTStore, s *Server, msg []byte, reply string
 	}
 }
 
-func getOperator(s *Server) (string, error) {
+func getOperator(s *Server) (string, bool, error) {
 	var op string
+	var strict bool
 	if opts := s.getOpts(); opts != nil && len(opts.TrustedOperators) > 0 {
 		op = opts.TrustedOperators[0].Subject
+		strict = opts.TrustedOperators[0].StrictSigningKeyUsage
 	}
 	if op == "" {
-		return "", fmt.Errorf("no operator found")
+		return "", false, fmt.Errorf("no operator found")
 	}
-	return op, nil
+	return op, strict, nil
 }
 
 func (dr *DirAccResolver) Start(s *Server) error {
-	op, err := getOperator(s)
+	op, strict, err := getOperator(s)
 	if err != nil {
 		return err
 	}
@@ -3517,6 +3563,9 @@ func (dr *DirAccResolver) Start(s *Server) error {
 			} else if claim.Subject != pubKey {
 				err := errors.New("subject does not match jwt content")
 				respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
+			} else if claim.Issuer == op && strict {
+				err := errors.New("operator requires issuer to be a signing key")
+				respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
 			} else if err := dr.save(pubKey, string(msg)); err != nil {
 				respondToUpdate(s, resp, pubKey, "jwt update resulted in error", err)
 			} else {
@@ -3529,6 +3578,9 @@ func (dr *DirAccResolver) Start(s *Server) error {
 	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, subj, resp string, msg []byte) {
 		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
 			respondToUpdate(s, resp, "n/a", "jwt update resulted in error", err)
+		} else if claim.Issuer == op && strict {
+			err := errors.New("operator requires issuer to be a signing key")
+			respondToUpdate(s, resp, claim.Subject, "jwt update resulted in error", err)
 		} else if err := dr.save(claim.Subject, string(msg)); err != nil {
 			respondToUpdate(s, resp, claim.Subject, "jwt update resulted in error", err)
 		} else {
@@ -3724,7 +3776,7 @@ func NewCacheDirAccResolver(path string, limit int64, ttl time.Duration, _ ...di
 }
 
 func (dr *CacheDirAccResolver) Start(s *Server) error {
-	op, err := getOperator(s)
+	op, strict, err := getOperator(s)
 	if err != nil {
 		return err
 	}
@@ -3758,6 +3810,9 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 			} else if claim.Subject != pubKey {
 				err := errors.New("subject does not match jwt content")
 				respondToUpdate(s, resp, pubKey, "jwt update cache resulted in error", err)
+			} else if claim.Issuer == op && strict {
+				err := errors.New("operator requires issuer to be a signing key")
+				respondToUpdate(s, resp, pubKey, "jwt update cache resulted in error", err)
 			} else if _, ok := s.accounts.Load(pubKey); !ok {
 				respondToUpdate(s, resp, pubKey, "jwt update cache skipped", nil)
 			} else if err := dr.save(pubKey, string(msg)); err != nil {
@@ -3772,6 +3827,9 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, subj, resp string, msg []byte) {
 		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
 			respondToUpdate(s, resp, "n/a", "jwt update cache resulted in error", err)
+		} else if claim.Issuer == op && strict {
+			err := errors.New("operator requires issuer to be a signing key")
+			respondToUpdate(s, resp, claim.Subject, "jwt update cache resulted in error", err)
 		} else if _, ok := s.accounts.Load(claim.Subject); !ok {
 			respondToUpdate(s, resp, claim.Subject, "jwt update cache skipped", nil)
 		} else if err := dr.save(claim.Subject, string(msg)); err != nil {

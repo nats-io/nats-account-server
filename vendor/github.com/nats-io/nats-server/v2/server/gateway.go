@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -161,6 +160,10 @@ type srvGateway struct {
 	resolver  netResolver   // Used to resolve host name before calling net.Dial()
 	sqbsz     int           // Max buffer size to send queue subs protocol. Used for testing.
 	recSubExp time.Duration // For how long do we check if there is a subscription match for a message with reply
+
+	// These are used for routing of mapped replies.
+	sIDHash        []byte   // Server ID hash (6 bytes)
+	routesIDByHash sync.Map // Route's server ID is hashed (6 bytes) and stored in this map.
 }
 
 // Subject interest tally. Also indicates if the key in the map is a
@@ -273,16 +276,21 @@ func validateGatewayOptions(o *Options) error {
 	return nil
 }
 
-// Computes a hash of 8 characters for the name.
-// This will be used for routing of replies.
-func getHash(name string) []byte {
+// Computes a hash for the given `name`. The result will be `size` characters long.
+func getHashSize(name string, size int) []byte {
 	sha := sha256.New()
 	sha.Write([]byte(name))
 	b := sha.Sum(nil)
-	for i := 0; i < gwHashLen; i++ {
+	for i := 0; i < size; i++ {
 		b[i] = digits[int(b[i]%base)]
 	}
-	return b[:gwHashLen]
+	return b[:size]
+}
+
+// Computes a hash of 6 characters for the name.
+// This will be used for routing of replies.
+func getGWHash(name string) []byte {
+	return getHashSize(name, gwHashLen)
 }
 
 func getOldHash(name string) []byte {
@@ -311,13 +319,13 @@ func (s *Server) newGateway(opts *Options) error {
 	gateway.Lock()
 	defer gateway.Unlock()
 
-	s.hash = getHash(s.info.ID)
-	clusterHash := getHash(opts.Gateway.Name)
+	gateway.sIDHash = getGWHash(s.info.ID)
+	clusterHash := getGWHash(opts.Gateway.Name)
 	prefix := make([]byte, 0, gwSubjectOffset)
 	prefix = append(prefix, gwReplyPrefix...)
 	prefix = append(prefix, clusterHash...)
 	prefix = append(prefix, '.')
-	prefix = append(prefix, s.hash...)
+	prefix = append(prefix, gateway.sIDHash...)
 	prefix = append(prefix, '.')
 	gateway.replyPfx = prefix
 
@@ -341,7 +349,7 @@ func (s *Server) newGateway(opts *Options) error {
 		}
 		cfg := &gatewayCfg{
 			RemoteGatewayOpts: rgo.clone(),
-			hash:              getHash(rgo.Name),
+			hash:              getGWHash(rgo.Name),
 			oldHash:           getOldHash(rgo.Name),
 			urls:              make(map[string]*url.URL, len(rgo.URLs)),
 		}
@@ -368,6 +376,29 @@ func (s *Server) newGateway(opts *Options) error {
 	gateway.enabled = opts.Gateway.Name != "" && opts.Gateway.Port != 0
 	s.gateway = gateway
 	return nil
+}
+
+// Update remote gateways TLS configurations after a config reload.
+func (g *srvGateway) updateRemotesTLSConfig(opts *Options) {
+	g.Lock()
+	defer g.Unlock()
+
+	for _, ro := range opts.Gateway.Gateways {
+		if ro.Name == g.name {
+			continue
+		}
+		if cfg, ok := g.remotes[ro.Name]; ok {
+			cfg.Lock()
+			// If TLS config is in remote, use that one, otherwise,
+			// use the TLS config from the main block.
+			if ro.TLSConfig != nil {
+				cfg.TLSConfig = ro.TLSConfig.Clone()
+			} else if opts.Gateway.TLSConfig != nil {
+				cfg.TLSConfig = opts.Gateway.TLSConfig.Clone()
+			}
+			cfg.Unlock()
+		}
+	}
 }
 
 // Returns the Gateway's name of this server.
@@ -656,7 +687,7 @@ func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
 				s.gateway.Lock()
 				// We could have just accepted an inbound for this remote gateway.
 				// So if there is an inbound, let's try again to connect.
-				if len(s.gateway.in) > 0 {
+				if s.gateway.hasInbound(cfg.Name) {
 					s.gateway.Unlock()
 					continue
 				}
@@ -674,6 +705,20 @@ func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
 	}
 }
 
+// Returns true if there is an inbound for the given `name`.
+// Lock held on entry.
+func (g *srvGateway) hasInbound(name string) bool {
+	for _, ig := range g.in {
+		ig.mu.Lock()
+		igname := ig.gw.name
+		ig.mu.Unlock()
+		if igname == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Called when a gateway connection is either accepted or solicited.
 // If accepted, the gateway is marked as inbound.
 // If solicited, the gateway is marked as outbound.
@@ -687,11 +732,6 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	// Are we creating the gateway based on the configuration
 	solicit := cfg != nil
 	var tlsRequired bool
-	if solicit {
-		tlsRequired = cfg.TLSConfig != nil
-	} else {
-		tlsRequired = opts.Gateway.TLSConfig != nil
-	}
 
 	s.gateway.RLock()
 	infoJSON := s.gateway.infoJSON
@@ -703,86 +743,51 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	c.gw = &gateway{}
 	if solicit {
 		// This is an outbound gateway connection
+		cfg.RLock()
+		tlsRequired = cfg.TLSConfig != nil
+		cfgName := cfg.Name
+		cfg.RUnlock()
 		c.gw.outbound = true
-		c.gw.name = cfg.Name
+		c.gw.name = cfgName
 		c.gw.cfg = cfg
 		cfg.bumpConnAttempts()
 		// Since we are delaying the connect until after receiving
 		// the remote's INFO protocol, save the URL we need to connect to.
 		c.gw.connectURL = url
 
-		c.Noticef("Creating outbound gateway connection to %q", cfg.Name)
+		c.Noticef("Creating outbound gateway connection to %q", cfgName)
 	} else {
 		c.flags.set(expectConnect)
 		// Inbound gateway connection
 		c.Noticef("Processing inbound gateway connection")
+		// Check if TLS is required for inbound GW connections.
+		tlsRequired = opts.Gateway.TLSConfig != nil
 	}
 
 	// Check for TLS
 	if tlsRequired {
-		var host string
+		var tlsConfig *tls.Config
+		var tlsName string
 		var timeout float64
-		// If we solicited, we will act like the client, otherwise the server.
+
 		if solicit {
-			c.Debugf("Starting TLS gateway client handshake")
 			cfg.RLock()
-			tlsName := cfg.tlsName
-			tlsConfig := cfg.TLSConfig.Clone()
+			tlsName = cfg.tlsName
+			tlsConfig = cfg.TLSConfig.Clone()
 			timeout = cfg.TLSTimeout
 			cfg.RUnlock()
-			if tlsConfig.ServerName == "" {
-				// If the given url is a hostname, use this hostname for the
-				// ServerName. If it is an IP, use the cfg's tlsName. If none
-				// is available, resort to current IP.
-				host = url.Hostname()
-				if tlsName != "" && net.ParseIP(host) != nil {
-					host = tlsName
-				}
-				tlsConfig.ServerName = host
-			}
-			c.nc = tls.Client(c.nc, tlsConfig)
 		} else {
-			c.Debugf("Starting TLS gateway server handshake")
-			c.nc = tls.Server(c.nc, opts.Gateway.TLSConfig)
+			tlsConfig = opts.Gateway.TLSConfig
 			timeout = opts.Gateway.TLSTimeout
 		}
 
-		conn := c.nc.(*tls.Conn)
-
-		// Setup the timeout
-		ttl := secondsToDuration(timeout)
-		time.AfterFunc(ttl, func() { tlsTimeout(c, conn) })
-		conn.SetReadDeadline(time.Now().Add(ttl))
-
-		c.mu.Unlock()
-		if err := conn.Handshake(); err != nil {
-			if solicit {
-				// Based on type of error, possibly clear the saved tlsName
-				// See: https://github.com/nats-io/nats-server/issues/1256
-				if _, ok := err.(x509.HostnameError); ok {
-					cfg.Lock()
-					if host == cfg.tlsName {
-						cfg.tlsName = ""
-					}
-					cfg.Unlock()
-				}
+		// Perform (either server or client side) TLS handshake.
+		if resetTLSName, err := c.doTLSHandshake("gateway", solicit, url, tlsConfig, tlsName, timeout); err != nil {
+			if resetTLSName {
+				cfg.Lock()
+				cfg.tlsName = _EMPTY_
+				cfg.Unlock()
 			}
-			c.Errorf("TLS gateway handshake error: %v", err)
-			c.sendErr("Secure Connection - TLS Required")
-			c.closeConnection(TLSHandshakeError)
-			return
-		}
-		// Reset the read deadline
-		conn.SetReadDeadline(time.Time{})
-
-		// Re-Grab lock
-		c.mu.Lock()
-
-		// To be consistent with client, set this flag to indicate that handshake is done
-		c.flags.set(handshakeComplete)
-
-		// Verify that the connection did not go away while we released the lock.
-		if c.isClosed() {
 			c.mu.Unlock()
 			return
 		}
@@ -1292,7 +1297,7 @@ func (s *Server) processImplicitGateway(info *Info) {
 	opts := s.getOpts()
 	cfg = &gatewayCfg{
 		RemoteGatewayOpts: &RemoteGatewayOpts{Name: gwName},
-		hash:              getHash(gwName),
+		hash:              getGWHash(gwName),
 		oldHash:           getOldHash(gwName),
 		urls:              make(map[string]*url.URL, len(info.GatewayURLs)),
 		implicit:          true,
@@ -2613,6 +2618,34 @@ func (s *Server) getRouteByHash(srvHash []byte) *client {
 	return route
 }
 
+// Store this route in map with the key being the remote server's name hash
+// and the remote server's ID hash used by gateway replies mapping routing.
+func (s *Server) storeRouteByHash(srvNameHash, srvIDHash string, c *client) {
+	s.routesByHash.Store(srvNameHash, c)
+	if !s.gateway.enabled {
+		return
+	}
+	s.gateway.routesIDByHash.Store(srvIDHash, c)
+}
+
+// Remove the route with the given keys from the map.
+func (s *Server) removeRouteByHash(srvNameHash, srvIDHash string) {
+	s.routesByHash.Delete(srvNameHash)
+	if !s.gateway.enabled {
+		return
+	}
+	s.gateway.routesIDByHash.Delete(srvIDHash)
+}
+
+// Returns the route with given hash or nil if not found.
+// This is for gateways only.
+func (g *srvGateway) getRouteByHash(hash []byte) *client {
+	if v, ok := g.routesIDByHash.Load(string(hash)); ok {
+		return v.(*client)
+	}
+	return nil
+}
+
 // Returns the subject from the routed reply
 func getSubjectFromGWRoutedReply(reply []byte, isOldPrefix bool) []byte {
 	if isOldPrefix {
@@ -2668,8 +2701,8 @@ func (c *client) handleGatewayReply(msg []byte) (processed bool) {
 	var route *client
 
 	// If the origin is not this server, get the route this should be sent to.
-	if c.kind == GATEWAY && srvHash != nil && !bytes.Equal(srvHash, c.srv.hash) {
-		route = c.srv.getRouteByHash(srvHash)
+	if c.kind == GATEWAY && srvHash != nil && !bytes.Equal(srvHash, c.srv.gateway.sIDHash) {
+		route = c.srv.gateway.getRouteByHash(srvHash)
 		// This will be possibly nil, and in this case we will try to process
 		// the interest from this server.
 	}
