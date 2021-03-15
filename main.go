@@ -47,10 +47,11 @@ func expandPath(p string) string {
 
 func main() {
 	var server *core.AccountServer
-
+	disabledNscFolder := ""
 	flags := core.Flags{}
 	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
+	flag.StringVar(&flags.OperatorJWTPath, "operator", "", "operator JWT path for the operator this account server is set up for")
 	flag.StringVar(&flags.NATSURL, "nats", "", "the NATS server to use for notifications, the default is no notifications")
 	flag.StringVar(&flags.Creds, "creds", "", "the creds file for connecting to NATS")
 	flag.StringVar(&flags.Primary, "primary", "", "the URL for the primary server, in the form http(s)://host:port/")
@@ -58,6 +59,7 @@ func main() {
 	flag.BoolVar(&flags.Verbose, "V", false, "turn on verbose logging")
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
 	flag.StringVar(&flags.HostPort, "hp", "", "http hostport, defaults to localhost:9090")
+	flag.StringVar(&disabledNscFolder, "nsc", "", core.NscError)
 	flag.Parse()
 
 	// resolve paths with dots/tildes
@@ -78,6 +80,10 @@ func main() {
 	server = core.NewAccountServer()
 	if err := server.InitializeFromFlags(flags); err != nil {
 		logStopExit(server, err)
+	}
+
+	if disabledNscFolder != "" {
+		logStopExit(server, fmt.Errorf(core.NscError))
 	}
 
 	go func() {

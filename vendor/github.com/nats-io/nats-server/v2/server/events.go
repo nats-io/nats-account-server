@@ -1,4 +1,4 @@
-// Copyright 2018-2020 The NATS Authors
+// Copyright 2018-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -91,9 +91,11 @@ type internal struct {
 	sendq    chan *pubMsg
 	resetCh  chan struct{}
 	wg       sync.WaitGroup
+	sq       *sendq
 	orphMax  time.Duration
 	chkOrph  time.Duration
 	statsz   time.Duration
+	cstatsz  time.Duration
 	shash    string
 	inboxPre string
 }
@@ -167,12 +169,14 @@ type ClientInfo struct {
 	Host      string        `json:"host,omitempty"`
 	ID        uint64        `json:"id,omitempty"`
 	Account   string        `json:"acc"`
+	Service   string        `json:"svc,omitempty"`
 	User      string        `json:"user,omitempty"`
 	Name      string        `json:"name,omitempty"`
 	Lang      string        `json:"lang,omitempty"`
 	Version   string        `json:"ver,omitempty"`
 	RTT       time.Duration `json:"rtt,omitempty"`
 	Server    string        `json:"server,omitempty"`
+	Cluster   string        `json:"cluster,omitempty"`
 	Stop      *time.Time    `json:"stop,omitempty"`
 	Jwt       string        `json:"jwt,omitempty"`
 	IssuerKey string        `json:"issuer_key,omitempty"`
@@ -263,7 +267,7 @@ RESET:
 	host := s.info.Host
 	servername := s.info.Name
 	seqp := &s.sys.seq
-	js := s.js != nil
+	js := s.info.JetStream
 	cluster := s.info.Cluster
 	if s.gateway.enabled {
 		cluster = s.getGatewayName()
@@ -291,7 +295,7 @@ RESET:
 				pm.si.ID = id
 				pm.si.Seq = atomic.AddUint64(seqp, 1)
 				pm.si.Version = VERSION
-				pm.si.Time = time.Now()
+				pm.si.Time = time.Now().UTC()
 				pm.si.JetStream = js
 			}
 			var b []byte
@@ -302,7 +306,7 @@ RESET:
 				case []byte:
 					b = v
 				default:
-					b, _ = json.MarshalIndent(pm.msg, _EMPTY_, "  ")
+					b, _ = json.Marshal(pm.msg)
 				}
 			}
 
@@ -370,7 +374,8 @@ func (s *Server) sendShutdownEvent() {
 	s.sys.replies = nil
 	s.mu.Unlock()
 	// Send to the internal queue and mark as last.
-	sendq <- &pubMsg{nil, subj, _EMPTY_, nil, nil, true}
+	si := &ServerInfo{}
+	sendq <- &pubMsg{nil, subj, _EMPTY_, si, si, true}
 }
 
 // Used to send an internal message to an arbitrary account.
@@ -387,7 +392,9 @@ func (s *Server) sendInternalAccountMsg(a *Account, subject string, msg interfac
 
 	// Replace our client with the account's internal client.
 	if a != nil {
+		a.mu.Lock()
 		c = a.internalClient()
+		a.mu.Unlock()
 	}
 
 	sendq <- &pubMsg{c, subject, _EMPTY_, nil, msg, false}
@@ -413,6 +420,26 @@ func (s *Server) sendInternalMsg(sub, rply string, si *ServerInfo, msg interface
 	s.mu.Unlock()
 	sendq <- &pubMsg{nil, sub, rply, si, msg, false}
 	s.mu.Lock()
+}
+
+// Used to send internal messages from other system clients to avoid no echo issues.
+func (c *client) sendInternalMsg(sub, rply string, si *ServerInfo, msg interface{}) {
+	if c == nil {
+		return
+	}
+	s := c.srv
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.sys == nil || s.sys.sendq == nil {
+		return
+	}
+	sendq := s.sys.sendq
+	// Don't hold lock while placing on the channel.
+	s.mu.Unlock()
+
+	sendq <- &pubMsg{c, sub, rply, si, msg, false}
 }
 
 // Locked version of checking if events system running. Also checks server.
@@ -558,14 +585,22 @@ func (s *Server) sendStatsz(subj string) {
 // This should be wrapChk() to setup common locking.
 func (s *Server) heartbeatStatsz() {
 	if s.sys.stmr != nil {
-		s.sys.stmr.Reset(s.sys.statsz)
+		// Increase after startup to our max.
+		s.sys.cstatsz *= 4
+		if s.sys.cstatsz > s.sys.statsz {
+			s.sys.cstatsz = s.sys.statsz
+		}
+		s.sys.stmr.Reset(s.sys.cstatsz)
 	}
 	s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
 }
 
 // This should be wrapChk() to setup common locking.
 func (s *Server) startStatszTimer() {
-	s.sys.stmr = time.AfterFunc(s.sys.statsz, s.wrapChk(s.heartbeatStatsz))
+	// We will start by sending out more of these and trail off to the statsz being the max.
+	s.sys.cstatsz = time.Second
+	// Send out the first one only after a second.
+	s.sys.stmr = time.AfterFunc(s.sys.cstatsz, s.wrapChk(s.heartbeatStatsz))
 }
 
 // Start a ticker that will fire periodically and check for orphaned servers.
@@ -625,6 +660,11 @@ func (s *Server) initEventTracking() {
 	if _, err := s.sysSubscribe(accNumSubsReqSubj, s.nsubsRequest); err != nil {
 		s.Errorf("Error setting up internal tracking: %v", err)
 	}
+	// Listen for statsz from others.
+	subject = fmt.Sprintf(serverStatsSubj, "*")
+	if _, err := s.sysSubscribe(subject, s.remoteServerUpdate); err != nil {
+		s.Errorf("Error setting up internal tracking: %v", err)
+	}
 	// Listen for all server shutdowns.
 	subject = fmt.Sprintf(shutdownEventSubj, "*")
 	if _, err := s.sysSubscribe(subject, s.remoteServerShutdown); err != nil {
@@ -676,6 +716,10 @@ func (s *Server) initEventTracking() {
 		"ACCOUNTZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
 			optz := &AccountzEventOptions{}
 			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Accountz(&optz.AccountzOptions) })
+		},
+		"JSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+			optz := &JszEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Jsz(&optz.JSzOptions) })
 		},
 	}
 	for name, req := range monSrvc {
@@ -730,6 +774,17 @@ func (s *Server) initEventTracking() {
 				}
 			})
 		},
+		"JSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+			optz := &JszEventOptions{}
+			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+				if acc, err := extractAccount(subject); err != nil {
+					return nil, err
+				} else {
+					optz.Account = acc
+					return s.JszAccount(&optz.JSzOptions)
+				}
+			})
+		},
 		"INFO": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
 			optz := &AccInfoEventOptions{}
 			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
@@ -773,6 +828,9 @@ func (s *Server) addSystemAccountExports(sacc *Account) {
 	if err := sacc.AddServiceExport(accSubsSubj, nil); err != nil {
 		s.Errorf("Error adding system service export for %q: %v", accSubsSubj, err)
 	}
+	if s.JetStreamEnabled() {
+		s.checkJetStreamExports()
+	}
 }
 
 // accountClaimUpdate will receive claim updates for accounts.
@@ -812,6 +870,16 @@ func (s *Server) processRemoteServerShutdown(sid string) {
 		v.(*Account).removeRemoteServer(sid)
 		return true
 	})
+	// Update any state in nodeInfo.
+	s.nodeToInfo.Range(func(k, v interface{}) bool {
+		si := v.(nodeInfo)
+		if si.id == sid {
+			si.offline = true
+			s.nodeToInfo.Store(k, si)
+			return false
+		}
+		return true
+	})
 }
 
 // remoteServerShutdownEvent is called when we get an event from another server shutting down.
@@ -826,11 +894,43 @@ func (s *Server) remoteServerShutdown(sub *subscription, _ *client, subject, rep
 		s.Debugf("Received remote server shutdown on bad subject %q", subject)
 		return
 	}
+
 	sid := toks[serverSubjectIndex]
-	su := s.sys.servers[sid]
-	if su != nil {
+	if su := s.sys.servers[sid]; su != nil {
 		s.processRemoteServerShutdown(sid)
 	}
+
+	if len(msg) == 0 {
+		return
+	}
+
+	// We have an optional serverInfo here, remove from nodeToX lookups.
+	var si ServerInfo
+	if err := json.Unmarshal(msg, &si); err != nil {
+		s.Debugf("Received bad server info for remote server shutdown")
+		return
+	}
+	// Additional processing here.
+	node := string(getHash(si.Name))
+	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.ID, true})
+}
+
+// remoteServerUpdate listens for statsz updates from other servers.
+func (s *Server) remoteServerUpdate(sub *subscription, _ *client, subject, reply string, msg []byte) {
+	var ssm ServerStatsMsg
+	if err := json.Unmarshal(msg, &ssm); err != nil {
+		s.Debugf("Received bad server info for remote server update")
+		return
+	}
+	si := ssm.Server
+	node := string(getHash(si.Name))
+	if _, ok := s.nodeToInfo.Load(node); !ok {
+		// Since we have not seen this one they probably have not seen us so send out our update.
+		s.mu.Lock()
+		s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
+		s.mu.Unlock()
+	}
+	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.ID, false})
 }
 
 // updateRemoteServer is called when we have an update from a remote server.
@@ -860,7 +960,8 @@ func (s *Server) processNewServer(ms *ServerInfo) {
 	// connect update to make sure they switch this account to interest only mode.
 	s.ensureGWsInterestOnlyForLeafNodes()
 	// Add to our nodeToName
-	s.nodeToName[string(getHash(ms.Name))] = ms.Name
+	node := string(getHash(ms.Name))
+	s.nodeToInfo.Store(node, nodeInfo{ms.Name, ms.Cluster, ms.ID, false})
 }
 
 // If GW is enabled on this server and there are any leaf node connections,
@@ -1032,6 +1133,12 @@ type AccountzEventOptions struct {
 	EventFilterOptions
 }
 
+// In the context of system events, JszEventOptions are options passed to Jsz
+type JszEventOptions struct {
+	JSzOptions
+	EventFilterOptions
+}
+
 // returns true if the request does NOT apply to this server and can be ignored.
 // DO NOT hold the server lock when
 func (s *Server) filterRequest(fOpts *EventFilterOptions) bool {
@@ -1085,6 +1192,8 @@ func (s *Server) statszReq(sub *subscription, _ *client, subject, reply string, 
 	s.mu.Unlock()
 }
 
+var errSkipZreq = errors.New("filtered response")
+
 func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz interface{}, respf func() (interface{}, error)) {
 	if !s.EventsEnabled() || reply == _EMPTY_ {
 		return
@@ -1102,6 +1211,9 @@ func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz 
 	}
 	if err == nil {
 		response["data"], err = respf()
+		if errors.Is(err, errSkipZreq) {
+			return
+		}
 		status = http.StatusInternalServerError
 	}
 	if err != nil {
@@ -1336,7 +1448,7 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 		TypedEvent: TypedEvent{
 			Type: DisconnectEventMsgType,
 			ID:   eid,
-			Time: now.UTC(),
+			Time: now,
 		},
 		Client: ClientInfo{
 			Start:     &c.start,
@@ -1379,13 +1491,13 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 	}
 	eid := s.nextEventID()
 	s.mu.Unlock()
-	now := time.Now()
+	now := time.Now().UTC()
 	c.mu.Lock()
 	m := DisconnectEventMsg{
 		TypedEvent: TypedEvent{
 			Type: DisconnectEventMsgType,
 			ID:   eid,
-			Time: now.UTC(),
+			Time: now,
 		},
 		Client: ClientInfo{
 			Start:     &c.start,
@@ -1473,17 +1585,17 @@ func (s *Server) sysUnsubscribe(sub *subscription) {
 	if sub == nil {
 		return
 	}
-
 	s.mu.Lock()
 	if !s.eventsEnabled() {
 		s.mu.Unlock()
 		return
 	}
-	acc := s.sys.account
-	c := s.sys.client
+	c := sub.client
 	s.mu.Unlock()
 
-	c.unsubscribe(acc, sub, true, true)
+	if c != nil {
+		c.processUnsub(sub.sid)
+	}
 }
 
 // This will generate the tracking subject for remote latency from the response subject.

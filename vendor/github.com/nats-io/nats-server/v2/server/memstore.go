@@ -83,6 +83,10 @@ func (ms *memStore) UpdateConfig(cfg *StreamConfig) error {
 // Stores a raw message with expected sequence number and timestamp.
 // Lock should be held.
 func (ms *memStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts int64) error {
+	if ms.msgs == nil {
+		return ErrStoreClosed
+	}
+
 	// Check if we are discarding new messages when we reach the limit.
 	if ms.cfg.Discard == DiscardNew {
 		if ms.cfg.MaxMsgs > 0 && ms.state.Msgs >= uint64(ms.cfg.MaxMsgs) {
@@ -94,7 +98,10 @@ func (ms *memStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts int
 	}
 
 	if seq != ms.state.LastSeq+1 {
-		return ErrSequenceMismatch
+		if seq > 0 {
+			return ErrSequenceMismatch
+		}
+		seq = ms.state.LastSeq + 1
 	}
 
 	// Adjust first if needed.
@@ -492,6 +499,17 @@ func (ms *memStore) removeMsg(seq uint64, secure bool) bool {
 	return ok
 }
 
+// FastState will fill in state with only the following.
+// Msgs, Bytes, FirstSeq, LastSeq
+func (ms *memStore) FastState(state *StreamState) {
+	ms.mu.RLock()
+	state.Msgs = ms.state.Msgs
+	state.Bytes = ms.state.Bytes
+	state.FirstSeq = ms.state.FirstSeq
+	state.LastSeq = ms.state.LastSeq
+	ms.mu.RUnlock()
+}
+
 func (ms *memStore) State() StreamState {
 	ms.mu.RLock()
 	state := ms.state
@@ -583,5 +601,5 @@ func newTemplateMemStore() *templateMemStore {
 }
 
 // No-ops for memstore.
-func (ts *templateMemStore) Store(t *StreamTemplate) error  { return nil }
-func (ts *templateMemStore) Delete(t *StreamTemplate) error { return nil }
+func (ts *templateMemStore) Store(t *streamTemplate) error  { return nil }
+func (ts *templateMemStore) Delete(t *streamTemplate) error { return nil }

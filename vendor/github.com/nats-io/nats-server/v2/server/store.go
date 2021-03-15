@@ -76,6 +76,7 @@ type StreamStore interface {
 	Truncate(seq uint64) error
 	GetSeqFromTime(t time.Time) uint64
 	State() StreamState
+	FastState(*StreamState)
 	RegisterStorageUpdates(StorageUpdateHandler)
 	UpdateConfig(cfg *StreamConfig) error
 	Delete() error
@@ -91,7 +92,7 @@ const (
 	// LimitsPolicy (default) means that messages are retained until any given limit is reached.
 	// This could be one of MaxMsgs, MaxBytes, or MaxAge.
 	LimitsPolicy RetentionPolicy = iota
-	// InterestPolicy specifies that when all known observables have acknowledged a message it can be removed.
+	// InterestPolicy specifies that when all known consumers have acknowledged a message it can be removed.
 	InterestPolicy
 	// WorkQueuePolicy specifies that when the first worker or subscriber acknowledges the message it can be removed.
 	WorkQueuePolicy
@@ -110,14 +111,21 @@ const (
 
 // StreamState is information about the given stream.
 type StreamState struct {
-	Msgs      uint64    `json:"messages"`
-	Bytes     uint64    `json:"bytes"`
-	FirstSeq  uint64    `json:"first_seq"`
-	FirstTime time.Time `json:"first_ts"`
-	LastSeq   uint64    `json:"last_seq"`
-	LastTime  time.Time `json:"last_ts"`
-	Deleted   []uint64  `json:"deleted,omitempty"`
-	Consumers int       `json:"consumer_count"`
+	Msgs      uint64          `json:"messages"`
+	Bytes     uint64          `json:"bytes"`
+	FirstSeq  uint64          `json:"first_seq"`
+	FirstTime time.Time       `json:"first_ts"`
+	LastSeq   uint64          `json:"last_seq"`
+	LastTime  time.Time       `json:"last_ts"`
+	Deleted   []uint64        `json:"deleted,omitempty"`
+	Lost      *LostStreamData `json:"lost,omitempty"`
+	Consumers int             `json:"consumer_count"`
+}
+
+// LostStreamData indicates msgs that have been lost.
+type LostStreamData struct {
+	Msgs  []uint64 `json:"msgs"`
+	Bytes uint64   `json:"bytes"`
 }
 
 // SnapshotResult contains information about the snapshot.
@@ -165,8 +173,8 @@ type Pending struct {
 
 // TemplateStore stores templates.
 type TemplateStore interface {
-	Store(*StreamTemplate) error
-	Delete(*StreamTemplate) error
+	Store(*streamTemplate) error
+	Delete(*streamTemplate) error
 }
 
 func jsonString(s string) string {
@@ -403,4 +411,8 @@ func (p DeliverPolicy) MarshalJSON() ([]byte, error) {
 	default:
 		return json.Marshal(deliverUndefinedString)
 	}
+}
+
+func isOutOfSpaceErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no space left")
 }

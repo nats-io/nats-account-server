@@ -1,4 +1,4 @@
-// Copyright 2012-2020 The NATS Authors
+// Copyright 2012-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -364,15 +364,20 @@ type MQTTOpts struct {
 	// a client is redelivered as a DUPLICATE if the server has not
 	// received the PUBACK on the original Packet Identifier.
 	// The value has to be positive.
-	// Zero will cause the server to use the default value (1 hour).
+	// Zero will cause the server to use the default value (30 seconds).
 	// Note that changes to this option is applied only to new MQTT subscriptions.
 	AckWait time.Duration
 
 	// MaxAckPending is the amount of QoS 1 messages the server can send to
-	// a session without receiving any PUBACK for those messages.
+	// a subscription without receiving any PUBACK for those messages.
 	// The valid range is [0..65535].
-	// Zero will cause the server to use the default value (1024).
-	// Note that changes to this option is applied only to new MQTT sessions.
+	// The total of subscriptions' MaxAckPending on a given session cannot
+	// exceed 65535. Attempting to create a subscription that would bring
+	// the total above the limit would result in the server returning 0x80
+	// in the SUBACK for this subscription.
+	// Due to how the NATS Server handles the MQTT "#" wildcard, each
+	// subscription ending with "#" will use 2 times the MaxAckPending value.
+	// Note that changes to this option is applied only to new subscriptions.
 	MaxAckPending uint16
 }
 
@@ -1941,6 +1946,7 @@ type export struct {
 	rt   ServiceRespType
 	lat  *serviceLatency
 	rthr time.Duration
+	tPos uint
 }
 
 type importStream struct {
@@ -2017,7 +2023,7 @@ func parseAccountMapDest(v interface{}, tk token, errors *[]error, warnings *[]e
 				return nil, err
 			}
 		case "cluster":
-			mdest.OptCluster = dmv.(string)
+			mdest.Cluster = dmv.(string)
 		default:
 			err := &configErr{tk, fmt.Sprintf("Unknown field %q for mapping destination", k)}
 			*errors = append(*errors, err)
@@ -2278,7 +2284,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			}
 			accounts = append(accounts, ta)
 		}
-		if err := stream.acc.AddStreamExport(stream.sub, accounts); err != nil {
+		if err := stream.acc.addStreamExportWithAccountPos(stream.sub, accounts, stream.tPos); err != nil {
 			msg := fmt.Sprintf("Error adding stream export %q: %v", stream.sub, err)
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
@@ -2296,7 +2302,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			}
 			accounts = append(accounts, ta)
 		}
-		if err := service.acc.AddServiceExportWithResponse(service.sub, service.rt, accounts); err != nil {
+		if err := service.acc.addServiceExportWithResponseAndAccountPos(service.sub, service.rt, accounts, service.tPos); err != nil {
 			msg := fmt.Sprintf("Error adding service export %q: %v", service.sub, err)
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
@@ -2497,6 +2503,7 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 		thresh     time.Duration
 		latToken   token
 		lt         token
+		accTokPos  uint
 	)
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -2645,6 +2652,8 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			if curService != nil {
 				curService.lat = lat
 			}
+		case "account_token_position":
+			accTokPos = uint(mv.(int64))
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2656,6 +2665,12 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 			}
 		}
+	}
+	if curStream != nil {
+		curStream.tPos = accTokPos
+	}
+	if curService != nil {
+		curService.tPos = accTokPos
 	}
 	return curStream, curService, nil
 }

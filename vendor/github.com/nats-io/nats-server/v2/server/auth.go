@@ -500,13 +500,15 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			// but we set it here to be able to identify it in the logs.
 			c.opts.Username = user.Username
 		} else {
-			if c.kind == CLIENT && c.opts.Username == "" && noAuthUser != "" {
+			if c.kind == CLIENT && c.opts.Username == _EMPTY_ && noAuthUser != _EMPTY_ {
 				if u, exists := s.users[noAuthUser]; exists {
+					c.mu.Lock()
 					c.opts.Username = u.Username
 					c.opts.Password = u.Password
+					c.mu.Unlock()
 				}
 			}
-			if c.opts.Username != "" {
+			if c.opts.Username != _EMPTY_ {
 				user, ok = s.users[c.opts.Username]
 				if !ok || !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
 					s.mu.Unlock()
@@ -1013,7 +1015,7 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 }
 
 // Support for bcrypt stored passwords and tokens.
-var validBcryptPrefix = regexp.MustCompile(`^\$2[a,b,x,y]{1}\$\d{2}\$.*`)
+var validBcryptPrefix = regexp.MustCompile(`^\$2[abxy]\$\d{2}\$.*`)
 
 // isBcrypt checks whether the given password or token is bcrypted.
 func isBcrypt(password string) bool {
