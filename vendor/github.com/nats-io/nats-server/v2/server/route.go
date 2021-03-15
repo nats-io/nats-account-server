@@ -1416,7 +1416,7 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 	if !exists {
 		s.routes[c.cid] = c
 		s.remotes[id] = c
-		s.nodeToName[c.route.hash] = c.route.remoteName
+		s.nodeToInfo.Store(c.route.hash, nodeInfo{c.route.remoteName, s.info.Cluster, id, false})
 		c.mu.Lock()
 		c.route.connectURLs = info.ClientConnectURLs
 		c.route.wsConnURLs = info.WSConnectURLs
@@ -1917,6 +1917,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 		return ErrWrongGateway
 	}
 	var perms *RoutePermissions
+	//TODO this check indicates srv may be nil. see srv usage below
 	if srv != nil {
 		perms = srv.getOpts().Cluster.Permissions
 	}
@@ -1939,7 +1940,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 			}
 		}
 		if shouldReject {
-			errTxt := fmt.Sprintf("Rejecting connection, cluster name %q does not match %q", proto.Cluster, srv.info.Cluster)
+			errTxt := fmt.Sprintf("Rejecting connection, cluster name %q does not match %q", proto.Cluster, clusterName)
 			c.Errorf(errTxt)
 			c.sendErr(errTxt)
 			c.closeConnection(ClusterNameConflict)

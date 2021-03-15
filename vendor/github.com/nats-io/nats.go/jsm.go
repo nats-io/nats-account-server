@@ -17,22 +17,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
 
 // JetStreamManager is the public interface for managing JetStream streams & consumers.
 type JetStreamManager interface {
-	// Create a stream.
+	// AddStream creates a stream.
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
 
-	// Update a stream.
+	// UpdateStream updates a stream.
 	UpdateStream(cfg *StreamConfig) (*StreamInfo, error)
 
-	// Delete a stream.
+	// DeleteStream deletes a stream.
 	DeleteStream(name string) error
 
-	// Stream information.
+	// StreamInfo retrieves information from a stream.
 	StreamInfo(stream string) (*StreamInfo, error)
 
 	// Purge stream messages.
@@ -41,16 +42,19 @@ type JetStreamManager interface {
 	// NewStreamLister is used to return pages of StreamInfo objects.
 	NewStreamLister() *StreamLister
 
-	// DeleteMsg erases a message from a Stream.
+	// GetMsg retrieves a raw stream message stored in JetStream by sequence number.
+	GetMsg(name string, seq uint64) (*RawStreamMsg, error)
+
+	// DeleteMsg erases a message from a stream.
 	DeleteMsg(name string, seq uint64) error
 
-	// Create a consumer.
+	// AddConsumer adds a consumer to a stream.
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 
-	// Delete a consumer.
+	// DeleteConsumer deletes a consumer.
 	DeleteConsumer(stream, consumer string) error
 
-	// Consumer information.
+	// ConsumerInfo retrieves consumer information.
 	ConsumerInfo(stream, name string) (*ConsumerInfo, error)
 
 	// NewConsumerLister is used to return pages of ConsumerInfo objects.
@@ -78,6 +82,23 @@ type StreamConfig struct {
 	NoAck        bool            `json:"no_ack,omitempty"`
 	Template     string          `json:"template_owner,omitempty"`
 	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
+	Placement    *Placement      `json:"placement,omitempty"`
+	Mirror       *StreamSource   `json:"mirror,omitempty"`
+	Sources      []*StreamSource `json:"sources,omitempty"`
+}
+
+// Placement is used to guide placement of streams in clustered JetStream.
+type Placement struct {
+	Cluster string   `json:"cluster"`
+	Tags    []string `json:"tags,omitempty"`
+}
+
+// StreamSource dictates how streams can source from other streams.
+type StreamSource struct {
+	Name          string     `json:"name"`
+	OptStartSeq   uint64     `json:"opt_start_seq,omitempty"`
+	OptStartTime  *time.Time `json:"opt_start_time,omitempty"`
+	FilterSubject string     `json:"filter_subject,omitempty"`
 }
 
 // apiError is included in all API responses if there was an error.
@@ -107,10 +128,18 @@ type apiPagedRequest struct {
 
 // AccountInfo contains info about the JetStream usage from the current account.
 type AccountInfo struct {
-	Memory  uint64        `json:"memory"`
-	Store   uint64        `json:"storage"`
-	Streams int           `json:"streams"`
-	Limits  AccountLimits `json:"limits"`
+	Memory    uint64        `json:"memory"`
+	Store     uint64        `json:"storage"`
+	Streams   int           `json:"streams"`
+	Consumers int           `json:"consumers"`
+	API       APIStats      `json:"api"`
+	Limits    AccountLimits `json:"limits"`
+}
+
+// APIStats reports on API calls to JetStream for this account.
+type APIStats struct {
+	Total  uint64 `json:"total"`
+	Errors uint64 `json:"errors"`
 }
 
 // AccountLimits includes the JetStream limits of the current account.
@@ -204,12 +233,12 @@ type consumerDeleteResponse struct {
 }
 
 // DeleteConsumer deletes a Consumer.
-func (js *js) DeleteConsumer(stream, durable string) error {
+func (js *js) DeleteConsumer(stream, consumer string) error {
 	if stream == _EMPTY_ {
 		return ErrStreamNameRequired
 	}
 
-	dcSubj := js.apiSubj(fmt.Sprintf(apiConsumerDeleteT, stream, durable))
+	dcSubj := js.apiSubj(fmt.Sprintf(apiConsumerDeleteT, stream, consumer))
 	r, err := js.nc.Request(dcSubj, nil, js.wait)
 	if err != nil {
 		return err
@@ -225,8 +254,8 @@ func (js *js) DeleteConsumer(stream, durable string) error {
 }
 
 // ConsumerInfo returns information about a Consumer.
-func (js *js) ConsumerInfo(stream, durable string) (*ConsumerInfo, error) {
-	return js.getConsumerInfo(stream, durable)
+func (js *js) ConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
+	return js.getConsumerInfo(stream, consumer)
 }
 
 // ConsumerLister fetches pages of ConsumerInfo objects. This object is not
@@ -361,13 +390,22 @@ func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
 
 // StreamInfo shows config and current state for this stream.
 type StreamInfo struct {
-	Config  StreamConfig `json:"config"`
-	Created time.Time    `json:"created"`
-	State   StreamState  `json:"state"`
-	Cluster *ClusterInfo `json:"cluster,omitempty"`
+	Config  StreamConfig        `json:"config"`
+	Created time.Time           `json:"created"`
+	State   StreamState         `json:"state"`
+	Cluster *ClusterInfo        `json:"cluster,omitempty"`
+	Mirror  *StreamSourceInfo   `json:"mirror,omitempty"`
+	Sources []*StreamSourceInfo `json:"sources,omitempty"`
 }
 
-// StreamStats is information about the given stream.
+// StreamSourceInfo shows information about an upstream stream source.
+type StreamSourceInfo struct {
+	Name   string        `json:"name"`
+	Lag    uint64        `json:"lag"`
+	Active time.Duration `json:"active"`
+}
+
+// StreamState is information about the given stream.
 type StreamState struct {
 	Msgs      uint64    `json:"messages"`
 	Bytes     uint64    `json:"bytes"`
@@ -391,7 +429,9 @@ type ClusterInfo struct {
 type PeerInfo struct {
 	Name    string        `json:"name"`
 	Current bool          `json:"current"`
+	Offline bool          `json:"offline,omitempty"`
 	Active  time.Duration `json:"active"`
+	Lag     uint64        `json:"lag,omitempty"`
 }
 
 // UpdateStream updates a Stream.
@@ -445,6 +485,79 @@ func (js *js) DeleteStream(name string) error {
 		return errors.New(resp.Error.Description)
 	}
 	return nil
+}
+
+type apiMsgGetRequest struct {
+	Seq uint64 `json:"seq"`
+}
+
+// RawStreamMsg is a raw message stored in JetStream.
+type RawStreamMsg struct {
+	Subject  string
+	Sequence uint64
+	Header   http.Header
+	Data     []byte
+	Time     time.Time
+}
+
+// storedMsg is a raw message stored in JetStream.
+type storedMsg struct {
+	Subject  string    `json:"subject"`
+	Sequence uint64    `json:"seq"`
+	Header   []byte    `json:"hdrs,omitempty"`
+	Data     []byte    `json:"data,omitempty"`
+	Time     time.Time `json:"time"`
+}
+
+// apiMsgGetResponse is the response for a Stream get request.
+type apiMsgGetResponse struct {
+	apiResponse
+	Message *storedMsg `json:"message,omitempty"`
+	Success bool       `json:"success,omitempty"`
+}
+
+// GetMsg retrieves a raw stream message stored in JetStream by sequence number.
+func (js *js) GetMsg(name string, seq uint64) (*RawStreamMsg, error) {
+	if name == _EMPTY_ {
+		return nil, ErrStreamNameRequired
+	}
+
+	req, err := json.Marshal(&apiMsgGetRequest{Seq: seq})
+	if err != nil {
+		return nil, err
+	}
+
+	dsSubj := js.apiSubj(fmt.Sprintf(apiMsgGetT, name))
+	r, err := js.nc.Request(dsSubj, req, js.wait)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp apiMsgGetResponse
+	if err := json.Unmarshal(r.Data, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, errors.New(resp.Error.Description)
+	}
+
+	msg := resp.Message
+
+	var hdr http.Header
+	if msg.Header != nil {
+		hdr, err = decodeHeadersMsg(msg.Header)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &RawStreamMsg{
+		Subject:  msg.Subject,
+		Sequence: msg.Sequence,
+		Header:   hdr,
+		Data:     msg.Data,
+		Time:     msg.Time,
+	}, nil
 }
 
 type msgDeleteRequest struct {

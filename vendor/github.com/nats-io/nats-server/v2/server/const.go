@@ -29,6 +29,7 @@ const (
 
 	// private for now
 	commandLDMode = Command("ldm")
+	commandTerm   = Command("term")
 )
 
 var (
@@ -40,7 +41,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.2.0-beta.64"
+	VERSION = "2.2.0"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original

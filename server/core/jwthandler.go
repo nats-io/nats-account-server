@@ -77,6 +77,9 @@ func (h *JwtHandler) Initialize(opJWT []byte, sysAccJWT []byte, jwtStore store.J
 		}
 		h.sysAccJWT = string(sysAccJWT)
 		h.sysAccSubject = accClaim.Subject
+
+		h.logger.Noticef("System Account: %s", accClaim.Name)
+		h.logger.Noticef("System Account Name: %s", accClaim.Subject)
 	}
 
 	if len(opJWT) > 0 {
@@ -94,6 +97,16 @@ func (h *JwtHandler) Initialize(opJWT []byte, sysAccJWT []byte, jwtStore store.J
 		h.operatorSubject = operatorJWT.Subject
 		h.trustedKeys = keys
 		h.operatorJWT = string(opJWT)
+
+		h.logger.Noticef("Operator: %s", operatorJWT.Subject)
+		h.logger.Noticef("Operator Name: %s", operatorJWT.Name)
+
+		if h.sysAccSubject != "" && operatorJWT.SystemAccount != "" && h.sysAccSubject != operatorJWT.SystemAccount {
+			return fmt.Errorf("the Operator System Account %s differs from configured System Account %s",
+				h.sysAccSubject, operatorJWT.SystemAccount)
+		}
+	} else {
+		h.logger.Noticef("No Operator is configured - You will NOT be able to push jwt to this account server")
 	}
 	return nil
 }

@@ -223,7 +223,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 	c := &Connz{
 		Offset: offset,
 		Limit:  limit,
-		Now:    time.Now(),
+		Now:    time.Now().UTC(),
 	}
 
 	// Open clients
@@ -678,7 +678,7 @@ type RouteInfo struct {
 // Routez returns a Routez struct containing information about routes.
 func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 	rs := &Routez{Routes: []*RouteInfo{}}
-	rs.Now = time.Now()
+	rs.Now = time.Now().UTC()
 
 	if routezOpts == nil {
 		routezOpts = &RoutezOptions{}
@@ -859,7 +859,7 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 	slStats := &SublistStats{}
 
 	// FIXME(dlc) - Make account aware.
-	sz := &Subsz{s.info.ID, time.Now(), slStats, 0, offset, limit, nil}
+	sz := &Subsz{s.info.ID, time.Now().UTC(), slStats, 0, offset, limit, nil}
 
 	if subdetail {
 		var raw [4096]*subscription
@@ -1047,14 +1047,13 @@ type Varz struct {
 	Tags                  jwt.TagList           `json:"tags,omitempty"`
 	TrustedOperatorsJwt   []string              `json:"trusted_operators_jwt,omitempty"`
 	TrustedOperatorsClaim []*jwt.OperatorClaims `json:"trusted_operators_claim,omitempty"`
+	SystemAccount         string                `json:"system_account,omitempty"`
 }
 
 // JetStreamVarz contains basic runtime information about jetstream
 type JetStreamVarz struct {
-	MaxMemory int64  `json:"max_memory,omitempty"`
-	MaxStore  int64  `json:"max_store,omitempty"`
-	StoreDir  string `json:"store_dir,omitempty"`
-	Accounts  int    `json:"accounts,omitempty"`
+	Config JetStreamConfig `json:"config"`
+	Stats  *JetStreamStats `json:"stats"`
 }
 
 // ClusterOptsVarz contains monitoring cluster information
@@ -1164,6 +1163,7 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	<a href=.%s>leafz</a><br/>
 	<a href=.%s>subsz</a><br/>
 	<a href=.%s>accountz</a><br/>
+	<a href=.%s>jsz</a><br/>
     <br/>
     <a href=https://docs.nats.io/nats-server/configuration/monitoring.html>help</a>
   </body>
@@ -1175,6 +1175,7 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 		s.basePath(LeafzPath),
 		s.basePath(SubszPath),
 		s.basePath(AccountzPath),
+		s.basePath(JszPath),
 	)
 }
 
@@ -1288,9 +1289,7 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	if s.js != nil {
 		s.js.mu.RLock()
 		varz.JetStream = JetStreamVarz{
-			MaxMemory: s.js.config.MaxMemory,
-			MaxStore:  s.js.config.MaxStore,
-			StoreDir:  s.js.config.StoreDir,
+			Config: s.js.config,
 		}
 		s.js.mu.RUnlock()
 	}
@@ -1338,6 +1337,9 @@ func (s *Server) updateVarzConfigReloadableFields(v *Varz) {
 		v.Cluster.URLs = urlsToStrings(opts.Routes)
 		s.varzUpdateRouteURLs = false
 	}
+	if s.sys != nil && s.sys.account != nil {
+		v.SystemAccount = s.sys.account.GetName()
+	}
 }
 
 // Updates the runtime Varz fields, that is, fields that change during
@@ -1345,7 +1347,7 @@ func (s *Server) updateVarzConfigReloadableFields(v *Varz) {
 // is done.
 // Server lock is held on entry.
 func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64, rss int64) {
-	v.Now = time.Now()
+	v.Now = time.Now().UTC()
 	v.Uptime = myUptime(time.Since(s.start))
 	v.Mem = rss
 	v.CPU = pcpu
@@ -1403,9 +1405,10 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	gw.RUnlock()
 
 	if s.js != nil {
-		s.js.mu.RLock()
-		v.JetStream.Accounts = len(s.js.accounts)
-		s.js.mu.RUnlock()
+		// FIXME(dlc) - We have lock inversion that needs to be fixed up properly.
+		s.mu.Unlock()
+		v.JetStream.Stats = s.js.usageStats()
+		s.mu.Lock()
 	}
 }
 
@@ -1491,7 +1494,7 @@ type AccountGatewayz struct {
 // Gatewayz returns a Gatewayz struct containing information about gateways.
 func (s *Server) Gatewayz(opts *GatewayzOptions) (*Gatewayz, error) {
 	srvID := s.ID()
-	now := time.Now()
+	now := time.Now().UTC()
 	gw := s.gateway
 	gw.RLock()
 	if !gw.enabled {
@@ -1837,7 +1840,7 @@ func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
 	}
 	return &Leafz{
 		ID:       s.ID(),
-		Now:      time.Now(),
+		Now:      time.Now().UTC(),
 		NumLeafs: len(leafnodes),
 		Leafs:    leafnodes,
 	}, nil
@@ -1995,6 +1998,7 @@ type ExtMap map[string][]*MapDest
 type AccountInfo struct {
 	AccountName string               `json:"account_name"`
 	LastUpdate  time.Time            `json:"update_time,omitempty"`
+	IsSystem    bool                 `json:"is_system,omitempty"`
 	Expired     bool                 `json:"expired"`
 	Complete    bool                 `json:"complete"`
 	JetStream   bool                 `json:"jetstream_enabled"`
@@ -2017,10 +2021,11 @@ type AccountInfo struct {
 }
 
 type Accountz struct {
-	ID       string       `json:"server_id"`
-	Now      time.Time    `json:"now"`
-	Accounts []string     `json:"accounts,omitempty"`
-	Account  *AccountInfo `json:"account_detail,omitempty"`
+	ID            string       `json:"server_id"`
+	Now           time.Time    `json:"now"`
+	SystemAccount string       `json:"system_account,omitempty"`
+	Accounts      []string     `json:"accounts,omitempty"`
+	Account       *AccountInfo `json:"account_detail,omitempty"`
 }
 
 // HandleAccountz process HTTP requests for account information.
@@ -2043,7 +2048,10 @@ func (s *Server) HandleAccountz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Accountz(optz *AccountzOptions) (*Accountz, error) {
 	a := &Accountz{
 		ID:  s.ID(),
-		Now: time.Now(),
+		Now: time.Now().UTC(),
+	}
+	if sacc := s.SystemAccount(); sacc != nil {
+		a.SystemAccount = sacc.GetName()
 	}
 	if optz.Account == "" {
 		a.Accounts = []string{}
@@ -2092,6 +2100,7 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 	} else {
 		a = v.(*Account)
 	}
+	isSys := a == s.SystemAccount()
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	var vrIssues []ExtVrIssues
@@ -2148,10 +2157,10 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 		if v != nil {
 			imp.Invalid = v.invalid
 			imp.Import = jwt.Import{
-				Subject: jwt.Subject(v.from),
-				Account: v.acc.Name,
-				Type:    jwt.Stream,
-				To:      jwt.Subject(v.to),
+				Subject:      jwt.Subject(v.from),
+				Account:      v.acc.Name,
+				Type:         jwt.Stream,
+				LocalSubject: jwt.RenamingSubject(v.to),
 			}
 		}
 		imports = append(imports, imp)
@@ -2196,6 +2205,7 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 	return &AccountInfo{
 		accName,
 		a.updated,
+		isSys,
 		a.expired,
 		!a.incomplete,
 		a.js != nil,
@@ -2216,4 +2226,304 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 		a.sl.Stats(),
 		responses,
 	}, nil
+}
+
+// JSzOptions are options passed to Jsz
+type JSzOptions struct {
+	Account    string `json:"account,omitempty"`
+	Accounts   bool   `json:"accounts,omitempty"`
+	Streams    bool   `json:"streams,omitempty"`
+	Consumer   bool   `json:"consumer,omitempty"`
+	Config     bool   `json:"config,omitempty"`
+	LeaderOnly bool   `json:"leader_only,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
+type StreamDetail struct {
+	Name     string          `json:"name"`
+	Cluster  *ClusterInfo    `json:"cluster,omitempty"`
+	Config   *StreamConfig   `json:"config,omitempty"`
+	State    StreamState     `json:"state,omitempty"`
+	Consumer []*ConsumerInfo `json:"consumer_detail,omitempty"`
+}
+
+type AccountDetail struct {
+	Name string `json:"name"`
+	Id   string `json:"id"`
+	JetStreamStats
+	Streams []StreamDetail `json:"stream_detail,omitempty"`
+}
+
+// LeafInfo has detailed information on each remote leafnode connection.
+type JSInfo struct {
+	ID       string          `json:"server_id"`
+	Now      time.Time       `json:"now"`
+	Disabled bool            `json:"disabled,omitempty"`
+	Config   JetStreamConfig `json:"config,omitempty"`
+	JetStreamStats
+	APICalls  int64        `json:"current_api_calls"`
+	Streams   int          `json:"total_streams,omitempty"`
+	Consumers int          `json:"total_consumers,omitempty"`
+	Messages  uint64       `json:"total_messages,omitempty"`
+	Bytes     uint64       `json:"total_message_bytes,omitempty"`
+	Meta      *ClusterInfo `json:"meta_cluster,omitempty"`
+	// aggregate raft info
+	AccountDetails []*AccountDetail `json:"account_details,omitempty"`
+}
+
+func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optCfg bool) *AccountDetail {
+	jsa.mu.RLock()
+	acc := jsa.account
+	name := acc.GetName()
+	id := name
+	if acc.nameTag != "" {
+		name = acc.nameTag
+	}
+	detail := AccountDetail{
+		Name: name,
+		Id:   id,
+		JetStreamStats: JetStreamStats{
+			Memory: uint64(jsa.memTotal),
+			Store:  uint64(jsa.storeTotal),
+			API: JetStreamAPIStats{
+				Total:  jsa.apiTotal,
+				Errors: jsa.apiErrors,
+			},
+		},
+		Streams: make([]StreamDetail, 0, len(jsa.streams)),
+	}
+	var streams []*stream
+	if optStreams {
+		for _, stream := range jsa.streams {
+			streams = append(streams, stream)
+		}
+	}
+	jsa.mu.RUnlock()
+
+	if optStreams {
+		for _, stream := range streams {
+			ci := s.js.clusterInfo(stream.raftGroup())
+			var cfg *StreamConfig
+			if optCfg {
+				c := stream.config()
+				cfg = &c
+			}
+			sdet := StreamDetail{
+				Name:    stream.name(),
+				State:   stream.state(),
+				Cluster: ci,
+				Config:  cfg,
+			}
+			if optConsumers {
+				for _, consumer := range stream.getConsumers() {
+					cInfo := consumer.info()
+					if !optCfg {
+						cInfo.Config = nil
+					}
+					sdet.Consumer = append(sdet.Consumer, cInfo)
+				}
+			}
+			detail.Streams = append(detail.Streams, sdet)
+		}
+	}
+	return &detail
+}
+
+func (s *Server) JszAccount(opts *JSzOptions) (*AccountDetail, error) {
+	if s.js == nil {
+		return nil, fmt.Errorf("jetstream not enabled")
+	}
+	acc := opts.Account
+	account, ok := s.accounts.Load(acc)
+	if !ok {
+		return nil, fmt.Errorf("account %q not found", acc)
+	}
+	s.js.mu.RLock()
+	jsa, ok := s.js.accounts[account.(*Account)]
+	s.js.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("account %q not jetstream enabled", acc)
+	}
+	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.Config), nil
+}
+
+// Leafz returns a Leafz structure containing information about leafnodes.
+func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
+	// set option defaults
+	if opts == nil {
+		opts = &JSzOptions{}
+	}
+	if opts.Limit == 0 {
+		opts.Limit = 1024
+	}
+	if opts.Consumer {
+		opts.Streams = true
+	}
+	if opts.Streams {
+		opts.Accounts = true
+	}
+
+	// Check if we want a response from the leader only.
+	if opts.LeaderOnly {
+		js, cc := s.getJetStreamCluster()
+		if js == nil {
+			// Ignore
+			return nil, fmt.Errorf("%w: no cluster", errSkipZreq)
+		}
+		// So if we have JS but no clustering, we are the leader so allow.
+		if cc != nil {
+			js.mu.RLock()
+			isLeader := cc.isLeader()
+			js.mu.RUnlock()
+			if !isLeader {
+				return nil, fmt.Errorf("%w: not leader", errSkipZreq)
+			}
+		}
+	}
+
+	// helper to get cluster info from node via dummy group
+	toClusterInfo := func(node RaftNode) *ClusterInfo {
+		if node == nil {
+			return nil
+		}
+		peers := node.Peers()
+		peerList := make([]string, len(peers))
+		for i, p := range node.Peers() {
+			peerList[i] = p.ID
+		}
+		group := &raftGroup{
+			Name:  "",
+			Peers: peerList,
+			node:  node,
+		}
+		return s.js.clusterInfo(group)
+	}
+	jsi := &JSInfo{
+		ID:  s.ID(),
+		Now: time.Now().UTC(),
+	}
+	if !s.JetStreamEnabled() {
+		jsi.Disabled = true
+		return jsi, nil
+	}
+	accounts := []*jsAccount{}
+
+	s.js.mu.RLock()
+	jsi.Config = s.js.config
+	for _, info := range s.js.accounts {
+		accounts = append(accounts, info)
+	}
+	jsi.APICalls = atomic.LoadInt64(&s.js.apiCalls)
+	s.js.mu.RUnlock()
+
+	jsi.Meta = toClusterInfo(s.js.getMetaGroup())
+	filterIdx := -1
+	for i, jsa := range accounts {
+		if jsa.acc().GetName() == opts.Account {
+			filterIdx = i
+		}
+		jsa.mu.RLock()
+		jsi.Streams += len(jsa.streams)
+		jsi.Memory += uint64(jsa.usage.mem)
+		jsi.Store += uint64(jsa.usage.store)
+		jsi.API.Total += jsa.usage.api
+		jsi.API.Errors += jsa.usage.err
+		for _, stream := range jsa.streams {
+			streamState := stream.state()
+			jsi.Messages += streamState.Msgs
+			jsi.Bytes += streamState.Bytes
+			jsi.Consumers += streamState.Consumers
+		}
+		jsa.mu.RUnlock()
+	}
+
+	// filter logic
+	if filterIdx != -1 {
+		accounts = []*jsAccount{accounts[filterIdx]}
+	} else if opts.Accounts {
+		if opts.Offset != 0 {
+			sort.Slice(accounts, func(i, j int) bool {
+				return strings.Compare(accounts[i].acc().Name, accounts[j].acc().Name) < 0
+			})
+			if opts.Offset > len(accounts) {
+				accounts = []*jsAccount{}
+			} else {
+				accounts = accounts[opts.Offset:]
+			}
+		}
+		if opts.Limit != 0 {
+			if opts.Limit < len(accounts) {
+				accounts = accounts[:opts.Limit]
+			}
+		}
+	} else {
+		accounts = []*jsAccount{}
+	}
+	if len(accounts) > 0 {
+		jsi.AccountDetails = make([]*AccountDetail, 0, len(accounts))
+	}
+	// if wanted, obtain accounts/streams/consumer
+	for _, jsa := range accounts {
+		detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.Config)
+		jsi.AccountDetails = append(jsi.AccountDetails, detail)
+	}
+	return jsi, nil
+}
+
+// HandleJSz process HTTP requests for jetstream information.
+func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.httpReqStats[JszPath]++
+	s.mu.Unlock()
+	accounts, err := decodeBool(w, r, "accounts")
+	if err != nil {
+		return
+	}
+	streams, err := decodeBool(w, r, "streams")
+	if err != nil {
+		return
+	}
+	consumers, err := decodeBool(w, r, "consumers")
+	if err != nil {
+		return
+	}
+	config, err := decodeBool(w, r, "config")
+	if err != nil {
+		return
+	}
+	offset, err := decodeInt(w, r, "offset")
+	if err != nil {
+		return
+	}
+	limit, err := decodeInt(w, r, "limit")
+	if err != nil {
+		return
+	}
+	leader, err := decodeBool(w, r, "leader-only")
+	if err != nil {
+		return
+	}
+
+	l, err := s.Jsz(&JSzOptions{
+		r.URL.Query().Get("acc"),
+		accounts,
+		streams,
+		consumers,
+		config,
+		leader,
+		offset,
+		limit})
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	b, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		s.Errorf("Error marshaling response to /leafz request: %v", err)
+	}
+
+	// Handle response
+	ResponseHandler(w, r, b)
 }

@@ -7,8 +7,9 @@ type Flags struct {
 
 	Directory string
 
-	NATSURL string
-	Creds   string
+	OperatorJWTPath string
+	NATSURL         string
+	Creds           string
 
 	Debug           bool
 	Verbose         bool

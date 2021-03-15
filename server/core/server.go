@@ -138,6 +138,10 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 		server.config.Logging.Trace = true
 	}
 
+	if flags.OperatorJWTPath != "" {
+		server.config.OperatorJWTPath = flags.OperatorJWTPath
+	}
+
 	if flags.HostPort != "" {
 		h, p, err := net.SplitHostPort(flags.HostPort)
 		if err != nil {
@@ -272,8 +276,15 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 	}
 }
 
+const NscError = `support for direct access of the nsc folder has been removed
+use a dedicated store directory and specify the operator jwt path
+synchronize using: nsc push --all --account-jwt-server-url <account-server-host-port>/jwt/v1`
+
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
+	if config.NSC != "" {
+		return nil, fmt.Errorf(NscError)
+	}
 	if config.Dir == "" {
 		return nil, fmt.Errorf("store directory is required")
 	}
