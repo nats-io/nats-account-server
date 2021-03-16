@@ -31,26 +31,15 @@ builds:
 
   lang: go
 
-archive:
-  wrap_in_directory: true
-  name_template: '{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if .Arm
+archives:
+  - id: nats-account-server
+    wrap_in_directory: true
+    name_template: '{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if .Arm
     }}v{{ .Arm }}{{ end }}'
-  format: zip
-  files:
-  - LICENSE
-  - README.md
-
-nfpm:
-  formats:
-    - deb
-  name_template: '{{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ if .Arm
-    }}v{{ .Arm }}{{ end }}'
-  bindir: /usr/local/bin
-  description: NATS Account Server
-  vendor: nats.io
-  maintainer: Stephen Asbury <sasbury@synadia.com>
-  homepage: https://nats.io
-  license: Apache 2.0
+    format: zip
+    files:
+    - LICENSE
+    - README.md
 
 snapshot:
   name_template: SNAPSHOT-{{ .Commit }}
