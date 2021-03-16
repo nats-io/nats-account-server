@@ -86,7 +86,8 @@ type StoreConfig struct {
 	Shard           bool   // optional setting to shard the directory store, avoiding too many files in one folder
 	CleanupInterval int    // interval at which expiration is checked
 
-	NSC string // removed support for this, keep so that we can warn when used
+	NSC      string // removed support for this, keep so that we can warn when used
+	ReadOnly bool   // removed support for this, keep so that we can warn when used
 }
 
 // DefaultServerConfig generates a default configuration with

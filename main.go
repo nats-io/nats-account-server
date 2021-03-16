@@ -48,6 +48,7 @@ func expandPath(p string) string {
 func main() {
 	var server *core.AccountServer
 	disabledNscFolder := ""
+	disabledReadOnly := false
 	flags := core.Flags{}
 	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
@@ -60,6 +61,7 @@ func main() {
 	flag.BoolVar(&flags.DebugAndVerbose, "DV", false, "turn on debug and verbose logging")
 	flag.StringVar(&flags.HostPort, "hp", "", "http hostport, defaults to localhost:9090")
 	flag.StringVar(&disabledNscFolder, "nsc", "", core.NscError)
+	flag.BoolVar(&disabledReadOnly, "ro", false, core.RoError)
 	flag.Parse()
 
 	// resolve paths with dots/tildes
@@ -84,6 +86,9 @@ func main() {
 
 	if disabledNscFolder != "" {
 		logStopExit(server, fmt.Errorf(core.NscError))
+	}
+	if disabledReadOnly {
+		logStopExit(server, fmt.Errorf(core.RoError))
 	}
 
 	go func() {
