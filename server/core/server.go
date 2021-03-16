@@ -276,14 +276,21 @@ func (server *AccountServer) jwtChangedCallback(pubKey string) {
 	}
 }
 
-const NscError = `support for direct access of the nsc folder has been removed
-use a dedicated store directory and specify the operator jwt path
+const commonErr = `
+use a dedicated store directory and specify the operator jwt path instead
 synchronize using: nsc push --all --account-jwt-server-url <account-server-host-port>/jwt/v1`
+
+const RoError = `support for read only directory access with file system updates has been removed` + commonErr
+
+const NscError = `support for direct access of the nsc folder has been removed` + commonErr
 
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
 	if config.NSC != "" {
 		return nil, fmt.Errorf(NscError)
+	}
+	if config.ReadOnly {
+		return nil, fmt.Errorf(RoError)
 	}
 	if config.Dir == "" {
 		return nil, fmt.Errorf("store directory is required")
