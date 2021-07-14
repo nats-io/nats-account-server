@@ -257,25 +257,25 @@ func (server *AccountServer) sendAccountNotification(pubKey string, theJWT []byt
 	return server.nats.Publish(subject, theJWT)
 }
 
-func (s *AccountServer) respondToUpdate(msg *nats.Msg, acc string, message string, err error) {
+func (server *AccountServer) respondToUpdate(msg *nats.Msg, acc string, message string, err error) {
 	if err == nil {
-		s.logger.Debugf("%s - %s", message, acc)
+		server.logger.Debugf("%s - %s", message, acc)
 	} else {
-		s.logger.Errorf("%s - %s - %s", message, acc, err)
+		server.logger.Errorf("%s - %s - %s", message, acc, err)
 	}
 	if msg.Reply == "" {
 		return
 	}
 	host, _ := os.Hostname()
-	s.Lock() // ties seqNo increment and send together
-	s.respSeqNo++
-	defer s.Unlock()
+	server.Lock() // ties seqNo increment and send together
+	server.respSeqNo++
+	defer server.Unlock()
 	response := map[string]interface{}{"server": map[string]interface{}{
 		"name": "nats-account-server",
 		"host": host,
 		"ver":  version,
-		"seq":  s.respSeqNo,
-		"id":   s.id,
+		"seq":  server.respSeqNo,
+		"id":   server.id,
 		"time": time.Now(),
 	}}
 	if err == nil {
@@ -292,7 +292,7 @@ func (s *AccountServer) respondToUpdate(msg *nats.Msg, acc string, message strin
 		}
 	}
 	if m, err := json.MarshalIndent(response, "", "  "); err != nil {
-		s.logger.Errorf("Marshaling error: %v", err)
+		server.logger.Errorf("Marshaling error: %v", err)
 	} else {
 		msg.Respond(m)
 	}

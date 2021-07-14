@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -49,6 +50,7 @@ func main() {
 	var server *core.AccountServer
 	disabledNscFolder := ""
 	disabledReadOnly := false
+	dump := false
 	flags := core.Flags{}
 	flag.StringVar(&flags.ConfigFile, "c", "", "configuration filepath, other flags take precedent over the config file")
 	flag.StringVar(&flags.Directory, "dir", "", "the directory to store/host accounts with, mututally exclusive from nsc")
@@ -62,6 +64,7 @@ func main() {
 	flag.StringVar(&flags.HostPort, "hp", "", "http hostport, defaults to localhost:9090")
 	flag.StringVar(&disabledNscFolder, "nsc", "", core.NscError)
 	flag.BoolVar(&disabledReadOnly, "ro", false, core.RoError)
+	flag.BoolVar(&dump, "dump", false, "print config")
 	flag.Parse()
 
 	// resolve paths with dots/tildes
@@ -78,12 +81,10 @@ func main() {
 		server.Stop()
 		os.Exit(1)
 	}
-
 	server = core.NewAccountServer()
 	if err := server.InitializeFromFlags(flags); err != nil {
 		logStopExit(server, err)
 	}
-
 	if disabledNscFolder != "" {
 		logStopExit(server, fmt.Errorf(core.NscError))
 	}
@@ -125,6 +126,11 @@ func main() {
 
 	if err := core.Run(server); err != nil {
 		logStopExit(server, err)
+	}
+	if dump {
+		if d, err := json.MarshalIndent(server.Config(), "", "  "); err == nil {
+			server.Logger().Noticef("%v", string(d))
+		}
 	}
 
 	// exit main but keep running goroutines
