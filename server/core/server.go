@@ -75,6 +75,10 @@ func NewAccountServer() *AccountServer {
 	return ac
 }
 
+func (server *AccountServer) Config() *conf.AccountServerConfig {
+	return server.config
+}
+
 // ConfigureLogger configures the logger for this account server
 func (server *AccountServer) ConfigureLogger() natsserver.Logger {
 	opts := server.config.Logging
@@ -112,7 +116,7 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 			return err
 		}
 	}
-	server.ConfigureLogger()
+	server.logger = server.ConfigureLogger()
 
 	if flags.Directory != "" {
 		server.config.Store = conf.StoreConfig{
@@ -122,8 +126,6 @@ func (server *AccountServer) InitializeFromFlags(flags Flags) error {
 
 	if flags.NATSURL != "" {
 		server.config.NATS.Servers = []string{flags.NATSURL}
-	} else if server.config.SignRequestSubject != "" {
-		return fmt.Errorf("nats configuration is required in order to issue signature requests")
 	}
 
 	if flags.Creds != "" {
@@ -198,7 +200,6 @@ func (server *AccountServer) Start() error {
 
 	server.running = true
 	server.startTime = time.Now()
-	server.logger = server.ConfigureLogger()
 
 	server.logger.Noticef("starting NATS Account server, version %s", version)
 	server.logger.Noticef("server time is %s", server.startTime.Format(time.UnixDate))
