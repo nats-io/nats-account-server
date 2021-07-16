@@ -13,7 +13,7 @@ github.com/mitchellh/go-homedir
 # github.com/nats-io/jwt v1.2.2
 ## explicit
 github.com/nats-io/jwt
-# github.com/nats-io/jwt/v2 v2.0.1
+# github.com/nats-io/jwt/v2 v2.0.3-0.20210715221700-37a10b0187c7
 ## explicit
 github.com/nats-io/jwt/v2
 # github.com/nats-io/nats-server/v2 v2.2.0

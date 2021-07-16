@@ -4,7 +4,7 @@ require (
 	github.com/julienschmidt/httprouter v1.2.0
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/nats-io/jwt v1.2.2
-	github.com/nats-io/jwt/v2 v2.0.1
+	github.com/nats-io/jwt/v2 v2.0.3-0.20210715221700-37a10b0187c7
 	github.com/nats-io/nats-server/v2 v2.2.0
 	github.com/nats-io/nats.go v1.10.1-0.20210228004050-ed743748acac
 	github.com/nats-io/nkeys v0.3.0
