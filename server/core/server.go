@@ -244,7 +244,12 @@ func (server *AccountServer) Start() error {
 
 	server.logger.Noticef("nats-account-server is running")
 	server.logger.Noticef("configure the nats-server with:")
-	server.logger.Noticef("  resolver: URL(%s://%s/jwt/v1/accounts/)", server.protocol, server.hostPort)
+
+	// provide a more accurate resolver URL in the case where the port is self-assigned
+	port := server.listener.Addr().(*net.TCPAddr).Port
+	h, _, _ := net.SplitHostPort(server.hostPort)
+	hp := fmt.Sprintf("%s:%d", h, port)
+	server.logger.Noticef("  resolver: URL(%s://%s/jwt/v1/accounts/)", server.protocol, hp)
 
 	return nil
 }
