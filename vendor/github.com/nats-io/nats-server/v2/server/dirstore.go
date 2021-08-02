@@ -1,18 +1,15 @@
-/*
- * Copyright 2020 The NATS Authors
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
+// Copyright 2012-2021 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -82,9 +79,10 @@ type DirJWTStore struct {
 	shard      bool
 	readonly   bool
 	deleteType deleteType
-	operator   string
+	operator   map[string]struct{}
 	expiration *expirationTracker
 	changed    JWTChanged
+	deleted    JWTChanged
 }
 
 func newDir(dirPath string, create bool) (string, error) {
@@ -93,7 +91,7 @@ func newDir(dirPath string, create bool) (string, error) {
 		if !create {
 			return "", err
 		}
-		if err = os.MkdirAll(dirPath, 0755); err != nil {
+		if err = os.MkdirAll(dirPath, defaultDirPerms); err != nil {
 			return "", err
 		}
 		if fullPath, err = validateDirPath(dirPath); err != nil {
@@ -426,7 +424,7 @@ func (store *DirJWTStore) write(path string, publicKey string, theJWT string) (b
 			}
 		}
 	}
-	if err := ioutil.WriteFile(path, []byte(theJWT), 0644); err != nil {
+	if err := ioutil.WriteFile(path, []byte(theJWT), defaultFilePerms); err != nil {
 		return false, err
 	} else if store.expiration != nil {
 		store.expiration.track(publicKey, newHash, theJWT)
@@ -457,7 +455,7 @@ func (store *DirJWTStore) delete(publicKey string) error {
 		return err
 	}
 	store.expiration.unTrack(publicKey)
-	// TODO do cb so server can evict the account and associated clients
+	store.deleted(publicKey)
 	return nil
 }
 
@@ -475,7 +473,7 @@ func (store *DirJWTStore) save(publicKey string, theJWT string) error {
 	}
 	dirPath := filepath.Dir(path)
 	if _, err := validateDirPath(dirPath); err != nil {
-		if err := os.MkdirAll(dirPath, 0755); err != nil {
+		if err := os.MkdirAll(dirPath, defaultDirPerms); err != nil {
 			store.Unlock()
 			return err
 		}
@@ -501,7 +499,7 @@ func (store *DirJWTStore) saveIfNewer(publicKey string, theJWT string) error {
 	}
 	dirPath := filepath.Dir(path)
 	if _, err := validateDirPath(dirPath); err != nil {
-		if err := os.MkdirAll(dirPath, 0755); err != nil {
+		if err := os.MkdirAll(dirPath, defaultDirPerms); err != nil {
 			return err
 		}
 	}

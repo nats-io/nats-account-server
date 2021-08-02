@@ -832,7 +832,7 @@ func (s *Server) forwardNewRouteInfoToKnownServers(info *Info) {
 func (c *client) canImport(subject string) bool {
 	// Use pubAllowed() since this checks Publish permissions which
 	// is what Import maps to.
-	return c.pubAllowedFullCheck(subject, false)
+	return c.pubAllowedFullCheck(subject, false, true)
 }
 
 // canExport is whether or not we will accept a SUB from the remote for a given subject.
@@ -891,7 +891,8 @@ func (c *client) removeRemoteSubs() {
 		ase := as[accountName]
 		if ase == nil {
 			if v, ok := srv.accounts.Load(accountName); ok {
-				as[accountName] = &asubs{acc: v.(*Account), subs: []*subscription{sub}}
+				ase = &asubs{acc: v.(*Account), subs: []*subscription{sub}}
+				as[accountName] = ase
 			} else {
 				continue
 			}
@@ -901,6 +902,7 @@ func (c *client) removeRemoteSubs() {
 		if srv.gateway.enabled {
 			srv.gatewayUpdateSubInterest(accountName, sub, -1)
 		}
+		srv.updateLeafNodes(ase.acc, sub, -1)
 	}
 
 	// Now remove the subs by batch for each account sublist.
@@ -1077,14 +1079,15 @@ func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 	// We store local subs by account and subject and optionally queue name.
 	// If we have a queue it will have a trailing weight which we do not want.
 	if sub.queue != nil {
-		sub.sid = arg[:len(arg)-len(args[3+off])-1]
+		sub.sid = arg[len(sub.origin)+off : len(arg)-len(args[3+off])-1]
 	} else {
-		sub.sid = arg
+		sub.sid = arg[len(sub.origin)+off:]
 	}
 	key := string(sub.sid)
 
 	osub := c.subs[key]
 	updateGWs := false
+	delta := int32(1)
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -1098,17 +1101,18 @@ func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 		updateGWs = srv.gateway.enabled
 	} else if sub.queue != nil {
 		// For a queue we need to update the weight.
+		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
 	}
 	c.mu.Unlock()
 
 	if updateGWs {
-		srv.gatewayUpdateSubInterest(acc.Name, sub, 1)
+		srv.gatewayUpdateSubInterest(acc.Name, sub, delta)
 	}
 
 	// Now check on leafnode updates.
-	srv.updateLeafNodes(acc, sub, 1)
+	srv.updateLeafNodes(acc, sub, delta)
 
 	if c.opts.Verbose {
 		c.sendOK()
@@ -1288,7 +1292,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 		}
 	}
 
-	c := &client{srv: s, nc: conn, opts: clientOpts{}, kind: ROUTER, msubs: -1, mpay: -1, route: r}
+	c := &client{srv: s, nc: conn, opts: ClientOpts{}, kind: ROUTER, msubs: -1, mpay: -1, route: r}
 
 	// Grab server variables
 	s.mu.Lock()
@@ -1328,7 +1332,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 			tlsConfig = tlsConfig.Clone()
 		}
 		// Perform (server or client side) TLS handshake.
-		if _, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, _EMPTY_, opts.Cluster.TLSTimeout); err != nil {
+		if _, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, _EMPTY_, opts.Cluster.TLSTimeout, opts.Cluster.TLSPinnedCerts); err != nil {
 			c.mu.Unlock()
 			return nil
 		}
@@ -1416,7 +1420,10 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 	if !exists {
 		s.routes[c.cid] = c
 		s.remotes[id] = c
-		s.nodeToInfo.Store(c.route.hash, nodeInfo{c.route.remoteName, s.info.Cluster, id, false})
+		// check to be consistent and future proof. but will be same domain
+		if s.sameDomain(info.Domain) {
+			s.nodeToInfo.Store(c.route.hash, nodeInfo{c.route.remoteName, s.info.Cluster, info.Domain, id, false, info.JetStream})
+		}
 		c.mu.Lock()
 		c.route.connectURLs = info.ClientConnectURLs
 		c.route.wsConnURLs = info.WSConnectURLs
@@ -1493,6 +1500,10 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 
 	// We only store state on local subs for transmission across all other routes.
 	if sub.client == nil || sub.client.kind == ROUTER || sub.client.kind == GATEWAY {
+		return
+	}
+
+	if sub.si {
 		return
 	}
 
@@ -1647,6 +1658,7 @@ func (s *Server) startRouteAcceptLoop() {
 
 	hp := net.JoinHostPort(opts.Cluster.Host, strconv.Itoa(port))
 	l, e := natsListen("tcp", hp)
+	s.routeListenerErr = e
 	if e != nil {
 		s.mu.Unlock()
 		s.Fatalf("Error listening on router port: %d - %v", opts.Cluster.Port, e)
@@ -1682,6 +1694,7 @@ func (s *Server) startRouteAcceptLoop() {
 		GatewayURL:   s.getGatewayURL(),
 		Headers:      s.supportsHeaders(),
 		Cluster:      s.info.Cluster,
+		Domain:       s.info.Domain,
 		Dynamic:      s.isClusterNameDynamic(),
 		LNOC:         true,
 	}

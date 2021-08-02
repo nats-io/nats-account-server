@@ -1,4 +1,4 @@
-// Copyright 2019-2020 The NATS Authors
+// Copyright 2019-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -107,6 +108,105 @@ func (c *client) isHubLeafNode() bool {
 	return c.kind == LEAF && !c.leaf.isSpoke
 }
 
+// Will add in the deny exports and imports for JetStream on solicited connections if we
+// are sharing the system account and wanting to extend the JS domain.
+// r lock should be held.
+func (s *Server) addInJSDeny(r *leafNodeCfg) {
+	s.addInJSDenyExport(r)
+	s.addInJSDenyImport(r)
+}
+
+// Will add in the deny export for JetStream on solicited connections if we
+// detect we have multiple JetStream domains and we know our local account
+// is JetStream enabled.
+// r lock should be held.
+func (s *Server) addInJSDenyExport(r *leafNodeCfg) {
+	for _, dsubj := range r.DenyExports {
+		if dsubj == jsAllAPI {
+			return
+		}
+	}
+
+	s.Noticef("Adding deny export of %q for leafnode configuration on %q that bridges system account", jsAllAPI, r.LocalAccount)
+	r.DenyExports = append(r.DenyExports, jsAllAPI)
+
+	// We added in some deny clauses here so need to regenerate the permissions etc.
+	perms := &Permissions{}
+	perms.Publish = &SubjectPermission{Deny: r.DenyExports}
+	if len(r.DenyImports) > 0 {
+		perms.Subscribe = &SubjectPermission{Deny: r.DenyImports}
+	}
+	r.perms = perms
+}
+
+// Will add in the deny import for JetStream on solicited connections if we
+// detect we have multiple JetStream domains and we know our local account
+// is JetStream enabled.
+// r lock should be held.
+func (s *Server) addInJSDenyImport(r *leafNodeCfg) {
+	for _, dsubj := range r.DenyImports {
+		if dsubj == jsAllAPI {
+			return
+		}
+	}
+
+	s.Noticef("Adding deny import of %q for leafnode configuration on %q that bridges system account", jsAllAPI, r.LocalAccount)
+	r.DenyImports = append(r.DenyImports, jsAllAPI)
+
+	// We added in some deny clauses here so need to regenerate the permissions etc.
+	perms := &Permissions{}
+	perms.Subscribe = &SubjectPermission{Deny: r.DenyImports}
+	if len(r.DenyExports) > 0 {
+		perms.Publish = &SubjectPermission{Deny: r.DenyExports}
+	}
+	r.perms = perms
+}
+
+// Used for $SYS accounts when sharing but using separate JS domains.
+// r lock should be held.
+func (s *Server) addInJSDenyAll(r *leafNodeCfg) {
+	denyAll := []string{jscAllSubj, raftAllSubj, jsAllAPI}
+
+	s.Noticef("Sharing system account but utilizing separate JetStream Domains")
+	s.Noticef("Adding deny of %+v for leafnode configuration that bridges system account", denyAll)
+
+	r.DenyExports = append(r.DenyExports, denyAll...)
+	r.DenyImports = append(r.DenyImports, denyAll...)
+
+	perms := &Permissions{}
+	if len(r.DenyExports) > 0 {
+		perms.Publish = &SubjectPermission{Deny: r.DenyExports}
+	}
+	if len(r.DenyImports) > 0 {
+		perms.Subscribe = &SubjectPermission{Deny: r.DenyImports}
+	}
+	r.perms = perms
+}
+
+// Determine if we are sharing our local system account with the remote.
+func (s *Server) hasSystemRemoteLeaf() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hasSystemRemoteLeafLocked() != nil
+}
+
+func (s *Server) hasSystemRemoteLeafLocked() *leafNodeCfg {
+	if s.sys == nil {
+		return nil
+	}
+
+	sacc := s.sys.account.Name
+	for _, r := range s.leafRemoteCfgs {
+		r.RLock()
+		lacc := r.LocalAccount
+		r.RUnlock()
+		if lacc == sacc {
+			return r
+		}
+	}
+	return nil
+}
+
 // This will spin up go routines to solicit the remote leaf node connections.
 func (s *Server) solicitLeafNodeRemotes(remotes []*RemoteLeafOpts) {
 	for _, r := range remotes {
@@ -133,6 +233,7 @@ func validateLeafNode(o *Options) error {
 	if err := validateLeafNodeAuthOptions(o); err != nil {
 		return err
 	}
+
 	// In local config mode, check that leafnode configuration refers to accounts that exist.
 	if len(o.TrustedOperators) == 0 {
 		accNames := map[string]struct{}{}
@@ -210,6 +311,9 @@ func validateLeafNode(o *Options) error {
 	// is a system account defined.
 	if o.SystemAccount == "" {
 		return fmt.Errorf("leaf nodes and gateways (both being defined) require a system account to also be configured")
+	}
+	if err := validatePinnedCerts(o.LeafNode.TLSPinnedCerts); err != nil {
+		return fmt.Errorf("leafnode: %v", err)
 	}
 	return nil
 }
@@ -290,6 +394,12 @@ func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 	// Start with the one that is configured. We will add to this
 	// array when receiving async leafnode INFOs.
 	cfg.urls = append(cfg.urls, cfg.URLs...)
+	// If allowed to randomize, do it on our copy of URLs
+	if !remote.NoRandomize {
+		rand.Shuffle(len(cfg.urls), func(i, j int) {
+			cfg.urls[i], cfg.urls[j] = cfg.urls[j], cfg.urls[i]
+		})
+	}
 	// If we are TLS make sure we save off a proper servername if possible.
 	// Do same for user/password since we may need them to connect to
 	// a bare URL that we get from INFO protocol.
@@ -353,6 +463,8 @@ func (s *Server) setLeafNodeNonExportedOptions() {
 	}
 }
 
+const sharedSysAccDelay = 250 * time.Millisecond
+
 func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool) {
 	defer s.grWG.Done()
 
@@ -366,7 +478,17 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 	s.mu.Lock()
 	dialTimeout := s.leafNodeOpts.dialTimeout
 	resolver := s.leafNodeOpts.resolver
+	var isSysAcc bool
+	if s.eventsEnabled() {
+		isSysAcc = remote.LocalAccount == s.sys.account.Name
+	}
 	s.mu.Unlock()
+
+	// If we are sharing a system account and we are not standalone delay to gather some info prior.
+	if firstConnect && isSysAcc && !s.standAloneMode() {
+		s.Debugf("Will delay first leafnode connect to shared system account due to clustering")
+		remote.setConnectDelay(sharedSysAccDelay)
+	}
 
 	if connDelay := remote.getConnectDelay(); connDelay > 0 {
 		select {
@@ -460,6 +582,7 @@ func (s *Server) startLeafNodeAcceptLoop() {
 	}
 	hp := net.JoinHostPort(opts.LeafNode.Host, strconv.Itoa(port))
 	l, e := natsListen("tcp", hp)
+	s.leafNodeListenerErr = e
 	if e != nil {
 		s.mu.Unlock()
 		s.Fatalf("Error listening on leafnode port: %d - %v", opts.LeafNode.Port, e)
@@ -472,17 +595,19 @@ func (s *Server) startLeafNodeAcceptLoop() {
 	tlsRequired := opts.LeafNode.TLSConfig != nil
 	tlsVerify := tlsRequired && opts.LeafNode.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
 	info := Info{
-		ID:           s.info.ID,
-		Name:         s.info.Name,
-		Version:      s.info.Version,
-		GitCommit:    gitCommit,
-		GoVersion:    runtime.Version(),
-		AuthRequired: true,
-		TLSRequired:  tlsRequired,
-		TLSVerify:    tlsVerify,
-		MaxPayload:   s.info.MaxPayload, // TODO(dlc) - Allow override?
-		Headers:      s.supportsHeaders(),
-		Proto:        1, // Fixed for now.
+		ID:            s.info.ID,
+		Name:          s.info.Name,
+		Version:       s.info.Version,
+		GitCommit:     gitCommit,
+		GoVersion:     runtime.Version(),
+		AuthRequired:  true,
+		TLSRequired:   tlsRequired,
+		TLSVerify:     tlsVerify,
+		MaxPayload:    s.info.MaxPayload, // TODO(dlc) - Allow override?
+		Headers:       s.supportsHeaders(),
+		JetStream:     opts.JetStream,
+		Proto:         1, // Fixed for now.
+		InfoOnConnect: true,
 	}
 	// If we have selected a random port...
 	if port == 0 {
@@ -533,16 +658,18 @@ var credsRe = regexp.MustCompile(`\s*(?:(?:[-]{3,}[^\n]*[-]{3,}\n)(.+)(?:\n\s*[-
 func (c *client) sendLeafConnect(clusterName string, tlsRequired, headers bool) error {
 	// We support basic user/pass and operator based user JWT with signatures.
 	cinfo := leafConnectInfo{
-		TLS:     tlsRequired,
-		ID:      c.srv.info.ID,
-		Name:    c.srv.info.Name,
-		Hub:     c.leaf.remote.Hub,
-		Cluster: clusterName,
-		Headers: headers,
+		TLS:       tlsRequired,
+		ID:        c.srv.info.ID,
+		Name:      c.srv.info.Name,
+		Hub:       c.leaf.remote.Hub,
+		Cluster:   clusterName,
+		Headers:   headers,
+		JetStream: c.acc.jetStreamConfigured(),
+		DenyPub:   c.leaf.remote.DenyImports,
 	}
 
 	// Check for credentials first, that will take precedence..
-	if creds := c.leaf.remote.Credentials; creds != "" {
+	if creds := c.leaf.remote.Credentials; creds != _EMPTY_ {
 		c.Debugf("Authenticating with credentials file %q", c.leaf.remote.Credentials)
 		contents, err := ioutil.ReadFile(creds)
 		if err != nil {
@@ -671,6 +798,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	// For accepted LN connections, ws will be != nil if it was accepted
 	// through the Websocket port.
 	c.ws = ws
+
 	// For remote, check if the scheme starts with "ws", if so, we will initiate
 	// a remote Leaf Node connection as a websocket connection.
 	if remote != nil && rURL != nil && isWSURL(rURL) {
@@ -682,37 +810,47 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	// Determines if we are soliciting the connection or not.
 	var solicited bool
 	var acc *Account
-
-	c.mu.Lock()
-	c.initClient()
-	c.Noticef("Leafnode connection created")
+	var remoteSuffix string
 	if remote != nil {
-		solicited = true
+		// For now, if lookup fails, we will constantly try
+		// to recreate this LN connection.
+
 		remote.Lock()
 		// Users can bind to any local account, if its empty
 		// we will assume the $G account.
-		if remote.LocalAccount == "" {
+		if remote.LocalAccount == _EMPTY_ {
 			remote.LocalAccount = globalAccountName
 		}
+		lacc := remote.LocalAccount
+		remote.Unlock()
+
+		var err error
+		acc, err = s.LookupAccount(lacc)
+		if err != nil {
+			// An account not existing is something that can happen with nats/http account resolver and the account
+			// has not yet been pushed, or the request failed for other reasons.
+			// remote needs to be set or retry won't happen
+			c.leaf.remote = remote
+			c.closeConnection(MissingAccount)
+			s.Errorf("Unable to lookup account %s for solicited leafnode connection: %v", lacc, err)
+			return nil
+		}
+		remoteSuffix = fmt.Sprintf(" for account: %s", acc.traceLabel())
+	}
+
+	c.mu.Lock()
+	c.initClient()
+	c.Noticef("Leafnode connection created%s", remoteSuffix)
+
+	if remote != nil {
+		solicited = true
+		remote.Lock()
 		c.leaf.remote = remote
 		c.setPermissions(remote.perms)
 		if !c.leaf.remote.Hub {
 			c.leaf.isSpoke = true
 		}
-		lacc := remote.LocalAccount
 		remote.Unlock()
-		c.mu.Unlock()
-		// TODO: Decide what should be the optimal behavior here.
-		// For now, if lookup fails, we will constantly try
-		// to recreate this LN connection.
-		var err error
-		acc, err = s.LookupAccount(lacc)
-		if err != nil {
-			c.Errorf("No local account %q for leafnode: %v", lacc, err)
-			c.closeConnection(MissingAccount)
-			return nil
-		}
-		c.mu.Lock()
 		c.acc = acc
 	} else {
 		c.flags.set(expectConnect)
@@ -725,6 +863,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	var nonce [nonceLen]byte
 	var info *Info
 
+	// Grab this before the client lock below.
 	if !solicited {
 		// Grab server variables
 		s.mu.Lock()
@@ -769,6 +908,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		info.Nonce = string(c.nonce)
 		info.CID = c.cid
 		b, _ := json.Marshal(info)
+
 		pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
 		// We have to send from this go routine because we may
 		// have to block for TLS handshake before we start our
@@ -786,7 +926,7 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		// Check to see if we need to spin up TLS.
 		if !c.isWebsocket() && info.TLSRequired {
 			// Perform server-side TLS handshake.
-			if err := c.doTLSServerHandshake("leafnode", opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout); err != nil {
+			if err := c.doTLSServerHandshake("leafnode", opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
 				c.mu.Unlock()
 				return nil
 			}
@@ -795,9 +935,6 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		// Leaf nodes will always require a CONNECT to let us know
 		// when we are properly bound to an account.
 		c.setAuthTimer(secondsToDuration(opts.LeafNode.AuthTimeout))
-
-		// Set the Ping timer
-		s.setFirstPingTimer(c)
 	}
 
 	// Keep track in case server is shutdown before we can successfully register.
@@ -823,6 +960,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 }
 
 func (c *client) processLeafnodeInfo(info *Info) {
+	s := c.srv
+	opts := s.getOpts()
+	hasSysShared, sysAcc := s.hasSystemRemoteLeaf(), s.SystemAccount()
+
 	c.mu.Lock()
 	if c.leaf == nil || c.isClosed() {
 		c.mu.Unlock()
@@ -878,6 +1019,51 @@ func (c *client) processLeafnodeInfo(info *Info) {
 		} else {
 			c.leaf.remoteServer = info.Name
 		}
+
+		// Check for JetStream semantics to deny the JetStream API as needed.
+		// This is so that if JetStream is enabled on both sides we can separately address both.
+		hasJSDomain := opts.JetStreamDomain != _EMPTY_
+		inJSEnabledDomain := s.JetStreamEnabledForDomain()
+
+		// Check for mixed mode scenarios to resolve presence of domain names.
+		if !s.JetStreamEnabled() && inJSEnabledDomain && !hasJSDomain && s.jetStreamHasDomainConfigured() {
+			hasJSDomain = true
+		}
+
+		if remote, acc := c.leaf.remote, c.acc; remote != nil {
+			accHasJS := acc.jetStreamConfigured()
+			remote.Lock()
+			// JetStream checks for mappings and permissions updates.
+			if acc != sysAcc {
+				// Check if JetStream is enabled for this domain. If it's not, and the account
+				// does not have JS, we can act as pass through, so do not deny.
+				if hasSysShared && (inJSEnabledDomain || accHasJS) {
+					s.addInJSDeny(remote)
+				} else {
+					// Here we want to suppress if this local account has JS enabled.
+					// This is regardless of whether or not this server is actually running JS.
+					// We only suppress export. But we do send an indication about our JetStream
+					// status in the connect and the hub side will suppress as well if the remote
+					// account also has JetStream enabled.
+					if accHasJS {
+						s.addInJSDenyExport(remote)
+					}
+				}
+				// If we have a specified JetStream domain we will want to add a mapping to
+				// allow access cross domain for each non-system account.
+				if hasJSDomain && acc.jetStreamConfigured() {
+					src := fmt.Sprintf(jsDomainAPI, opts.JetStreamDomain)
+					if err := acc.AddMapping(src, jsAllAPI); err != nil {
+						c.Debugf("Error adding JetStream domain mapping: %v", err)
+					}
+				}
+			} else if hasJSDomain {
+				s.addInJSDenyAll(remote)
+			}
+
+			c.setPermissions(remote.perms)
+			remote.Unlock()
+		}
 	}
 	// For both initial INFO and async INFO protocols, Possibly
 	// update our list of remote leafnode URLs we can connect to.
@@ -896,29 +1082,45 @@ func (c *client) processLeafnodeInfo(info *Info) {
 		// Check if we have local deny clauses that we need to merge.
 		if remote := c.leaf.remote; remote != nil {
 			if len(remote.DenyExports) > 0 {
+				if perms.Publish == nil {
+					perms.Publish = &SubjectPermission{}
+				}
 				perms.Publish.Deny = append(perms.Publish.Deny, remote.DenyExports...)
 			}
 			if len(remote.DenyImports) > 0 {
+				if perms.Subscribe == nil {
+					perms.Subscribe = &SubjectPermission{}
+				}
 				perms.Subscribe.Deny = append(perms.Subscribe.Deny, remote.DenyImports...)
 			}
 		}
 		c.setPermissions(perms)
 	}
 
-	var finishConnect bool
-	var s *Server
+	var resumeConnect bool
 
 	// If this is a remote connection and this is the first INFO protocol,
 	// then we need to finish the connect process by sending CONNECT, etc..
 	if firstINFO && c.leaf.remote != nil {
 		// Clear deadline that was set in createLeafNode while waiting for the INFO.
 		c.nc.SetDeadline(time.Time{})
-		finishConnect = true
-		s = c.srv
+		resumeConnect = true
+	}
+
+	// Check if we have the remote account information and if so make sure it's stored.
+	if info.RemoteAccount != _EMPTY_ {
+		s.leafRemoteAccounts.Store(c.acc.Name, info.RemoteAccount)
 	}
 	c.mu.Unlock()
 
-	if finishConnect && s != nil {
+	finishConnect := info.ConnectInfo
+	if resumeConnect && s != nil {
+		s.leafNodeResumeConnectProcess(c)
+		if !info.InfoOnConnect {
+			finishConnect = true
+		}
+	}
+	if finishConnect {
 		s.leafNodeFinishConnectProcess(c)
 	}
 }
@@ -1020,7 +1222,7 @@ func (s *Server) setLeafNodeInfoHostPortAndIP() error {
 // (this solves the stale connection situation). An error is returned to help the
 // remote detect the misconfiguration when the duplicate is the result of that
 // misconfiguration.
-func (s *Server) addLeafNodeConnection(c *client, srvName string, checkForDup bool) {
+func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, checkForDup bool) {
 	var accName string
 	c.mu.Lock()
 	cid := c.cid
@@ -1039,7 +1241,8 @@ func (s *Server) addLeafNodeConnection(c *client, srvName string, checkForDup bo
 			// is more about replacing stale connections than detecting loops.
 			// We have code for the loop detection elsewhere, which also delays
 			// attempt to reconnect.
-			if !ol.isSolicitedLeafNode() && ol.leaf.remoteServer == srvName && ol.acc.Name == accName {
+			if !ol.isSolicitedLeafNode() && ol.leaf.remoteServer == srvName &&
+				ol.leaf.remoteCluster == clusterName && ol.acc.Name == accName {
 				old = ol
 			}
 			ol.mu.Unlock()
@@ -1075,18 +1278,21 @@ func (s *Server) removeLeafNodeConnection(c *client) {
 	s.removeFromTempClients(cid)
 }
 
+// Connect information for solicited leafnodes.
 type leafConnectInfo struct {
-	JWT     string `json:"jwt,omitempty"`
-	Sig     string `json:"sig,omitempty"`
-	User    string `json:"user,omitempty"`
-	Pass    string `json:"pass,omitempty"`
-	TLS     bool   `json:"tls_required"`
-	Comp    bool   `json:"compression,omitempty"`
-	ID      string `json:"server_id,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Hub     bool   `json:"is_hub,omitempty"`
-	Cluster string `json:"cluster,omitempty"`
-	Headers bool   `json:"headers,omitempty"`
+	JWT       string   `json:"jwt,omitempty"`
+	Sig       string   `json:"sig,omitempty"`
+	User      string   `json:"user,omitempty"`
+	Pass      string   `json:"pass,omitempty"`
+	TLS       bool     `json:"tls_required"`
+	Comp      bool     `json:"compression,omitempty"`
+	ID        string   `json:"server_id,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	Hub       bool     `json:"is_hub,omitempty"`
+	Cluster   string   `json:"cluster,omitempty"`
+	Headers   bool     `json:"headers,omitempty"`
+	JetStream bool     `json:"jetstream,omitempty"`
+	DenyPub   []string `json:"deny_pub,omitempty"`
 
 	// Just used to detect wrong connection attempts.
 	Gateway string `json:"gateway,omitempty"`
@@ -1098,7 +1304,7 @@ type leafConnectInfo struct {
 func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) error {
 	// Way to detect clients that incorrectly connect to the route listen
 	// port. Client provided "lang" in the CONNECT protocol while LEAFNODEs don't.
-	if lang != "" {
+	if lang != _EMPTY_ {
 		c.sendErrAndErr(ErrClientConnectedToLeafNodePort.Error())
 		c.closeConnection(WrongPort)
 		return ErrClientConnectedToLeafNodePort
@@ -1112,7 +1318,7 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// Reject if this has Gateway which means that it would be from a gateway
 	// connection that incorrectly connects to the leafnode port.
-	if proto.Gateway != "" {
+	if proto.Gateway != _EMPTY_ {
 		errTxt := fmt.Sprintf("Rejecting connection from gateway %q on the leafnode port", proto.Gateway)
 		c.Errorf(errTxt)
 		c.sendErr(errTxt)
@@ -1122,6 +1328,9 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// Check if this server supports headers.
 	supportHeaders := c.srv.supportsHeaders()
+
+	// Grab system account and server options.
+	sysAcc, opts := s.SystemAccount(), s.getOpts()
 
 	c.mu.Lock()
 	// Leaf Nodes do not do echo or verbose or pedantic.
@@ -1142,17 +1351,35 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 	}
 
 	// The soliciting side is part of a cluster.
-	if proto.Cluster != "" {
+	if proto.Cluster != _EMPTY_ {
 		c.leaf.remoteCluster = proto.Cluster
 	}
+
+	// Check for JetStream domain
+	jsConfigured := c.acc.jetStreamConfigured()
+	doDomainMappings := opts.JetStreamDomain != _EMPTY_ && c.acc != sysAcc && jsConfigured
+
+	// If we have JS enabled and the other side does as well we need to add in an import deny clause.
+	if jsConfigured && proto.JetStream {
+		// We should never have existing perms here, if that changes this needs to be reworked.
+		c.setPermissions(&Permissions{Publish: &SubjectPermission{Deny: []string{jsAllAPI}}})
+	}
+
+	// Set the Ping timer
+	s.setFirstPingTimer(c)
+
+	// If we received pub deny permissions from the other end, merge with existing ones.
+	c.mergePubDenyPermissions(proto.DenyPub)
+
+	acc := c.acc
 	c.mu.Unlock()
 
 	// Add in the leafnode here since we passed through auth at this point.
-	s.addLeafNodeConnection(c, proto.Name, true)
+	s.addLeafNodeConnection(c, proto.Name, proto.Cluster, true)
 
 	// If we have permissions bound to this leafnode we need to send then back to the
 	// origin server for local enforcement.
-	s.sendPermsInfo(c)
+	s.sendPermsAndAccountInfo(c)
 
 	// Create and initialize the smap since we know our bound account now.
 	// This will send all registered subs too.
@@ -1161,6 +1388,15 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 	// Announce the account connect event for a leaf node.
 	// This will no-op as needed.
 	s.sendLeafNodeConnect(c.acc)
+
+	// If we have a specified JetStream domain we will want to add a mapping to
+	// allow access cross domain for each non-system account.
+	if doDomainMappings {
+		src := fmt.Sprintf(jsDomainAPI, opts.JetStreamDomain)
+		if err := acc.AddMapping(src, jsAllAPI); err != nil {
+			c.Debugf("Error adding JetStream domain mapping: %v", err)
+		}
+	}
 
 	return nil
 }
@@ -1175,16 +1411,15 @@ func (c *client) remoteCluster() string {
 
 // Sends back an info block to the soliciting leafnode to let it know about
 // its permission settings for local enforcement.
-func (s *Server) sendPermsInfo(c *client) {
-	if c.perms == nil {
-		return
-	}
+func (s *Server) sendPermsAndAccountInfo(c *client) {
 	// Copy
 	info := s.copyLeafNodeInfo()
 	c.mu.Lock()
 	info.CID = c.cid
 	info.Import = c.opts.Import
 	info.Export = c.opts.Export
+	info.RemoteAccount = c.acc.Name
+	info.ConnectInfo = true
 	b, _ := json.Marshal(info)
 	pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
 	c.enqueueProto(bytes.Join(pcs, []byte(" ")))
@@ -1204,8 +1439,10 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	_subs := [32]*subscription{}
 	subs := _subs[:0]
 	ims := []string{}
+
 	acc.mu.Lock()
 	accName := acc.Name
+	accNTag := acc.nameTag
 	// If we are solicited we only send interest for local clients.
 	if c.isSpokeLeafNode() {
 		acc.sl.localSubs(&subs)
@@ -1219,8 +1456,17 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	// Since leaf nodes only send on interest, if the bound
 	// account has import services we need to send those over.
 	for isubj := range acc.imports.services {
+		if !c.canSubscribe(isubj) {
+			c.Debugf("Not permitted to import service %s on behalf of %s/%s", isubj, accName, accNTag)
+			continue
+		}
 		ims = append(ims, isubj)
 	}
+	// Likewise for mappings.
+	for _, m := range acc.mappings {
+		ims = append(ims, m.src)
+	}
+
 	// Create a unique subject that will be used for loop detection.
 	lds := acc.lds
 	if lds == _EMPTY_ {
@@ -1256,10 +1502,17 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 
 	// Now walk the results and add them to our smap
 	c.mu.Lock()
+	rc := c.leaf.remoteCluster
 	c.leaf.smap = make(map[string]int32)
 	for _, sub := range subs {
+		if !c.canSubscribe(string(sub.subject)) {
+			c.Debugf("Not permitted to subscribe to %s on behalf of %s/%s", string(sub.subject), accName, accNTag)
+			continue
+		}
 		// We ignore ourselves here.
-		if c != sub.client {
+		// Also don't add the subscription if it has a origin cluster and the
+		// cluster name matches the one of the client we are sending to.
+		if c != sub.client && (sub.origin == nil || (string(sub.origin) != rc)) {
 			c.leaf.smap[keyFromSub(sub)]++
 			if c.leaf.tsub == nil {
 				c.leaf.tsub = make(map[*subscription]struct{})
@@ -1344,6 +1597,8 @@ func (s *Server) updateLeafNodes(acc *Account, sub *subscription, delta int32) {
 		// Check to make sure this sub does not have an origin cluster than matches the leafnode.
 		ln.mu.Lock()
 		skip := sub.origin != nil && string(sub.origin) == ln.remoteCluster()
+		// do not skip on !ln.canSubscribe(string(sub.subject))
+		// Given allow:foo, > would be rejected. For leaf nodes filtering is done on the (soliciting) end.
 		ln.mu.Unlock()
 		if skip {
 			continue
@@ -1398,6 +1653,20 @@ func (c *client) updateSmap(sub *subscription, delta int32) {
 		c.sendLeafNodeSubUpdate(key, n)
 	}
 	c.mu.Unlock()
+}
+
+// Used to force add subjects to the subject map.
+func (c *client) forceAddToSmap(subj string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := c.leaf.smap[subj]
+	if n != 0 {
+		return
+	}
+	// Place into the map since it was not there.
+	c.leaf.smap[subj] = 1
+	c.sendLeafNodeSubUpdate(subj, 1)
 }
 
 // Send the subscription interest change to the other side.
@@ -1554,6 +1823,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	key := string(sub.sid)
 	osub := c.subs[key]
 	updateGWs := false
+	delta := int32(1)
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -1567,6 +1837,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 		updateGWs = srv.gateway.enabled
 	} else if sub.queue != nil {
 		// For a queue we need to update the weight.
+		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
 	}
@@ -1582,14 +1853,14 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	// other leaf nodes as needed.
 	if !spoke {
 		// If we are routing add to the route map for the associated account.
-		srv.updateRouteSubscriptionMap(acc, sub, 1)
+		srv.updateRouteSubscriptionMap(acc, sub, delta)
 		if updateGWs {
-			srv.gatewayUpdateSubInterest(acc.Name, sub, 1)
+			srv.gatewayUpdateSubInterest(acc.Name, sub, delta)
 		}
 	}
 	// Now check on leafnode updates for other leaf nodes. We understand solicited
 	// and non-solicited state in this call so we will do the right thing.
-	srv.updateLeafNodes(acc, sub, 1)
+	srv.updateLeafNodes(acc, sub, delta)
 
 	return nil
 }
@@ -1626,6 +1897,7 @@ func (c *client) processLeafUnsub(arg []byte) error {
 	}
 
 	updateGWs := false
+	spoke := c.isSpokeLeafNode()
 	// We store local subs by account and subject and optionally queue name.
 	// LS- will have the arg exactly as the key.
 	sub, ok := c.subs[string(arg)]
@@ -1636,11 +1908,13 @@ func (c *client) processLeafUnsub(arg []byte) error {
 		updateGWs = srv.gateway.enabled
 	}
 
-	// If we are routing subtract from the route map for the associated account.
-	srv.updateRouteSubscriptionMap(acc, sub, -1)
-	// Gateways
-	if updateGWs {
-		srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
+	if !spoke {
+		// If we are routing subtract from the route map for the associated account.
+		srv.updateRouteSubscriptionMap(acc, sub, -1)
+		// Gateways
+		if updateGWs {
+			srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
+		}
 	}
 	// Now check on leafnode updates for other leaf nodes.
 	srv.updateLeafNodes(acc, sub, -1)
@@ -1808,14 +2082,7 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 	c.in.msgs++
 	c.in.bytes += int32(len(msg) - LEN_CR_LF)
 
-	// Check pub permissions
-	if c.perms != nil && (c.perms.pub.allow != nil || c.perms.pub.deny != nil) && c.isHubLeafNode() && !c.pubAllowed(string(c.pa.subject)) {
-		c.leafPubPermViolation(c.pa.subject)
-		return
-	}
-
-	srv := c.srv
-	acc := c.acc
+	srv, acc, subject := c.srv, c.acc, string(c.pa.subject)
 
 	// Mostly under testing scenarios.
 	if srv == nil || acc == nil {
@@ -1829,7 +2096,7 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 
 	genid := atomic.LoadUint64(&c.acc.sl.genid)
 	if genid == c.in.genid && c.in.results != nil {
-		r, ok = c.in.results[string(c.pa.subject)]
+		r, ok = c.in.results[subject]
 	} else {
 		// Reset our L1 completely.
 		c.in.results = make(map[string]*SublistResult)
@@ -1838,13 +2105,13 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 
 	// Go back to the sublist data structure.
 	if !ok {
-		r = c.acc.sl.Match(string(c.pa.subject))
-		c.in.results[string(c.pa.subject)] = r
+		r = c.acc.sl.Match(subject)
+		c.in.results[subject] = r
 		// Prune the results cache. Keeps us from unbounded growth. Random delete.
 		if len(c.in.results) > maxResultCacheSize {
 			n := 0
-			for subject := range c.in.results {
-				delete(c.in.results, subject)
+			for subj := range c.in.results {
+				delete(c.in.results, subj)
 				if n++; n > pruneSize {
 					break
 				}
@@ -1874,12 +2141,6 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 	if c.srv.gateway.enabled {
 		c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, qnames)
 	}
-}
-
-// Handles a publish permission violation.
-// See leafPermViolation() for details.
-func (c *client) leafPubPermViolation(subj []byte) {
-	c.leafPermViolation(true, subj)
 }
 
 // Handles a subscription permission violation.
@@ -1995,7 +2256,7 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	// Do TLS here as needed.
 	if tlsRequired {
 		// Perform the client-side TLS handshake.
-		if resetTLSName, err := c.doTLSClientHandshake("leafnode", rURL, tlsConfig, tlsName, tlsTimeout); err != nil {
+		if resetTLSName, err := c.doTLSClientHandshake("leafnode", rURL, tlsConfig, tlsName, tlsTimeout, opts.LeafNode.TLSPinnedCerts); err != nil {
 			// Check if we need to reset the remote's TLS name.
 			if resetTLSName {
 				remote.Lock()
@@ -2006,9 +2267,6 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 			return nil, 0, err
 		}
 	}
-
-	var req *http.Request
-	var wsKey string
 
 	// For http request, we need the passed URL to contain either http or https scheme.
 	scheme := "http"
@@ -2028,7 +2286,7 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	}
 	ustr := fmt.Sprintf("%s://%s%s", scheme, rURL.Host, path)
 	u, _ := url.Parse(ustr)
-	req = &http.Request{
+	req := &http.Request{
 		Method:     "GET",
 		URL:        u,
 		Proto:      "HTTP/1.1",
@@ -2106,10 +2364,11 @@ func (c *client) leafNodeSolicitWSConnection(opts *Options, rURL *url.URL, remot
 	return preBuf, 0, nil
 }
 
+const connectProcessTimeout = 2 * time.Second
+
 // This is invoked for remote LEAF remote connections after processing the INFO
-// protocol. This will do the TLS handshake (if needed be), send the CONNECT protocol
-// and register the leaf node.
-func (s *Server) leafNodeFinishConnectProcess(c *client) {
+// protocol. This will do the TLS handshake (if needed be)
+func (s *Server) leafNodeResumeConnectProcess(c *client) {
 	clusterName := s.ClusterName()
 
 	c.mu.Lock()
@@ -2118,11 +2377,6 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 		return
 	}
 	remote := c.leaf.remote
-
-	// Check if we will need to send the system connect event.
-	remote.RLock()
-	sendSysConnectEvent := remote.Hub
-	remote.RUnlock()
 
 	var tlsRequired bool
 
@@ -2142,7 +2396,7 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 			rURL := remote.getCurrentURL()
 
 			// Perform the client-side TLS handshake.
-			if resetTLSName, err := c.doTLSClientHandshake("leafnode", rURL, tlsConfig, tlsName, tlsTimeout); err != nil {
+			if resetTLSName, err := c.doTLSClientHandshake("leafnode", rURL, tlsConfig, tlsName, tlsTimeout, c.srv.getOpts().LeafNode.TLSPinnedCerts); err != nil {
 				// Check if we need to reset the remote's TLS name.
 				if resetTLSName {
 					remote.Lock()
@@ -2163,15 +2417,55 @@ func (s *Server) leafNodeFinishConnectProcess(c *client) {
 	// Spin up the write loop.
 	s.startGoRoutine(func() { c.writeLoop() })
 
+	// timeout leafNodeFinishConnectProcess
+	c.ping.tmr = time.AfterFunc(connectProcessTimeout, func() {
+		c.mu.Lock()
+		// check if leafNodeFinishConnectProcess was called and prevent later leafNodeFinishConnectProcess
+		if !c.flags.setIfNotSet(connectProcessFinished) {
+			c.mu.Unlock()
+			return
+		}
+		clearTimer(&c.ping.tmr)
+		closed := c.isClosed()
+		c.mu.Unlock()
+		if !closed {
+			c.sendErrAndDebug("Stale Leaf Node Connection - Closing")
+			c.closeConnection(StaleConnection)
+		}
+	})
+	c.mu.Unlock()
 	c.Debugf("Remote leafnode connect msg sent")
+}
+
+// This is invoked for remote LEAF remote connections after processing the INFO
+// protocol and leafNodeResumeConnectProcess.
+// This will send LS+ the CONNECT protocol and register the leaf node.
+func (s *Server) leafNodeFinishConnectProcess(c *client) {
+	c.mu.Lock()
+	if !c.flags.setIfNotSet(connectProcessFinished) {
+		c.mu.Unlock()
+		return
+	}
+	if c.isClosed() {
+		c.mu.Unlock()
+		s.removeLeafNodeConnection(c)
+		return
+	}
+	remote := c.leaf.remote
+	// Check if we will need to send the system connect event.
+	remote.RLock()
+	sendSysConnectEvent := remote.Hub
+	remote.RUnlock()
 
 	// Capture account before releasing lock
 	acc := c.acc
+	// cancel connectProcessTimeout
+	clearTimer(&c.ping.tmr)
 	c.mu.Unlock()
 
 	// Make sure we register with the account here.
 	c.registerWithAccount(acc)
-	s.addLeafNodeConnection(c, _EMPTY_, false)
+	s.addLeafNodeConnection(c, _EMPTY_, _EMPTY_, false)
 	s.initLeafNodeSmapAndSendSubs(c)
 	if sendSysConnectEvent {
 		s.sendLeafNodeConnect(acc)

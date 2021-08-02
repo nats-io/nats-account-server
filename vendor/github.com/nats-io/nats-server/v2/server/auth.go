@@ -14,10 +14,12 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -40,13 +42,15 @@ type Authentication interface {
 // ClientAuthentication is an interface for client authentication
 type ClientAuthentication interface {
 	// Get options associated with a client
-	GetOpts() *clientOpts
+	GetOpts() *ClientOpts
 	// If TLS is enabled, TLS ConnectionState, nil otherwise
 	GetTLSConnectionState() *tls.ConnectionState
 	// Optionally map a user after auth.
 	RegisterUser(*User)
 	// RemoteAddress expose the connection information of the client
 	RemoteAddress() net.Addr
+	// Kind indicates what type of connection this is matching defined constants like CLIENT, ROUTER, GATEWAY, LEAF etc
+	Kind() int
 }
 
 // NkeyUser is for multiple nkey based users
@@ -326,11 +330,39 @@ func (s *Server) isClientAuthorized(c *client) bool {
 	// Check custom auth first, then jwts, then nkeys, then
 	// multiple users with TLS map if enabled, then token,
 	// then single user/pass.
-	if opts.CustomClientAuthentication != nil {
-		return opts.CustomClientAuthentication.Check(c)
+	if opts.CustomClientAuthentication != nil && !opts.CustomClientAuthentication.Check(c) {
+		return false
 	}
 
-	return s.processClientOrLeafAuthentication(c, opts)
+	if opts.CustomClientAuthentication == nil && !s.processClientOrLeafAuthentication(c, opts) {
+		return false
+	}
+
+	if c.kind == CLIENT || c.kind == LEAF {
+		// Generate an event if we have a system account.
+		s.accountConnectEvent(c)
+	}
+
+	return true
+}
+
+// returns false if the client needs to be disconnected
+func (c *client) matchesPinnedCert(tlsPinnedCerts PinnedCertSet) bool {
+	if tlsPinnedCerts == nil {
+		return true
+	}
+	tlsState := c.GetTLSConnectionState()
+	if tlsState == nil || len(tlsState.PeerCertificates) == 0 || tlsState.PeerCertificates[0] == nil {
+		c.Debugf("Failed pinned cert test as client did not provide a certificate")
+		return false
+	}
+	sha := sha256.Sum256(tlsState.PeerCertificates[0].RawSubjectPublicKeyInfo)
+	keyId := hex.EncodeToString(sha[:])
+	if _, ok := tlsPinnedCerts[keyId]; !ok {
+		c.Debugf("Failed pinned cert test for key id: %s", keyId)
+		return false
+	}
+	return true
 }
 
 func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) bool {
@@ -399,6 +431,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 	} else {
 		tlsMap = opts.LeafNode.TLSMap
 	}
+
 	if !ao {
 		noAuthUser = opts.NoAuthUser
 		username = opts.Username
@@ -500,7 +533,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			// but we set it here to be able to identify it in the logs.
 			c.opts.Username = user.Username
 		} else {
-			if c.kind == CLIENT && c.opts.Username == _EMPTY_ && noAuthUser != _EMPTY_ {
+			if (c.kind == CLIENT || c.kind == LEAF) && c.opts.Username == _EMPTY_ && noAuthUser != _EMPTY_ {
 				if u, exists := s.users[noAuthUser]; exists {
 					c.mu.Lock()
 					c.opts.Username = u.Username
@@ -632,16 +665,13 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		c.nameTag = juc.Name
 		c.mu.Unlock()
 
-		// Generate an event if we have a system account.
-		s.accountConnectEvent(c)
-
 		// Check if we need to set an auth timer if the user jwt expires.
 		c.setExpiration(juc.Claims(), validFor)
 
 		acc.mu.RLock()
 		c.Debugf("Authenticated JWT: %s %q (claim-name: %q, claim-tags: %q) "+
 			"signed with %q by Account %q (claim-name: %q, claim-tags: %q) signed with %q",
-			c.typeString(), juc.Subject, juc.Name, juc.Tags, juc.Issuer, issuer, acc.nameTag, acc.tags, acc.Issuer)
+			c.kindString(), juc.Subject, juc.Name, juc.Tags, juc.Issuer, issuer, acc.nameTag, acc.tags, acc.Issuer)
 		acc.mu.RUnlock()
 		return true
 	}
@@ -680,8 +710,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		// for pub/sub authorizations.
 		if ok {
 			c.RegisterUser(user)
-			// Generate an event if we have a system account and this is not the $G account.
-			s.accountConnectEvent(c)
 		}
 		return ok
 	}
@@ -964,7 +992,7 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	}
 
 	// If leafnodes config has an authorization{} stanza, this takes precedence.
-	// The user in CONNECT mutch match. We will bind to the account associated
+	// The user in CONNECT must match. We will bind to the account associated
 	// with that user (from the leafnode's authorization{} config).
 	if opts.LeafNode.Username != _EMPTY_ {
 		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
@@ -979,18 +1007,23 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 						return u, true
 					}
 				}
-				return "", false
+				return _EMPTY_, false
 			})
 			if !found {
 				return false
 			}
-			if c.opts.Username != "" {
+			if c.opts.Username != _EMPTY_ {
 				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
 			}
 			c.opts.Username = user.Username
+			// EMPTY will result in $G
+			accName := _EMPTY_
+			if user.Account != nil {
+				accName = user.Account.GetName()
+			}
 			// This will authorize since are using an existing user,
 			// but it will also register with proper account.
-			return isAuthorized(user.Username, user.Password, user.Account.GetName())
+			return isAuthorized(user.Username, user.Password, accName)
 		}
 
 		// This is expected to be a very small array.
@@ -1011,7 +1044,7 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	// Still, if the CONNECT has some user info, we will bind to the
 	// user's account or to the specified default account (if provided)
 	// or to the global account.
-	return s.processClientOrLeafAuthentication(c, opts)
+	return s.isClientAuthorized(c)
 }
 
 // Support for bcrypt stored passwords and tokens.
@@ -1039,6 +1072,9 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 }
 
 func validateAuth(o *Options) error {
+	if err := validatePinnedCerts(o.TLSPinnedCerts); err != nil {
+		return err
+	}
 	for _, u := range o.Users {
 		if err := validateAllowedConnectionTypes(u.AllowedConnectionTypes); err != nil {
 			return err
