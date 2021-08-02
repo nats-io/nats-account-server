@@ -373,9 +373,7 @@ func (server *AccountServer) initializeFromPrimary() error {
 
 	server.logger.Noticef("grabbing initial JWT pack from primary %s", primary)
 
-	if strings.HasSuffix(primary, "/") {
-		primary = primary[:len(primary)-1]
-	}
+	primary = strings.TrimSuffix(primary, "/")
 
 	url := fmt.Sprintf("%s/jwt/v1/pack?max=%d", primary, server.config.MaxReplicationPack)
 
