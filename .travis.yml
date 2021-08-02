@@ -5,7 +5,7 @@ go:
 - 1.15.x
 
 env:
-- GO111MODULE=on
+- GO111MODULE=off
 
 install:
 - go get -t ./...
@@ -21,4 +21,4 @@ before_script:
 - staticcheck ./...
 
 script:
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]] ; then ./scripts/cov.sh TRAVIS; else go test -v -race -p=1 --failfast ./...; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.15 ]] ; then GO111MODULE=on ./scripts/cov.sh TRAVIS; else GO111MODULE=on go test -v -race -p=1 --failfast ./...; fi

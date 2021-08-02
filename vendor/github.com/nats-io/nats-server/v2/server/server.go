@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"regexp"
 
 	// Allow dynamic profiling.
 	_ "net/http/pprof"
@@ -78,14 +79,17 @@ type Info struct {
 	Nonce             string   `json:"nonce,omitempty"`
 	Cluster           string   `json:"cluster,omitempty"`
 	Dynamic           bool     `json:"cluster_dynamic,omitempty"`
+	Domain            string   `json:"domain,omitempty"`
 	ClientConnectURLs []string `json:"connect_urls,omitempty"`    // Contains URLs a client can connect to.
 	WSConnectURLs     []string `json:"ws_connect_urls,omitempty"` // Contains URLs a ws client can connect to.
 	LameDuckMode      bool     `json:"ldm,omitempty"`
 
 	// Route Specific
-	Import *SubjectPermission `json:"import,omitempty"`
-	Export *SubjectPermission `json:"export,omitempty"`
-	LNOC   bool               `json:"lnoc,omitempty"`
+	Import        *SubjectPermission `json:"import,omitempty"`
+	Export        *SubjectPermission `json:"export,omitempty"`
+	LNOC          bool               `json:"lnoc,omitempty"`
+	InfoOnConnect bool               `json:"info_on_connect,omitempty"` // When true the server will respond to CONNECT with an INFO
+	ConnectInfo   bool               `json:"connect_info,omitempty"`    // When true this is the server INFO response to CONNECT
 
 	// Gateways Specific
 	Gateway           string   `json:"gateway,omitempty"`             // Name of the origin Gateway (sent by gateway's INFO)
@@ -96,61 +100,66 @@ type Info struct {
 	GatewayNRP        bool     `json:"gateway_nrp,omitempty"`         // Uses new $GNR. prefix for mapped replies
 
 	// LeafNode Specific
-	LeafNodeURLs []string `json:"leafnode_urls,omitempty"` // LeafNode URLs that the server can reconnect to.
+	LeafNodeURLs  []string `json:"leafnode_urls,omitempty"`  // LeafNode URLs that the server can reconnect to.
+	RemoteAccount string   `json:"remote_account,omitempty"` // Lets the other side know the remote account that they bind to.
 }
 
 // Server is our main struct.
 type Server struct {
 	gcid uint64
 	stats
-	mu               sync.Mutex
-	kp               nkeys.KeyPair
-	prand            *rand.Rand
-	info             Info
-	configFile       string
-	optsMu           sync.RWMutex
-	opts             *Options
-	running          bool
-	shutdown         bool
-	reloading        bool
-	listener         net.Listener
-	gacc             *Account
-	sys              *internal
-	js               *jetStream
-	accounts         sync.Map
-	tmpAccounts      sync.Map // Temporarily stores accounts that are being built
-	activeAccounts   int32
-	accResolver      AccountResolver
-	clients          map[uint64]*client
-	routes           map[uint64]*client
-	routesByHash     sync.Map
-	remotes          map[string]*client
-	leafs            map[uint64]*client
-	users            map[string]*User
-	nkeys            map[string]*NkeyUser
-	totalClients     uint64
-	closed           *closedRingBuffer
-	done             chan bool
-	start            time.Time
-	http             net.Listener
-	httpHandler      http.Handler
-	httpBasePath     string
-	profiler         net.Listener
-	httpReqStats     map[string]uint64
-	routeListener    net.Listener
-	routeInfo        Info
-	routeInfoJSON    []byte
-	routeResolver    netResolver
-	routesToSelf     map[string]struct{}
-	leafNodeListener net.Listener
-	leafNodeInfo     Info
-	leafNodeInfoJSON []byte
-	leafURLsMap      refCountedUrlSet
-	leafNodeOpts     struct {
+	mu                  sync.Mutex
+	kp                  nkeys.KeyPair
+	prand               *rand.Rand
+	info                Info
+	configFile          string
+	optsMu              sync.RWMutex
+	opts                *Options
+	running             bool
+	shutdown            bool
+	reloading           bool
+	listener            net.Listener
+	listenerErr         error
+	gacc                *Account
+	sys                 *internal
+	js                  *jetStream
+	accounts            sync.Map
+	tmpAccounts         sync.Map // Temporarily stores accounts that are being built
+	activeAccounts      int32
+	accResolver         AccountResolver
+	clients             map[uint64]*client
+	routes              map[uint64]*client
+	routesByHash        sync.Map
+	remotes             map[string]*client
+	leafs               map[uint64]*client
+	users               map[string]*User
+	nkeys               map[string]*NkeyUser
+	totalClients        uint64
+	closed              *closedRingBuffer
+	done                chan bool
+	start               time.Time
+	http                net.Listener
+	httpHandler         http.Handler
+	httpBasePath        string
+	profiler            net.Listener
+	httpReqStats        map[string]uint64
+	routeListener       net.Listener
+	routeListenerErr    error
+	routeInfo           Info
+	routeInfoJSON       []byte
+	routeResolver       netResolver
+	routesToSelf        map[string]struct{}
+	leafNodeListener    net.Listener
+	leafNodeListenerErr error
+	leafNodeInfo        Info
+	leafNodeInfoJSON    []byte
+	leafURLsMap         refCountedUrlSet
+	leafNodeOpts        struct {
 		resolver    netResolver
 		dialTimeout time.Duration
 	}
-	leafRemoteCfgs []*leafNodeCfg
+	leafRemoteCfgs     []*leafNodeCfg
+	leafRemoteAccounts sync.Map
 
 	quitCh           chan struct{}
 	shutdownComplete chan struct{}
@@ -180,8 +189,9 @@ type Server struct {
 	lastCURLsUpdate int64
 
 	// For Gateways
-	gatewayListener net.Listener // Accept listener
-	gateway         *srvGateway
+	gatewayListener    net.Listener // Accept listener
+	gatewayListenerErr error
+	gateway            *srvGateway
 
 	// Used by tests to check that http.Servers do
 	// not set any timeout.
@@ -227,6 +237,9 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	// OCSP monitoring
+	ocsps []*OCSPMonitor
+
 	// exporting account name the importer experienced issues with
 	incompleteAccExporterMap sync.Map
 
@@ -238,15 +251,27 @@ type Server struct {
 	rnMu      sync.RWMutex
 	raftNodes map[string]RaftNode
 
-	// For mapping from a raft node name back to a server name and cluster.
+	// For mapping from a raft node name back to a server name and cluster. Node has to be in the same domain.
 	nodeToInfo sync.Map
+
+	// For out of resources to not log errors too fast.
+	rerrMu   sync.Mutex
+	rerrLast time.Time
+
+	// If there is a system account configured, to still support the $G account,
+	// the server will create a fake user and add it to the list of users.
+	// Keep track of what that user name is for config reload purposes.
+	sysAccOnlyNoAuthUser string
 }
 
+// For tracking JS nodes.
 type nodeInfo struct {
 	name    string
 	cluster string
+	domain  string
 	id      string
 	offline bool
+	js      bool
 }
 
 // Make sure all are 64bits for atomic use
@@ -309,6 +334,7 @@ func NewServer(opts *Options) (*Server, error) {
 		JetStream:    opts.JetStream,
 		Headers:      !opts.NoHeaderSupport,
 		Cluster:      opts.Cluster.Name,
+		Domain:       opts.JetStreamDomain,
 	}
 
 	if tlsReq && !info.TLSRequired {
@@ -330,11 +356,18 @@ func NewServer(opts *Options) (*Server, error) {
 		httpBasePath: httpBasePath,
 		eventIds:     nuid.New(),
 		routesToSelf: make(map[string]struct{}),
+		httpReqStats: make(map[string]uint64), // Used to track HTTP requests
 	}
 
 	// Trusted root operator keys.
 	if !s.processTrustedKeys() {
 		return nil, fmt.Errorf("Error processing trusted operator keys")
+	}
+
+	// If we have solicited leafnodes but no clustering and no clustername.
+	// However we may need a stable clustername so use the server name.
+	if len(opts.LeafNode.Remotes) > 0 && opts.Cluster.Port == 0 && opts.Cluster.Name == _EMPTY_ {
+		opts.Cluster.Name = opts.ServerName
 	}
 
 	if opts.Cluster.Name != _EMPTY_ {
@@ -349,7 +382,7 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// Place ourselves in some lookup maps.
 	ourNode := string(getHash(serverName))
-	s.nodeToInfo.Store(ourNode, nodeInfo{serverName, opts.Cluster.Name, info.ID, false})
+	s.nodeToInfo.Store(ourNode, nodeInfo{serverName, opts.Cluster.Name, opts.JetStreamDomain, info.ID, false, opts.JetStream})
 
 	s.routeResolver = opts.Cluster.resolver
 	if s.routeResolver == nil {
@@ -364,6 +397,12 @@ func NewServer(opts *Options) (*Server, error) {
 	// Ensure that non-exported options (used in tests) are properly set.
 	s.setLeafNodeNonExportedOptions()
 
+	// Setup OCSP Stapling. This will abort server from starting if there
+	// are no valid staples and OCSP policy is to Always or MustStaple.
+	if err := s.enableOCSP(); err != nil {
+		return nil, err
+	}
+
 	// Call this even if there is no gateway defined. It will
 	// initialize the structure so we don't have to check for
 	// it to be nil or not in various places in the code.
@@ -372,8 +411,11 @@ func NewServer(opts *Options) (*Server, error) {
 	}
 
 	// If we have a cluster definition but do not have a cluster name, create one.
-	if opts.Cluster.Port != 0 && opts.Cluster.Name == "" {
+	if opts.Cluster.Port != 0 && opts.Cluster.Name == _EMPTY_ {
 		s.info.Cluster = nuid.Next()
+	} else if opts.Cluster.Name != _EMPTY_ {
+		// Likewise here if we have a cluster name set.
+		s.info.Cluster = opts.Cluster.Name
 	}
 
 	// This is normally done in the AcceptLoop, once the
@@ -511,7 +553,7 @@ func (s *Server) setClusterName(name string) {
 
 // Return whether the cluster name is dynamic.
 func (s *Server) isClusterNameDynamic() bool {
-	return s.getOpts().Cluster.Name == ""
+	return s.getOpts().Cluster.Name == _EMPTY_
 }
 
 // ClientURL returns the URL used to connect clients. Helpful in testing
@@ -526,7 +568,10 @@ func (s *Server) ClientURL() string {
 	return fmt.Sprintf("%s%s:%d", scheme, opts.Host, opts.Port)
 }
 
-func validateClusterName(o *Options) error {
+func validateCluster(o *Options) error {
+	if err := validatePinnedCerts(o.Cluster.TLSPinnedCerts); err != nil {
+		return fmt.Errorf("cluster: %v", err)
+	}
 	// Check that cluster name if defined matches any gateway name.
 	if o.Gateway.Name != "" && o.Gateway.Name != o.Cluster.Name {
 		if o.Cluster.Name != "" {
@@ -534,6 +579,17 @@ func validateClusterName(o *Options) error {
 		}
 		// Set this here so we do not consider it dynamic.
 		o.Cluster.Name = o.Gateway.Name
+	}
+	return nil
+}
+
+func validatePinnedCerts(pinned PinnedCertSet) error {
+	re := regexp.MustCompile("^[a-f0-9]{64}$")
+	for certId := range pinned {
+		entry := strings.ToLower(certId)
+		if !re.MatchString(entry) {
+			return fmt.Errorf("error parsing 'pinned_certs' key %s does not look like lower case hex-encoded sha256 of DER encoded SubjectPublicKeyInfo", entry)
+		}
 	}
 	return nil
 }
@@ -562,7 +618,7 @@ func validateOptions(o *Options) error {
 		return err
 	}
 	// Check that cluster name if defined matches any gateway name.
-	if err := validateClusterName(o); err != nil {
+	if err := validateCluster(o); err != nil {
 		return err
 	}
 	if err := validateMQTTOptions(o); err != nil {
@@ -709,15 +765,21 @@ func (s *Server) configureAccounts() error {
 		// We would do this to add user/pass to the system account. If this is the case add in
 		// no-auth-user for $G.
 		if numAccounts == 2 && s.opts.NoAuthUser == _EMPTY_ {
-			// Create a unique name so we do not collide.
-			var b [8]byte
-			rn := rand.Int63()
-			for i, l := 0, rn; i < len(b); i++ {
-				b[i] = digits[l%base]
-				l /= base
+			// If we come here from config reload, let's not recreate the fake user name otherwise
+			// it will cause currently clients to be disconnected.
+			uname := s.sysAccOnlyNoAuthUser
+			if uname == _EMPTY_ {
+				// Create a unique name so we do not collide.
+				var b [8]byte
+				rn := rand.Int63()
+				for i, l := 0, rn; i < len(b); i++ {
+					b[i] = digits[l%base]
+					l /= base
+				}
+				uname = fmt.Sprintf("nats-%s", b[:])
+				s.sysAccOnlyNoAuthUser = uname
 			}
-			uname := fmt.Sprintf("nats-%s", b[:])
-			s.opts.Users = append(s.opts.Users, &User{Username: uname, Password: string(b[:]), Account: s.gacc})
+			s.opts.Users = append(s.opts.Users, &User{Username: uname, Password: uname[6:], Account: s.gacc})
 			s.opts.NoAuthUser = uname
 		}
 	}
@@ -808,10 +870,10 @@ func (s *Server) globalAccountOnly() bool {
 	return !hasOthers
 }
 
-// Determines if this server is in standalone mode, meaning no routes or gateways or leafnodes.
+// Determines if this server is in standalone mode, meaning no routes or gateways.
 func (s *Server) standAloneMode() bool {
 	opts := s.getOpts()
-	return opts.Cluster.Port == 0 && opts.LeafNode.Port == 0 && opts.Gateway.Port == 0
+	return opts.Cluster.Port == 0 && opts.Gateway.Port == 0
 }
 
 func (s *Server) configuredRoutes() int {
@@ -1232,6 +1294,7 @@ func (s *Server) registerAccountNoLock(acc *Account) *Account {
 	// Finish account setup and store.
 	s.setAccountSublist(acc)
 
+	acc.mu.Lock()
 	if acc.clients == nil {
 		acc.clients = make(map[*client]struct{})
 	}
@@ -1241,7 +1304,6 @@ func (s *Server) registerAccountNoLock(acc *Account) *Account {
 	// During config reload, it is possible that account was
 	// already created (global account), so use locking and
 	// make sure we create only if needed.
-	acc.mu.Lock()
 	// TODO(dlc)- Double check that we need this for GWs.
 	if acc.rm == nil && s.opts != nil && s.shouldTrackSubscriptions() {
 		acc.rm = make(map[string]int32)
@@ -1282,7 +1344,7 @@ func (s *Server) lookupAccount(name string) (*Account, error) {
 	}
 	// If we have a resolver see if it can fetch the account.
 	if s.AccountResolver() == nil {
-		return nil, ErrNoAccountResolver
+		return nil, ErrMissingAccount
 	}
 	return s.fetchAccount(name)
 }
@@ -1314,9 +1376,12 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 	if acc == nil {
 		return ErrMissingAccount
 	}
-	if acc.claimJWT != "" && acc.claimJWT == claimJWT && !acc.incomplete {
+	acc.mu.RLock()
+	sameClaim := acc.claimJWT != "" && acc.claimJWT == claimJWT && !acc.incomplete
+	acc.mu.RUnlock()
+	if sameClaim {
 		s.Debugf("Requested account update for [%s], same claims detected", acc.Name)
-		return ErrAccountResolverSameClaims
+		return nil
 	}
 	accClaims, _, err := s.verifyAccountClaims(claimJWT)
 	if err == nil && accClaims != nil {
@@ -1328,9 +1393,13 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 			acc.mu.Unlock()
 			return ErrAccountValidation
 		}
-		acc.claimJWT = claimJWT
 		acc.mu.Unlock()
 		s.UpdateAccountClaims(acc, accClaims)
+		acc.mu.Lock()
+		// needs to be set after update completed.
+		// This causes concurrent calls to return with sameClaim=true if the change is effective.
+		acc.claimJWT = claimJWT
+		acc.mu.Unlock()
 		return nil
 	}
 	return err
@@ -1341,7 +1410,7 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 func (s *Server) fetchRawAccountClaims(name string) (string, error) {
 	accResolver := s.AccountResolver()
 	if accResolver == nil {
-		return "", ErrNoAccountResolver
+		return _EMPTY_, ErrNoAccountResolver
 	}
 	// Need to do actual Fetch
 	start := time.Now()
@@ -1405,10 +1474,7 @@ func (s *Server) fetchAccount(name string) (*Account, error) {
 	// registered and we should use this one.
 	if racc := s.registerAccount(acc); racc != nil {
 		// Update with the new claims in case they are new.
-		// Following call will ignore ErrAccountResolverSameClaims
-		// if claims are the same.
-		err = s.updateAccountWithClaimJWT(racc, claimJWT)
-		if err != nil && err != ErrAccountResolverSameClaims {
+		if err = s.updateAccountWithClaimJWT(racc, claimJWT); err != nil {
 			return nil, err
 		}
 		return racc, nil
@@ -1442,10 +1508,10 @@ func (s *Server) Start() {
 	s.Noticef("  Git:      [%s]", gc)
 	s.Debugf("  Go build: %s", s.info.GoVersion)
 	s.Noticef("  Name:     %s", s.info.Name)
-	s.Noticef("  ID:       %s", s.info.ID)
 	if opts.JetStream {
 		s.Noticef("  Node:     %s", getHash(s.info.Name))
 	}
+	s.Noticef("  ID:       %s", s.info.ID)
 
 	defer s.Noticef("Server is ready")
 
@@ -1556,6 +1622,7 @@ func (s *Server) Start() {
 			StoreDir:  opts.StoreDir,
 			MaxMemory: opts.JetStreamMaxMemory,
 			MaxStore:  opts.JetStreamMaxStore,
+			Domain:    opts.JetStreamDomain,
 		}
 		if err := s.EnableJetStream(cfg); err != nil {
 			s.Fatalf("Can't start JetStream: %v", err)
@@ -1570,13 +1637,16 @@ func (s *Server) Start() {
 			acc.mu.RUnlock()
 			if hasJs {
 				s.checkJetStreamExports()
-				acc.enableAllJetStreamServiceImports()
+				acc.enableAllJetStreamServiceImportsAndMappings()
 			}
 			return true
 		})
 	}
 
-	// Start monitoring if needed
+	// Start OCSP Stapling monitoring for TLS certificates if enabled.
+	s.startOCSPMonitoring()
+
+	// Start monitoring if needed.
 	if err := s.StartMonitoring(); err != nil {
 		s.Fatalf("Can't start monitoring: %v", err)
 		return
@@ -1649,6 +1719,9 @@ func (s *Server) Start() {
 // Shutdown will shutdown the server instance by kicking out the AcceptLoop
 // and closing all associated clients.
 func (s *Server) Shutdown() {
+	if s == nil {
+		return
+	}
 	// Transfer off any raft nodes that we are a leader by shutting them all down.
 	s.shutdownRaftNodes()
 
@@ -1670,9 +1743,7 @@ func (s *Server) Shutdown() {
 	}
 	s.Noticef("Initiating Shutdown...")
 
-	if s.accResolver != nil {
-		s.accResolver.Close()
-	}
+	accRes := s.accResolver
 
 	opts := s.getOpts()
 
@@ -1682,6 +1753,10 @@ func (s *Server) Shutdown() {
 	s.grRunning = false
 	s.grMu.Unlock()
 	s.mu.Unlock()
+
+	if accRes != nil {
+		accRes.Close()
+	}
 
 	// Now check jetstream.
 	s.shutdownJetStream()
@@ -1837,6 +1912,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 
 	hp := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	l, e := natsListen("tcp", hp)
+	s.listenerErr = e
 	if e != nil {
 		s.mu.Unlock()
 		s.Fatalf("Error listening on port: %s, %q", hp, e)
@@ -2047,16 +2123,6 @@ func (s *Server) basePath(p string) string {
 func (s *Server) startMonitoring(secure bool) error {
 	// Snapshot server options.
 	opts := s.getOpts()
-
-	// Used to track HTTP requests
-	s.httpReqStats = map[string]uint64{
-		RootPath:     0,
-		VarzPath:     0,
-		ConnzPath:    0,
-		RoutezPath:   0,
-		GatewayzPath: 0,
-		SubszPath:    0,
-	}
 
 	var (
 		hp           string
@@ -2314,7 +2380,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 			pre = nil
 		}
 		// Performs server-side TLS handshake.
-		if err := c.doTLSServerHandshake(_EMPTY_, opts.TLSConfig, opts.TLSTimeout); err != nil {
+		if err := c.doTLSServerHandshake(_EMPTY_, opts.TLSConfig, opts.TLSTimeout, opts.TLSPinnedCerts); err != nil {
 			c.mu.Unlock()
 			return nil
 		}
@@ -2671,28 +2737,63 @@ func (s *Server) ProfilerAddr() *net.TCPAddr {
 	return s.profiler.Addr().(*net.TCPAddr)
 }
 
+func (s *Server) readyForConnections(d time.Duration) error {
+	// Snapshot server options.
+	opts := s.getOpts()
+
+	type info struct {
+		ok  bool
+		err error
+	}
+	chk := make(map[string]info)
+
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		s.mu.Lock()
+		chk["server"] = info{ok: s.listener != nil, err: s.listenerErr}
+		chk["route"] = info{ok: (opts.Cluster.Port == 0 || s.routeListener != nil), err: s.routeListenerErr}
+		chk["gateway"] = info{ok: (opts.Gateway.Name == "" || s.gatewayListener != nil), err: s.gatewayListenerErr}
+		chk["leafNode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
+		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
+		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+		s.mu.Unlock()
+
+		var numOK int
+		for _, inf := range chk {
+			if inf.ok {
+				numOK++
+			}
+		}
+		if numOK == len(chk) {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	failed := make([]string, 0, len(chk))
+	for name, inf := range chk {
+		if inf.ok && inf.err != nil {
+			failed = append(failed, fmt.Sprintf("%s(ok, but %s)", name, inf.err))
+		}
+		if !inf.ok && inf.err == nil {
+			failed = append(failed, name)
+		}
+		if !inf.ok && inf.err != nil {
+			failed = append(failed, fmt.Sprintf("%s(%s)", name, inf.err))
+		}
+	}
+
+	return fmt.Errorf(
+		"failed to be ready for connections after %s: %s",
+		d, strings.Join(failed, ", "),
+	)
+}
+
 // ReadyForConnections returns `true` if the server is ready to accept clients
 // and, if routing is enabled, route connections. If after the duration
 // `dur` the server is still not ready, returns `false`.
 func (s *Server) ReadyForConnections(dur time.Duration) bool {
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	end := time.Now().Add(dur)
-	for time.Now().Before(end) {
-		s.mu.Lock()
-		ok := s.listener != nil &&
-			(opts.Cluster.Port == 0 || s.routeListener != nil) &&
-			(opts.Gateway.Name == "" || s.gatewayListener != nil) &&
-			(opts.LeafNode.Port == 0 || s.leafNodeListener != nil) &&
-			(opts.Websocket.Port == 0 || s.websocket.listener != nil)
-		s.mu.Unlock()
-		if ok {
-			return true
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return false
+	return s.readyForConnections(dur) == nil
 }
 
 // Quick utility to function to tell if the server supports headers.
@@ -3351,4 +3452,13 @@ func (s *Server) setFirstPingTimer(c *client) {
 	addDelay := rand.Int63n(int64(d / 5))
 	d += time.Duration(addDelay)
 	c.ping.tmr = time.AfterFunc(d, c.processPingTimer)
+}
+
+func (s *Server) updateRemoteSubscription(acc *Account, sub *subscription, delta int32) {
+	s.updateRouteSubscriptionMap(acc, sub, delta)
+	if s.gateway.enabled {
+		s.gatewayUpdateSubInterest(acc.Name, sub, delta)
+	}
+
+	s.updateLeafNodes(acc, sub, delta)
 }

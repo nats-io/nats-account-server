@@ -422,8 +422,8 @@ Note the use of `docker.for.mac.host.internal` for the mac host, and update that
 
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
-[Build-Status-Url]: https://travis-ci.org/nats-io/nats-account-server
-[Build-Status-Image]: https://travis-ci.org/nats-io/nats-account-server.svg?branch=master
+[Build-Status-Url]: https://travis-ci.com/nats-io/nats-account-server
+[Build-Status-Image]: https://travis-ci.com/nats-io/nats-account-server.svg?branch=master
 [Coverage-Url]: https://coveralls.io/r/nats-io/nats-account-server?branch=master
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-account-server/badge.svg?branch=master
 [ReportCard-Url]: https://goreportcard.com/report/nats-io/nats-account-server

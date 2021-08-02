@@ -19,7 +19,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -29,6 +32,8 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 )
+
+var tempRoot = filepath.Join(os.TempDir(), "nats-server")
 
 // So we can pass tests and benchmarks..
 type tLogger interface {
@@ -266,7 +271,7 @@ func setupConnWithUserPass(t tLogger, c net.Conn, username, password string) (se
 	cs := fmt.Sprintf("CONNECT {\"verbose\":%v,\"pedantic\":%v,\"tls_required\":%v,\"protocol\":1,\"user\":%q,\"pass\":%q}\r\n",
 		false, false, false, username, password)
 	sendProto(t, c, cs)
-	return sendCommand(t, c), expectCommand(t, c)
+	return sendCommand(t, c), expectLefMostCommand(t, c)
 }
 
 type sendFun func(string)
@@ -286,6 +291,14 @@ func expectCommand(t tLogger, c net.Conn) expectFun {
 	}
 }
 
+// Closure version for easier reading
+func expectLefMostCommand(t tLogger, c net.Conn) expectFun {
+	var buf []byte
+	return func(re *regexp.Regexp) []byte {
+		return expectLeftMostResult(t, c, re, &buf)
+	}
+}
+
 // Send the protocol command to the server.
 func sendProto(t tLogger, c net.Conn, op string) {
 	n, err := c.Write([]byte(op))
@@ -298,6 +311,7 @@ func sendProto(t tLogger, c net.Conn, op string) {
 }
 
 var (
+	anyRe     = regexp.MustCompile(`.*`)
 	infoRe    = regexp.MustCompile(`INFO\s+([^\r\n]+)\r\n`)
 	pingRe    = regexp.MustCompile(`^PING\r\n`)
 	pongRe    = regexp.MustCompile(`^PONG\r\n`)
@@ -335,6 +349,41 @@ const (
 	rsubIndex          = 2
 	replyAndQueueIndex = 3
 )
+
+// Test result from server against regexp and return left most match
+func expectLeftMostResult(t tLogger, c net.Conn, re *regexp.Regexp, buf *[]byte) []byte {
+	recv := func() []byte {
+		expBuf := make([]byte, 32768)
+		// Wait for commands to be processed and results queued for read
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := c.Read(expBuf)
+		c.SetReadDeadline(time.Time{})
+
+		if n <= 0 && err != nil {
+			stackFatalf(t, "Error reading from conn: %v\n", err)
+		}
+		return expBuf[:n]
+	}
+	if len(*buf) == 0 {
+		*buf = recv()
+	}
+	emptyCnt := 0
+	for {
+		result := re.Find(*buf)
+		if result == nil {
+			emptyCnt++
+			if emptyCnt > 5 {
+				stackFatalf(t, "Reading empty data too often\n")
+			}
+			*buf = append(*buf, recv()...)
+		} else {
+			emptyCnt = 0
+			cutIdx := strings.Index(string(*buf), string(result)) + len(result)
+			*buf = (*buf)[cutIdx:]
+			return result
+		}
+	}
+}
 
 // Test result from server against regexp
 func expectResult(t tLogger, c net.Conn, re *regexp.Regexp) []byte {
@@ -553,4 +602,47 @@ func nextServerOpts(opts *server.Options) *server.Options {
 	nopts.Cluster.Port++
 	nopts.HTTPPort++
 	return nopts
+}
+
+func createDir(t *testing.T, prefix string) string {
+	t.Helper()
+	if err := os.MkdirAll(tempRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ioutil.TempDir(tempRoot, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func createFile(t *testing.T, prefix string) *os.File {
+	t.Helper()
+	if err := os.MkdirAll(tempRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return createFileAtDir(t, tempRoot, prefix)
+}
+
+func createFileAtDir(t *testing.T, dir, prefix string) *os.File {
+	t.Helper()
+	f, err := ioutil.TempFile(dir, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func removeDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removeFile(t *testing.T, p string) {
+	t.Helper()
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
 }
