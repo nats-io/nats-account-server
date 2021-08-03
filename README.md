@@ -6,7 +6,7 @@
 [![ReportCard][ReportCard-Image]][ReportCard-Url]
 [![Build][Build-Status-Image]][Build-Status-Url]
 [![Coverage][Coverage-Image]][Coverage-Url]
-[![Version](https://d25lcipzij17d.cloudfront.net/badge.svg?id=go&type=5&v=0.8.4)](https://github.com/nats-io/nats-account-server/releases/tag/v0.8.4)
+[![Version](https://d25lcipzij17d.cloudfront.net/badge.svg?id=go&type=5&v=1.0.0)](https://github.com/nats-io/nats-account-server/releases/tag/v1.0.0)
 
 A simple HTTP server to host account JWTs for [nats-server 2.0](https://nats.io) account authentication.
 
@@ -392,6 +392,8 @@ This project uses go modules and provides a make file. You should be able to sim
 % cd nats-account-server
 % make
 ```
+
+**Note:** Since changes to this project are not too frequent, it is possible that when you download the source and build the server, the tooling used to check code (staticcheck) finds issues that were not present the last time a commit was pushed. If that is the case, open an issue or if you are able, submit a PR with a fix. Thank you!
 
 Use `make test` to run the tests, and `make install` to install.
 
