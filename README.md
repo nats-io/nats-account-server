@@ -8,6 +8,16 @@
 [![Coverage][Coverage-Image]][Coverage-Url]
 [![Version](https://d25lcipzij17d.cloudfront.net/badge.svg?id=go&type=5&v=0.8.4)](https://github.com/nats-io/nats-account-server/releases/tag/v0.8.4)
 
+## Usage Recommendation :warning:
+
+If you are creating a new NATS deployment we highly recommend using the internal
+[NATS Resolver](https://docs.nats.io/nats-server/configuration/securing_nats/jwt/resolver#nats-based-resolver)
+for a much simpler and easy to manage account resolution system.
+
+This account server is functional and still serves as a good reference to build upon for custom account resolution.
+ 
+## The NATS Account Server
+
 A simple HTTP server to host account JWTs for [nats-server 2.0](https://nats.io) account authentication.
 
 NATS 2.0 introduced the concept of accounts to provide secure multi-tenancy through separate subject spaces.
