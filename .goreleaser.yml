@@ -29,8 +29,6 @@ builds:
   main: .
   binary: nats-account-server
 
-  lang: go
-
 archives:
   - id: nats-account-server
     wrap_in_directory: true
