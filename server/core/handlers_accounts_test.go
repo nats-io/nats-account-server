@@ -484,9 +484,9 @@ func selfSignAccount(t *testing.T, accountKey nkeys.KeyPair, tag string) []byte 
 	account := jwt.NewAccountClaims(pubKey)
 	account.Tags.Add(tag)
 	account.Expires = time.Now().Unix() + 10000
-	jwt, err := account.Encode(accountKey) // self signed
+	token, err := account.Encode(accountKey) // self signed
 	require.NoError(t, err)
-	return []byte(jwt)
+	return []byte(token)
 }
 
 func selfSignedAcctJWT(t *testing.T) (pubKey string, key nkeys.KeyPair, acctJWT []byte) {
@@ -508,9 +508,9 @@ func TestSignAccount(t *testing.T) {
 	_, err = testEnv.NC.Subscribe("foo", func(msg *nats.Msg) {
 		claim, err := jwt.DecodeAccountClaims(string(msg.Data))
 		require.NoError(t, err)
-		jwt, err := claim.Encode(testEnv.OperatorKey)
+		token, err := claim.Encode(testEnv.OperatorKey)
 		require.NoError(t, err)
-		msg.Respond([]byte(jwt))
+		msg.Respond([]byte(token))
 	})
 	require.NoError(t, err)
 
@@ -552,9 +552,9 @@ func TestSignAccountMultiple(t *testing.T) {
 	_, err = testEnv.NC.Subscribe("foo", func(msg *nats.Msg) {
 		claim, err := jwt.DecodeAccountClaims(string(msg.Data))
 		require.NoError(t, err)
-		jwt, err := claim.Encode(testEnv.OperatorKey)
+		token, err := claim.Encode(testEnv.OperatorKey)
 		require.NoError(t, err)
-		msg.Respond([]byte(jwt))
+		msg.Respond([]byte(token))
 	})
 	require.NoError(t, err)
 
@@ -580,7 +580,7 @@ func TestSignAccountMultiple(t *testing.T) {
 		msg, err := ioutil.ReadAll(resp.Body)
 		require.NoError(t, err)
 		defer resp.Body.Close()
-		t.Log(string(msg))
+		//t.Log(string(msg))
 
 		claim, err := jwt.DecodeAccountClaims(string(msg))
 		require.NoError(t, err)
