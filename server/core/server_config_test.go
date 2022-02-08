@@ -290,14 +290,14 @@ func TestNATSFlags(t *testing.T) {
 	body, err := ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	jwt := string(body)
-	require.Equal(t, cd, jwt)
+	token := string(body)
+	require.Equal(t, cd, token)
 
 	server.nats.Flush()
 	testEnv.NC.Flush()
 
 	lock.Lock()
-	require.Equal(t, notificationJWT, string(jwt))
+	require.Equal(t, notificationJWT, token)
 	lock.Unlock()
 }
 

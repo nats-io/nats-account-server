@@ -2,11 +2,7 @@
 build: fmt check compile
 
 fmt:
-	#misspell -locale US .
-	gofmt -s -w main.go
-	gofmt -s -w server/conf/*.go
-	gofmt -s -w server/core/*.go
-	gofmt -s -w server/store/*.go
+	goimports -w main.go
 	goimports -w server/conf/*.go
 	goimports -w server/core/*.go
 	goimports -w server/store/*.go
@@ -19,7 +15,6 @@ check:
 
 update:
 	go get -u honnef.co/go/tools/cmd/staticcheck
-	go get -u github.com/client9/misspell/cmd/misspell
 
 compile:
 	go build ./...
@@ -35,7 +30,6 @@ cover: test
 
 
 test: fmt check
-	go mod vendor
 	rm -rf ./cover.out
 	go test -tags test -race -coverpkg=./server/... -coverprofile=./coverage.out ./...
 
