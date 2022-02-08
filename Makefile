@@ -30,7 +30,6 @@ cover: test
 
 
 test: fmt check
-	go mod vendor
 	rm -rf ./cover.out
 	go test -tags test -race -coverpkg=./server/... -coverprofile=./coverage.out ./...
 
