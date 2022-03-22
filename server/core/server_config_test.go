@@ -22,12 +22,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
-	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 )
@@ -238,8 +237,6 @@ func TestStartWithBadConfigFileFlag(t *testing.T) {
 }
 
 func TestNATSFlags(t *testing.T) {
-	lock := sync.Mutex{}
-
 	// Setup the full environment, but we will make another server to
 	// test flags
 	testEnv, err := SetupTestServer(conf.DefaultServerConfig(), false, true)
@@ -277,11 +274,7 @@ func TestNATSFlags(t *testing.T) {
 
 	notificationJWT := ""
 	subject := fmt.Sprintf(accountNotificationFormat, apub)
-	_, err = testEnv.NC.Subscribe(subject, func(m *nats.Msg) {
-		lock.Lock()
-		notificationJWT = string(m.Data)
-		lock.Unlock()
-	})
+	sub, err := testEnv.NC.SubscribeSync(subject)
 	require.NoError(t, err)
 
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/accounts/%s?notify=true", server.port, apub))
@@ -296,9 +289,10 @@ func TestNATSFlags(t *testing.T) {
 	server.nats.Flush()
 	testEnv.NC.Flush()
 
-	lock.Lock()
+	msg, err := sub.NextMsg(time.Second)
+	require.NoError(t, err)
+	notificationJWT = string(msg.Data)
 	require.Equal(t, notificationJWT, token)
-	lock.Unlock()
 }
 
 func TestStartWithBadHostPortFlag(t *testing.T) {
