@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
-	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +37,6 @@ func TestServerReloadNotification(t *testing.T) {
 	if os.Getenv("TRAVIS_GO_VERSION") != "" {
 		return
 	}
-	lock := sync.Mutex{}
 
 	_, _, kp := CreateOperatorKey(t)
 	_, apub, _ := CreateAccountKey(t)
@@ -71,11 +68,7 @@ func TestServerReloadNotification(t *testing.T) {
 
 	notificationJWT := ""
 	subject := fmt.Sprintf(accountNotificationFormat, apub)
-	_, err = testEnv.NC.Subscribe(subject, func(m *nats.Msg) {
-		lock.Lock()
-		notificationJWT = string(m.Data)
-		lock.Unlock()
-	})
+	sub, err := testEnv.NC.SubscribeSync(subject)
 	require.NoError(t, err)
 
 	c.Tags.Add("red")
@@ -99,7 +92,8 @@ func TestServerReloadNotification(t *testing.T) {
 	testEnv.Server.nats.Flush()
 	testEnv.NC.Flush()
 
-	lock.Lock()
+	msg, err := sub.NextMsg(time.Second)
+	require.NoError(t, err)
+	notificationJWT = string(msg.Data)
 	require.Equal(t, notificationJWT, jwt)
-	lock.Unlock()
 }
