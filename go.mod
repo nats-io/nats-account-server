@@ -12,7 +12,7 @@ require (
 	github.com/nats-io/nkeys v0.3.0
 	github.com/rs/cors v1.8.2
 	github.com/stretchr/testify v1.7.0
-	golang.org/x/sys v0.0.0-20220318055525-2edf467146b5
+	golang.org/x/sys v0.1.0
 )
 
 require (
