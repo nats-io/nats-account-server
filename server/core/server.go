@@ -19,9 +19,9 @@ package core
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -313,7 +313,7 @@ func (server *AccountServer) readJWT(opPath string, jwtType string) ([]byte, err
 
 	server.logger.Noticef("loading %s from %s", jwtType, opPath)
 
-	if data, err := ioutil.ReadFile(opPath); err != nil {
+	if data, err := os.ReadFile(opPath); err != nil {
 		return nil, err
 	} else {
 		return data, nil
@@ -398,7 +398,7 @@ func (server *AccountServer) initializeFromPrimary() error {
 		return nil
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

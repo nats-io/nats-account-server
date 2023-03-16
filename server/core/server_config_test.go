@@ -18,7 +18,7 @@ package core
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +32,7 @@ import (
 )
 
 func TestStartWithDirFlag(t *testing.T) {
-	path, err := ioutil.TempDir(os.TempDir(), "store")
+	path, err := os.MkdirTemp(os.TempDir(), "store")
 	require.NoError(t, err)
 
 	flags := Flags{
@@ -57,7 +57,7 @@ func TestStartWithDirFlag(t *testing.T) {
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/help", server.port))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	help := string(body)
@@ -91,21 +91,21 @@ func CreateAccountKey(t *testing.T) ([]byte, string, nkeys.KeyPair) {
 }
 
 func CreateTestStoreForOperator(t *testing.T, name string) (string, func(string, string)) {
-	p, err := ioutil.TempDir("", "store_test")
+	p, err := os.MkdirTemp("", "store_test")
 	require.NoError(t, err)
 
 	return p, func(tk string, jwt string) {
 		file := filepath.Join(p, tk+".jwt")
-		err := ioutil.WriteFile(file, []byte(jwt), 0644)
+		err := os.WriteFile(file, []byte(jwt), 0644)
 		require.NoError(t, err)
 	}
 }
 
 func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
-	path, err := ioutil.TempDir(os.TempDir(), "store")
+	path, err := os.MkdirTemp(os.TempDir(), "store")
 	require.NoError(t, err)
 
-	file, err := ioutil.TempFile(os.TempDir(), "config")
+	file, err := os.CreateTemp(os.TempDir(), "config")
 	require.NoError(t, err)
 
 	configString := `
@@ -125,7 +125,7 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 	fullPath, err := conf.ValidateFilePath(file.Name())
 	require.NoError(t, err)
 
-	err = ioutil.WriteFile(fullPath, []byte(configString), 0644)
+	err = os.WriteFile(fullPath, []byte(configString), 0644)
 	require.NoError(t, err)
 
 	flags := Flags{
@@ -150,7 +150,7 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/help", server.port))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	help := string(body)
@@ -158,7 +158,7 @@ func TestHostPortFlagOverridesConfigFileFlag(t *testing.T) {
 }
 
 func TestStartWithConfigFileFlag(t *testing.T) {
-	file, err := ioutil.TempFile(os.TempDir(), "config")
+	file, err := os.CreateTemp(os.TempDir(), "config")
 	require.NoError(t, err)
 
 	configString := `
@@ -191,7 +191,7 @@ func TestStartWithConfigFileFlag(t *testing.T) {
 	fullPath, err := conf.ValidateFilePath(file.Name())
 	require.NoError(t, err)
 
-	err = ioutil.WriteFile(fullPath, []byte(configString), 0644)
+	err = os.WriteFile(fullPath, []byte(configString), 0644)
 	require.NoError(t, err)
 
 	flags := Flags{
@@ -280,7 +280,7 @@ func TestNATSFlags(t *testing.T) {
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/jwt/v1/accounts/%s?notify=true", server.port, apub))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	token := string(body)
@@ -320,10 +320,10 @@ func TestStartWithBadHostPortFlag(t *testing.T) {
 }
 
 func TestFlagOverridesConfig(t *testing.T) {
-	path, err := ioutil.TempDir(os.TempDir(), "store")
+	path, err := os.MkdirTemp(os.TempDir(), "store")
 	require.NoError(t, err)
 
-	file, err := ioutil.TempFile(os.TempDir(), "config")
+	file, err := os.CreateTemp(os.TempDir(), "config")
 	require.NoError(t, err)
 
 	configString := `
@@ -342,7 +342,7 @@ func TestFlagOverridesConfig(t *testing.T) {
 	fullPath, err := conf.ValidateFilePath(file.Name())
 	require.NoError(t, err)
 
-	err = ioutil.WriteFile(fullPath, []byte(configString), 0644)
+	err = os.WriteFile(fullPath, []byte(configString), 0644)
 	require.NoError(t, err)
 
 	flags := Flags{

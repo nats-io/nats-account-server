@@ -17,7 +17,7 @@
 package core
 
 import (
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -63,7 +63,7 @@ func TestJWTHelp(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	help := string(body)
@@ -81,7 +81,7 @@ func TestJWTHelpTLS(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	help := string(body)
@@ -99,7 +99,7 @@ func TestOperatorJWT(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	operator := string(body)
@@ -111,7 +111,7 @@ func TestOperatorJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
 	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
@@ -121,7 +121,7 @@ func TestOperatorJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
 	require.True(t, strings.Contains(operator, `"alg": "ed25519-nkey"`)) // header prefix doesn't change
@@ -138,7 +138,7 @@ func TestOperatorJWTV1(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	operator := string(body)
@@ -150,7 +150,7 @@ func TestOperatorJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
 	require.Equal(t, testEnv.Server.jwt.operatorJWT, operator)
@@ -160,7 +160,7 @@ func TestOperatorJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	operator = string(body)
 	require.True(t, strings.Contains(operator, `"alg": "ed25519-nkey"`)) // header prefix doesn't change
@@ -177,7 +177,7 @@ func TestOperatorJWTTLS(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	operator := string(body)
