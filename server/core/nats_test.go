@@ -19,7 +19,7 @@ package core
 import (
 	"crypto/sha256"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -321,7 +321,7 @@ func TestLookup(t *testing.T) {
 	require.True(t, received)
 	lock.Unlock()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, jwt, string(body))
 
@@ -340,7 +340,7 @@ func TestLookup(t *testing.T) {
 	require.False(t, received)
 	lock.Unlock()
 
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, jwt, string(body))
 }
@@ -392,13 +392,13 @@ func TestPack(t *testing.T) {
 
 func createConfFile(t *testing.T, content []byte) string {
 	t.Helper()
-	conf, err := ioutil.TempFile("", "")
+	conf, err := os.CreateTemp(os.TempDir(), "")
 	if err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
 	fName := conf.Name()
 	conf.Close()
-	if err := ioutil.WriteFile(fName, content, 0666); err != nil {
+	if err := os.WriteFile(fName, content, 0666); err != nil {
 		os.Remove(fName)
 		t.Fatalf("Error writing conf file: %v", err)
 	}
@@ -430,15 +430,15 @@ func TestFullDirNatsResolver(t *testing.T) {
 	// store jwt in account server
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
 	require.NoError(t, err)
-	sysAccJwt, err := ioutil.ReadFile(testEnv.SystemAccountJWTFile)
+	sysAccJwt, err := os.ReadFile(testEnv.SystemAccountJWTFile)
 	require.NoError(t, err)
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, string(sysAccJwt))
 	require.NoError(t, err)
 
-	dirA, err := ioutil.TempDir("", "srv-a")
+	dirA, err := os.MkdirTemp(os.TempDir(), "srv-a")
 	defer os.RemoveAll(dirA)
 	require.NoError(t, err)
-	err = ioutil.WriteFile(fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey2), []byte(accJwt2), 0666)
+	err = os.WriteFile(fmt.Sprintf("%s%c%s.jwt", dirA, os.PathSeparator, acctPubKey2), []byte(accJwt2), 0666)
 	require.NoError(t, err)
 	confA := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: %d
@@ -488,13 +488,13 @@ func TestCacheDirNatsResolver(t *testing.T) {
 	// store jwt in account server
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(acctPubKey1, accJwt1)
 	require.NoError(t, err)
-	sysAccJwt, err := ioutil.ReadFile(testEnv.SystemAccountJWTFile)
+	sysAccJwt, err := os.ReadFile(testEnv.SystemAccountJWTFile)
 	require.NoError(t, err)
 	err = testEnv.Server.JWTStore.(*natsserver.DirJWTStore).SaveAcc(testEnv.SystemAccountPubKey, string(sysAccJwt))
 	require.NoError(t, err)
 
 	port := atomic.LoadUint64(&port) - 1
-	dirA, err := ioutil.TempDir("", "srv-a")
+	dirA, err := os.MkdirTemp(os.TempDir(), "srv-a")
 	defer os.RemoveAll(dirA)
 	require.NoError(t, err)
 	confA := createConfFile(t, []byte(fmt.Sprintf(`

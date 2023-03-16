@@ -19,15 +19,15 @@ package core
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	jwtv1 "github.com/nats-io/jwt"
 	"github.com/nats-io/jwt/v2"
+	jwtv1 "github.com/nats-io/jwt/v2/v1compat"
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
@@ -143,7 +143,7 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	savedJWT := string(body)
@@ -172,7 +172,7 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
@@ -181,7 +181,7 @@ func TestUploadGetAccountJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	decoded := string(body)
@@ -275,7 +275,7 @@ func TestUploadGetAccountJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	savedJWT := string(body)
@@ -304,7 +304,7 @@ func TestUploadGetAccountJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0")) // header prefix doesn't change
 
@@ -313,7 +313,7 @@ func TestUploadGetAccountJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	decoded := string(body)
@@ -382,7 +382,7 @@ func TestExpiredJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Post(url, "application/json", bytes.NewBuffer([]byte(acctJWT)))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusBadRequest) // Already expired
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	message := string(body)
 
@@ -532,7 +532,7 @@ func TestSignAccount(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusOK)
 
 	// check if retrieved jwt is what was signed
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	t.Log(string(msg))
@@ -577,7 +577,7 @@ func TestSignAccountMultiple(t *testing.T) {
 		require.True(t, resp.StatusCode == http.StatusOK)
 
 		// check if retrieved jwt is what was signed
-		msg, err := ioutil.ReadAll(resp.Body)
+		msg, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		//t.Log(string(msg))
@@ -625,7 +625,7 @@ func TestSignAccountDelayed(t *testing.T) {
 	require.True(t, resp.StatusCode == http.StatusAccepted)
 
 	// check if retrieved jwt is what was signed
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	t.Log(string(msg))

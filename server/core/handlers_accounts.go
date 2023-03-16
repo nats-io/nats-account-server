@@ -18,7 +18,7 @@ package core
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -47,7 +47,7 @@ func (h *JwtHandler) loadAccountJWT(publicKey string) (bool, *jwt.AccountClaims)
 // Sends a nats notification
 func (h *JwtHandler) UpdateAccountJWT(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	h.logger.Tracef("%s: %s", r.RemoteAddr, r.URL.String())
-	theJWT, err := ioutil.ReadAll(r.Body)
+	theJWT, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
 		h.sendErrorResponse(http.StatusBadRequest, "bad JWT in request", "", err, w)

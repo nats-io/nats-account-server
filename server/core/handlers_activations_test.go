@@ -19,15 +19,15 @@ package core
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	jwtv1 "github.com/nats-io/jwt"
 	"github.com/nats-io/jwt/v2"
+	jwtv1 "github.com/nats-io/jwt/v2/v1compat"
 	"github.com/nats-io/nats-account-server/server/conf"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
@@ -91,7 +91,7 @@ func TestUploadGetActivationJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(getURL)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	savedJWT := string(body)
@@ -123,7 +123,7 @@ func TestUploadGetActivationJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.")) // header prefix doesn't change
 
@@ -132,7 +132,7 @@ func TestUploadGetActivationJWT(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	decoded := string(body)
@@ -209,7 +209,7 @@ func TestUploadGetActivationJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(getURL)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	savedJWT := string(body)
@@ -241,7 +241,7 @@ func TestUploadGetActivationJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(body), "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0")) // header prefix doesn't change
 
@@ -250,7 +250,7 @@ func TestUploadGetActivationJWTV1(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	decoded := string(body)

@@ -19,7 +19,6 @@ package core
 import (
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
@@ -112,7 +111,7 @@ func (ts *TestSetup) initKeys() error {
 	ts.OperatorPubKey = opk
 	operatorClaims := jwt.NewOperatorClaims(opk)
 
-	file, err := ioutil.TempFile(os.TempDir(), "operator")
+	file, err := os.CreateTemp(os.TempDir(), "operator")
 	if err != nil {
 		return err
 	}
@@ -122,7 +121,7 @@ func (ts *TestSetup) initKeys() error {
 		return err
 	}
 
-	err = ioutil.WriteFile(file.Name(), []byte(opJWT), 0644)
+	err = os.WriteFile(file.Name(), []byte(opJWT), 0644)
 	if err != nil {
 		return err
 	}
@@ -143,7 +142,7 @@ func (ts *TestSetup) initKeys() error {
 	ts.SystemAccountPubKey = apk
 	systemAccountClaims := jwt.NewAccountClaims(apk)
 
-	file, err = ioutil.TempFile(os.TempDir(), "sysacct")
+	file, err = os.CreateTemp(os.TempDir(), "sysacct")
 	if err != nil {
 		return err
 	}
@@ -153,7 +152,7 @@ func (ts *TestSetup) initKeys() error {
 		return err
 	}
 
-	err = ioutil.WriteFile(file.Name(), []byte(sysAcctJWT), 0644)
+	err = os.WriteFile(file.Name(), []byte(sysAcctJWT), 0644)
 	if err != nil {
 		return err
 	}
@@ -174,7 +173,7 @@ func (ts *TestSetup) initKeys() error {
 	ts.SystemUserPubKey = upk
 	systemUserClaims := jwt.NewUserClaims(upk)
 
-	file, err = ioutil.TempFile(os.TempDir(), "sysuser")
+	file, err = os.CreateTemp(os.TempDir(), "sysuser")
 	if err != nil {
 		return err
 	}
@@ -194,7 +193,7 @@ func (ts *TestSetup) initKeys() error {
 		return err
 	}
 
-	err = ioutil.WriteFile(file.Name(), creds, 0644)
+	err = os.WriteFile(file.Name(), creds, 0644)
 	if err != nil {
 		return err
 	}
@@ -266,7 +265,7 @@ func SetupTestServer(config *conf.AccountServerConfig, useTLS bool, enableNats b
 
 	// make sure to use a temp directory
 	if config.Store.Dir == "" || config.Store.Dir == "." {
-		config.Store.Dir, err = ioutil.TempDir(os.TempDir(), "store")
+		config.Store.Dir, err = os.MkdirTemp(os.TempDir(), "store")
 		if err != nil {
 			return nil, err
 		}
