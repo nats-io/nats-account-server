@@ -90,7 +90,7 @@ func TestUploadGetActivationJWT(t *testing.T) {
 	// get the remote copy
 	resp, err = testEnv.HTTP.Get(getURL)
 	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusOK)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
@@ -208,7 +208,7 @@ func TestUploadGetActivationJWTV1(t *testing.T) {
 	// get the remote copy
 	resp, err = testEnv.HTTP.Get(getURL)
 	require.NoError(t, err)
-	require.True(t, resp.StatusCode == http.StatusOK)
+	require.Equal(t, resp.StatusCode, http.StatusOK)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
