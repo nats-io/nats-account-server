@@ -26,11 +26,13 @@ import (
 	"testing"
 	"time"
 
-	jwtv1 "github.com/nats-io/jwt"
-	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-account-server/server/conf"
+
+	"github.com/nats-io/jwt/v2"
+	jwtv1 "github.com/nats-io/jwt/v2/v1compat"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+
 	"github.com/stretchr/testify/require"
 )
 
