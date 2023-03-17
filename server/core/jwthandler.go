@@ -126,7 +126,8 @@ func (h *JwtHandler) InitRouter(r *httprouter.Router) {
 	// replicas use a writable store, thus the extra check
 	if !h.jwtStore.IsReadOnly() {
 		r.POST("/jwt/v1/accounts/:pubkey", h.UpdateAccountJWT)
-		r.POST("/jwt/v1/activations", h.UpdateActivationJWT)
+		// activations are not supported
+		//r.POST("/jwt/v1/activations", h.UpdateActivationJWT)
 	}
 
 	if _, ok := h.jwtStore.(store.PackableJWTStore); ok {
@@ -137,7 +138,8 @@ func (h *JwtHandler) InitRouter(r *httprouter.Router) {
 	r.GET("/jwt/v1/accounts/", h.GetAccountJWT) // Server test point
 	r.GET("/jwt/v1/accounts", h.GetAccountJWT)  // Server test point
 
-	r.GET("/jwt/v1/activations/:hash", h.GetActivationJWT)
+	// activations are not supported
+	//r.GET("/jwt/v1/activations/:hash", h.GetActivationJWT)
 }
 
 // trace and respond with message
