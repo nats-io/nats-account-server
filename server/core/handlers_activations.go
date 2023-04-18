@@ -17,7 +17,7 @@
 package core
 
 import (
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 
@@ -36,7 +36,7 @@ func (h *JwtHandler) UpdateActivationJWT(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	theJWT, err := ioutil.ReadAll(r.Body)
+	theJWT, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
 		h.sendErrorResponse(http.StatusBadRequest, "bad activation JWT in request", "", err, w)

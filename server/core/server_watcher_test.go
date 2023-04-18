@@ -18,7 +18,7 @@ package core
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"testing"
@@ -60,7 +60,7 @@ func TestServerReloadNotification(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	jwt := string(body)
@@ -81,7 +81,7 @@ func TestServerReloadNotification(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(url)
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	jwt = string(body)

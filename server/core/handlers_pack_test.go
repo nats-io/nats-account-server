@@ -19,7 +19,7 @@ package core
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -97,7 +97,7 @@ func TestPackJWTs(t *testing.T) {
 	resp, err = testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack"))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	pack := string(body)
@@ -130,7 +130,7 @@ func TestPackJWTsWithMax(t *testing.T) {
 	resp, err := testEnv.HTTP.Get(testEnv.URLForPath("/jwt/v1/pack?max=2"))
 	require.NoError(t, err)
 	require.True(t, resp.StatusCode == http.StatusOK)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
 	pack := string(body)
@@ -159,7 +159,7 @@ func TestReplicatedInit(t *testing.T) {
 	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
-	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "prefix")
 	require.NoError(t, err)
 
 	replica, err := testEnv.CreateReplica(tempDir)
@@ -180,7 +180,7 @@ func TestReplicatedInit(t *testing.T) {
 		resp, err := testEnv.HTTP.Get(url)
 		require.NoError(t, err)
 		require.True(t, resp.StatusCode == http.StatusOK)
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, jwt, string(body))
 	}
@@ -193,7 +193,7 @@ func TestReplicatedInitWithMax(t *testing.T) {
 	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
-	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "prefix")
 	require.NoError(t, err)
 
 	replica, err := testEnv.CreateReplicaWithMaxPack(tempDir, 10)
@@ -217,7 +217,7 @@ func TestReplicatedInitWithMax(t *testing.T) {
 
 		// only count the ones that we have
 		if err == nil && resp.StatusCode == http.StatusOK {
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.Equal(t, jwt, string(body))
 			count++
@@ -234,7 +234,7 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
-	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "prefix")
 	require.NoError(t, err)
 
 	replica, err := testEnv.CreateReplicaWithMaxPack(tempDir, 0)
@@ -258,7 +258,7 @@ func TestReplicatedInitWithMaxZero(t *testing.T) {
 
 		// only count the ones that we have
 		if err == nil && resp.StatusCode == http.StatusOK {
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.Equal(t, jwt, string(body))
 			count++
@@ -275,7 +275,7 @@ func TestReplicatedInitPrimaryDown(t *testing.T) {
 	pubKeys := initAndPostNAccounts(t, testEnv, 100)
 
 	// Now start up the replica
-	tempDir, err := ioutil.TempDir(os.TempDir(), "prefix")
+	tempDir, err := os.MkdirTemp(os.TempDir(), "prefix")
 	require.NoError(t, err)
 
 	// Turn off the main server, so we only get local content from the replica
@@ -299,7 +299,7 @@ func TestReplicatedInitPrimaryDown(t *testing.T) {
 
 		// only count the ones that we have
 		if err == nil && resp.StatusCode == http.StatusOK {
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.Equal(t, jwt, string(body))
 			count++
