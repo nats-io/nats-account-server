@@ -8,7 +8,7 @@ require (
 	github.com/nats-io/jwt/v2 v2.5.2
 	github.com/nats-io/nats-server/v2 v2.10.3
 	github.com/nats-io/nats.go v1.31.0
-	github.com/nats-io/nkeys v0.4.5
+	github.com/nats-io/nkeys v0.4.6
 	github.com/rs/cors v1.10.1
 	github.com/stretchr/testify v1.7.0
 	golang.org/x/sys v0.13.0
