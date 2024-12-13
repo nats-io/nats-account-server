@@ -17,6 +17,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -293,13 +294,13 @@ const NscError = `support for direct access of the nsc folder has been removed` 
 func (server *AccountServer) createStore() (store.JWTStore, error) {
 	config := server.config.Store
 	if config.NSC != "" {
-		return nil, fmt.Errorf(NscError)
+		return nil, errors.New(NscError)
 	}
 	if config.ReadOnly {
-		return nil, fmt.Errorf(RoError)
+		return nil, errors.New(RoError)
 	}
 	if config.Dir == "" {
-		return nil, fmt.Errorf("store directory is required")
+		return nil, errors.New("store directory is required")
 	}
 	server.logger.Noticef("creating a store with cleanup functions at %s", config.Dir)
 	return natsserver.NewExpiringDirJWTStore(config.Dir, config.Shard, true, natsserver.NoDelete,
