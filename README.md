@@ -1,6 +1,9 @@
 ![NATS](logos/large-logo.png)
 
-# nats-account-server
+# ARCHIVED: nats-account-server
+
+> **Warning**
+> This repository has been archived and is no longer actively maintained. Please use the built-in [NATS Based Resolver](https://docs.nats.io/nats-server/configuration/securing_nats/jwt/resolver#nats-based-resolver) instead.
 
 [![License][License-Image]][License-Url]
 [![ReportCard][ReportCard-Image]][ReportCard-Url]
